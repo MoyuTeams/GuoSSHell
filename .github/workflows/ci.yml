@@ -1,0 +1,257 @@
+name: 检查、测试与多平台发版
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+  PUB_HOSTED_URL: https://pub.dev
+  COCOAPODS_DISABLE_STATS: 'true'
+
+jobs:
+  metadata:
+    name: 确认版本与目标
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.meta.outputs.matrix }}
+      android_matrix: ${{ steps.meta.outputs.android_matrix }}
+      build_allowed: ${{ steps.meta.outputs.build_allowed }}
+      version: ${{ steps.meta.outputs.version }}
+      build_name: ${{ steps.meta.outputs.build_name }}
+      build_number: ${{ steps.meta.outputs.build_number }}
+      release: ${{ steps.meta.outputs.release }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      commit: ${{ steps.meta.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: 校验版本并导出矩阵
+        id: meta
+        run: python scripts/ci/metadata.py
+      - name: 检查 Python 语法
+        run: python -m compileall -q scripts/ci
+      - name: 验证 CI 辅助脚本
+        if: >-
+          steps.meta.outputs.build_allowed == 'true' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' ||
+           (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
+        run: python -m unittest discover -s scripts/ci/tests -v
+      - name: 检查工作流语法
+        run: python scripts/ci/actionlint.py
+
+  checks:
+    name: 代码检查 / ${{ matrix.os }}
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    env:
+      GUOSH_CI_FULL_CHECKS: >-
+        ${{ needs.metadata.outputs.build_allowed == 'true' &&
+            (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+            (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' ||
+             (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+      - name: Rust 格式与静态检查
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Rust 单元测试
+        if: env.GUOSH_CI_FULL_CHECKS == 'true'
+        run: cargo test --workspace --locked
+      - name: Flutter 静态检查
+        run: flutter analyze --no-pub
+      - name: Flutter 单元测试
+        if: env.GUOSH_CI_FULL_CHECKS == 'true'
+        run: flutter test --no-pub --coverage --reporter expanded
+      - name: 生产 SSH 环回验证
+        if: env.GUOSH_CI_FULL_CHECKS == 'true'
+        run: cargo run --locked -p rshell-m0 --example m0_loopback
+      - name: 保存测试覆盖率
+        if: always() && env.GUOSH_CI_FULL_CHECKS == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.os }}
+          path: coverage/lcov.info
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: true
+
+  build:
+    name: 构建 / ${{ matrix.id }}
+    needs: [metadata, checks]
+    if: >-
+      needs.metadata.outputs.build_allowed == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' ||
+       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.metadata.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      GUOSH_CI_VERSION: ${{ needs.metadata.outputs.version }}
+      GUOSH_CI_BUILD_NAME: ${{ needs.metadata.outputs.build_name }}
+      GUOSH_CI_BUILD_NUMBER: ${{ needs.metadata.outputs.build_number }}
+      GUOSH_CI_COMMIT: ${{ needs.metadata.outputs.commit }}
+      GUOSH_CI_RELEASE: ${{ needs.metadata.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: 核对构建来源与提交
+        run: python scripts/ci/policy.py
+      - uses: ./.github/actions/setup
+        with:
+          rust-targets: ${{ matrix.rust_targets }}
+          cache-key: ${{ matrix.id }}
+      - name: 编译并打包完整应用
+        env:
+          GUOSH_CI_TARGET: ${{ matrix.id }}
+        run: python scripts/ci/build.py
+      - name: 保存应用与校验清单
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: app-${{ matrix.id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: true
+
+  android:
+    name: 签名构建 / Android
+    needs: [metadata, checks]
+    if: >-
+      needs.metadata.outputs.build_allowed == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' ||
+       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')))
+    environment: android-signing
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.metadata.outputs.android_matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      GUOSH_CI_VERSION: ${{ needs.metadata.outputs.version }}
+      GUOSH_CI_BUILD_NAME: ${{ needs.metadata.outputs.build_name }}
+      GUOSH_CI_BUILD_NUMBER: ${{ needs.metadata.outputs.build_number }}
+      GUOSH_CI_COMMIT: ${{ needs.metadata.outputs.commit }}
+      GUOSH_CI_RELEASE: ${{ needs.metadata.outputs.release }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: 核对签名来源与提交
+        run: python scripts/ci/policy.py
+      - uses: ./.github/actions/setup
+        with:
+          rust-targets: ${{ matrix.rust_targets }}
+          cache-key: ${{ matrix.id }}
+      - name: Android Java 环境
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: 准备 Android 发布签名
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: python scripts/ci/android_signing.py
+      - name: 编译并打包完整应用
+        env:
+          GUOSH_CI_TARGET: ${{ matrix.id }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: python scripts/ci/build.py
+      - name: 保存应用与校验清单
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: app-${{ matrix.id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: true
+      - name: 删除临时签名文件
+        if: always()
+        run: python scripts/ci/android_signing.py clean
+
+  ci:
+    name: CI 全部通过
+    if: always()
+    needs: [metadata, checks, build, android]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 核对受信构建或仅静态检查的结果
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python scripts/ci/policy.py results
+
+  release:
+    name: 发布 GitHub Release
+    needs: [metadata, ci]
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') &&
+      needs.metadata.outputs.build_allowed == 'true' && needs.metadata.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: 核对发布来源与提交
+        env:
+          GUOSH_CI_COMMIT: ${{ needs.metadata.outputs.commit }}
+        run: python scripts/ci/policy.py release
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: app-*
+          path: release-artifacts
+          merge-multiple: true
+      - name: 校验完整矩阵并发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GUOSH_CI_VERSION: ${{ needs.metadata.outputs.version }}
+          GUOSH_CI_COMMIT: ${{ needs.metadata.outputs.commit }}
+          GUOSH_CI_PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
+        run: python scripts/ci/release.py release-artifacts

@@ -28,6 +28,16 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>GuoSSHell 需要访问本地网络才能连接内网的 SSH 服务器。未授权时连接会一直无响应。</string>
+	<key>NFCReaderUsageDescription</key>
+	<string>GuoSSHell 用 NFC 读取 OpenPGP 卡，用卡上的密钥登录 SSH 服务器。</string>
+	<key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key>
+	<array>
+		<string>D27600012401</string>
+	</array>
+	<!-- 安全密钥（FIDO2）的 RP ID：App 经 Associated Domains（webcredentials:）关联的域名。
+	     留空则不提供安全密钥。 -->
+	<key>GUOSHSecurityKeyRelyingParty</key>
+	<string></string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

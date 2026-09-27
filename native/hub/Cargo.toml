@@ -3,6 +3,7 @@
 name = "hub"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [lib]
 # `lib` is required for non-library targets,
@@ -23,6 +24,26 @@ serde = { version = "1.0.219", features = ["derive"] }
 tokio = { version = "1.45.0", features = ["rt", "macros", "time", "net", "sync", "io-util"] }
 # 边界上的密码在 Rust 侧接收处立刻包成 SecretString（PLAN.md §2.2）。
 secrecy = "0.10.3"
+# 边界上的连接 id 是字符串，解析成上游的 ConnectionId(Uuid)；私钥 id 也用它生成。
+uuid = { version = "1", features = ["v4"] }
+# 钥匙串里的私钥信封与偏好文件。
+serde_json = "1"
+# 私钥原文用完即清零。
+zeroize = "1"
+keyring-core = "1.0.0"
+# OpenPGP 卡（M3b）：APDU 层与它的卡后端 trait；卡签名经上游 ExternalSigner 接入认证。
+openpgp-card = "0.7.0"
+card-backend = "0.2.0"
+async-trait = "0.1"
+# 卡上 RSA 签名的摘要：旧服务器只认 ssh-rsa（SHA-1）；SHA-2 用 ssh-key 带的 sha2。
+sha1 = "0.11"
+# debug 构建与测试里的模拟卡用它们签 RSA / P-256（与 russh 用的是同一版本）。
+rsa = "0.10.0-rc.18"
+p256 = { version = "0.14", features = ["ecdsa"] }
+# 安全密钥（M3d）：WebAuthn 注册结果（attestation object、COSE 公钥）是 CBOR；
+# clientDataJSON 里的 challenge 是 base64url。
+ciborium = "0.2"
+base64ct = { version = "1", features = ["alloc"] }
 
 # 业务内核唯一入口：`rshell-m0`（根 workspace 成员，path 依赖）。
 # 它再导出 rshell-core / rshell-session，并把上游 git 依赖的 rev pin 在
@@ -30,6 +51,44 @@ secrecy = "0.10.3"
 # iOS 的 keyring `protected` feature 也由它那边的 target 依赖经
 # feature unification 打开，这里不需要重复声明。
 rshell-m0 = { path = "../../rust" }
+
+# 私钥存在 Apple 的 protected data 钥匙串（本机与 iCloud 两个存储，keys.rs）；
+# 版本与 keyring 4.1.5 用的一致（rust/Cargo.toml）。
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+apple-native-keyring-store = { version = "1.0.1", features = ["protected"] }
+# OpenPGP 卡经 CryptoTokenKit 访问（iOS 没有 PC/SC）。
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSBundle", "NSData", "NSEnumerator", "NSError", "NSProcessInfo", "NSSet", "NSString"] }
+objc2-crypto-token-kit = { version = "0.3.2", default-features = false, features = ["std", "TKSmartCard", "TKSmartCardSlotNFCSession", "block2", "bitflags"] }
+block2 = "0.6"
+# 安全密钥经 AuthenticationServices（系统界面在主线程上跑）。
+objc2-authentication-services = { version = "0.3.2", default-features = false, features = ["std", "block2", "ASAuthorization", "ASAuthorizationController", "ASAuthorizationCredential", "ASAuthorizationRequest", "ASAuthorizationProvider", "ASAuthorizationPublicKeyCredentialAssertion", "ASAuthorizationPublicKeyCredentialAssertionRequest", "ASAuthorizationPublicKeyCredentialConstants", "ASAuthorizationPublicKeyCredentialDescriptor", "ASAuthorizationPublicKeyCredentialParameters", "ASAuthorizationPublicKeyCredentialRegistration", "ASAuthorizationPublicKeyCredentialRegistrationRequest", "ASAuthorizationSecurityKeyPublicKeyCredentialAssertion", "ASAuthorizationSecurityKeyPublicKeyCredentialAssertionRequest", "ASAuthorizationSecurityKeyPublicKeyCredentialDescriptor", "ASAuthorizationSecurityKeyPublicKeyCredentialProvider", "ASAuthorizationSecurityKeyPublicKeyCredentialRegistration", "ASAuthorizationSecurityKeyPublicKeyCredentialRegistrationRequest", "ASAuthorizationError", "ASCOSEConstants", "ASFoundation", "ASPublicKeyCredential"] }
+dispatch2 = "0.3"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "UIApplication", "UIResponder", "UIScene", "UISceneDefinitions", "UIView", "UIWindow", "UIWindowScene"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow"] }
+# 没有钥匙串访问组的构建用登录钥匙串（legacy keychain）存私钥；判断缺不缺访问组要看
+# protected 存储回的系统错误码。
+apple-native-keyring-store = { version = "1.0.1", features = ["keychain", "protected"] }
+security-framework = "3"
+
+[target.'cfg(any(target_os = "android", target_os = "linux", target_os = "windows"))'.dependencies]
+keyring = "=4.1.5"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "=1.0.0"
+jni = "0.21.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[dev-dependencies]
+# 暂停的时钟（连接时限的测试）。
+tokio = { version = "1.45.0", features = ["test-util"] }
+keyring-core = { version = "1.0.0", features = ["sample"] }
 
 # Uncomment below to target the web.
 # tokio_with_wasm = { version = "0.8.5", features = ["rt", "macros", "time"] }

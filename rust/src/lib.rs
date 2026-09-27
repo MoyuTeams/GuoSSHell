@@ -3,8 +3,8 @@
 //! 这不是产品代码。它存在的唯一目的，是把「Flutter 前端 + Rust 业务内核」路线上
 //! **两件无法靠读源码确认的事**变成实跑结果：
 //!
-//! * **M0**：`NativeSshTransport`（russh + `tokio::net::TcpStream` + `request_pty`
-//!   + `request_shell`）能否为 `aarch64-apple-ios` 编译并链接；并且在 iOS 上
+//! * **M0**：`NativeSshTransport`（russh + `tokio::net::TcpStream` + `request_pty` +
+//!   `request_shell`）能否为 `aarch64-apple-ios` 编译并链接；并且在 iOS 上
 //!   **不触碰** `fork` / `openpty` / `posix_spawn`。这是「业务仍然用 Rust 跑」的
 //!   全部前提——SSH 通了，终端状态机和渲染帧才有意义。
 //!
@@ -14,7 +14,6 @@
 //! 两个函数都不依赖 `rshell-ui`（GTK/Relm4，22812 行），也不依赖 `rshell-storage`
 //! 的 keyring 路径：M0 阶段凭证写死在 Rust 侧，`AuthPlan::from_secret` 不读 vault。
 
-use std::ffi::{CStr, CString, c_char};
 use std::sync::Arc;
 
 // 对下游（`native/hub`，rinf 的信号层）再导出上游内核：
@@ -22,6 +21,30 @@ use std::sync::Arc;
 // hub 通过这里拿类型，避免第二处 rev 需要同步升级。
 pub use rshell_core;
 pub use rshell_session;
+pub use rshell_storage;
+// 与 rshell-session 锁在同一版本（见 Cargo.toml）：hub 解析私钥用它，类型与上游一致。
+pub use russh;
+
+/// 把平台的钥匙串设为 keyring 的默认存储（`SystemCredentialVault` 经它读写）。
+///
+/// keyring v1 在 macOS / Windows / Linux 上会自己注册，iOS 上什么都不做——
+/// 这里补上 iOS 的 protected data store 与 Android 的 Keystore 加密存储。
+/// Android 宿主必须先初始化应用上下文；其他平台由 keyring 选择系统后端。
+pub fn register_credential_store() -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        let store = apple_native_keyring_store::protected::Store::new()
+            .map_err(|error| format!("keychain store: {error}"))?;
+        keyring_core::set_default_store(store);
+    }
+    #[cfg(target_os = "android")]
+    {
+        let store = android_native_keyring_store::Store::new()
+            .map_err(|error| format!("Android credential store: {error}"))?;
+        keyring_core::set_default_store(store);
+    }
+    Ok(())
+}
 
 use rshell_core::{
     AuthenticationKind, ConnectionProfile, HostKeyDecision, InteractionRequest,
@@ -167,13 +190,7 @@ pub fn blocking_smoke(
         .enable_all()
         .build()
         .map_err(|error| format!("tokio: {error}"))?;
-    runtime.block_on(smoke(
-        host,
-        port,
-        username,
-        password,
-        known_hosts_path,
-    ))
+    runtime.block_on(smoke(host, port, username, password, known_hosts_path))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -251,293 +268,17 @@ pub fn frame_is_send() -> Result<String, String> {
     Ok(format!("frames-moved-across-thread rows={rows}"))
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// C ABI：给 Swift 壳（M0）或 rinf（M1+）调
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// 返回堆分配的 NUL 结尾 UTF-8 字符串，调用方必须用 [`rshell_m0_free`] 释放。
-#[unsafe(no_mangle)]
-pub extern "C" fn rshell_m0_smoke(
-    host: *const c_char,
-    port: u16,
-    username: *const c_char,
-    password: *const c_char,
-    known_hosts_path: *const c_char,
-) -> *mut c_char {
-    let text = |pointer: *const c_char| -> Result<String, String> {
-        if pointer.is_null() {
-            return Err("null pointer".to_owned());
-        }
-        // SAFETY: 调用方保证传入的是有效 NUL 结尾 C 字符串。
-        unsafe { CStr::from_ptr(pointer) }
-            .to_str()
-            .map(str::to_owned)
-            .map_err(|error| format!("utf8: {error}"))
-    };
-
-    let result = (|| -> Result<String, String> {
-        blocking_smoke(
-            &text(host)?,
-            port,
-            &text(username)?,
-            &text(password)?,
-            &text(known_hosts_path)?,
-        )
-    })();
-
-    let payload = match result {
-        Ok(value) => format!("{{\"ok\":true,\"text\":{}}}", escape(&value)),
-        Err(error) => format!("{{\"ok\":false,\"error\":{}}}", escape(&error)),
-    };
-    CString::new(payload)
-        .map(CString::into_raw)
-        .unwrap_or(std::ptr::null_mut())
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rshell_m0_engine_smoke() -> *mut c_char {
-    let payload = match engine_smoke() {
-        Ok(value) => format!("{{\"ok\":true,\"text\":{}}}", escape(&value)),
-        Err(error) => format!("{{\"ok\":false,\"error\":{}}}", escape(&error)),
-    };
-    CString::new(payload)
-        .map(CString::into_raw)
-        .unwrap_or(std::ptr::null_mut())
-}
-
-/// # Safety
-/// `pointer` 必须来自本库的 `rshell_m0_*` 函数且未被释放过。
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rshell_m0_free(pointer: *mut c_char) {
-    if !pointer.is_null() {
-        // SAFETY: 由 CString::into_raw 产生。
-        drop(unsafe { CString::from_raw(pointer) });
-    }
-}
-
-/// 最小 JSON 字符串转义，避免为探针引入额外依赖。
-fn escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
-    out.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            control if (control as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", control as u32));
-            }
-            other => out.push(other),
-        }
-    }
-    out.push('"');
-    out
-}
-
-/// M2 诊断（第二步）：在真机上把主机密钥管线**完整走两遍**——
-/// ① 假主机（基线）；② 真实主机/端口。都写到一次性探针文件
-/// （不碰真实 known_hosts），is_known → 交互确认 → 落盘全轮。
-/// 上游把 HostKeyError 映射成 `Platform` 时丢掉了具体步骤，这里原样带回。
-pub async fn diagnose_host_key_pipeline(
-    base_dir: &str,
-    real_host: &str,
-    real_port: u16,
-) -> String {
-    use rshell_core::{HostKeyDecision, InteractionResponse};
-    use rshell_session::{KnownHostsVerifier, interaction_channel};
-
-    let Ok(dummy) = russh::keys::parse_public_key_base64(
-        "AAAAC3NzaC1lZDI1NTE5AAAAILagOJFgwaMNhBWQINinKOXmqS4Gh5NgxgriXwdOoINJ",
-    ) else {
-        return "diagnose: internal (dummy key unavailable)".to_owned();
-    };
-
-    // ① 基线：假主机 + 独立探针文件。
-    let probe_path = format!("{base_dir}/diagnose-known_hosts");
-    let _ = std::fs::remove_file(&probe_path);
-    let baseline = verify_round(
-        &KnownHostsVerifier::new(&probe_path),
-        "diagnose.invalid",
-        22,
-        &dummy,
-    )
-    .await;
-    let _ = std::fs::remove_file(&probe_path);
-
-    // ② 真实主机/端口 + 独立探针文件：隔离「真实主机名/端口」变量。
-    let real_probe_path = format!("{base_dir}/diagnose-known_hosts-real");
-    let _ = std::fs::remove_file(&real_probe_path);
-    let real = verify_round(
-        &KnownHostsVerifier::new(&real_probe_path),
-        real_host,
-        real_port,
-        &dummy,
-    )
-    .await;
-    let _ = std::fs::remove_file(&real_probe_path);
-
-    format!("① 基线(假主机): {baseline}；② 真实主机({real_host}:{real_port}): {real}")
-}
-
-async fn verify_round(
-    verifier: &KnownHostsVerifier,
-    host: &str,
-    port: u16,
-    key: &russh::keys::PublicKey,
-) -> String {
-    let (broker, mut interactions) = interaction_channel();
-    let responder = {
-        let broker = broker.clone();
-        tokio::spawn(async move {
-            while let Some((id, _prompt)) = interactions.recv().await {
-                let _ = broker.respond(
-                    id,
-                    InteractionResponse::HostKey(HostKeyDecision::AcceptAndStore),
-                );
-            }
-        })
-    };
-    let outcome = verifier.verify(host, port, key, &broker).await;
-    responder.abort();
-    match outcome {
-        Ok(()) => "OK".to_owned(),
-        Err(error) => format!("FAILED: {error:?}"),
-    }
-}
-
-/// M2 诊断（第三步）：对真实服务器做一次**裸 russh 握手**，握手里的
-/// check_server_key 调用与 App 完全相同的 verifier + 交互回路，
-/// 但把 `HostKeyError` 原文（含具体 Storage/Interaction 步骤）逐条记录。
-/// 写 known_hosts 用一次性文件，不污染真实条目。
-pub async fn diagnose_real_handshake(
-    host: &str,
-    port: u16,
-    throwaway_known_hosts: &str,
-) -> String {
-    use rshell_core::{HostKeyDecision, InteractionRequest, InteractionResponse};
-    use rshell_session::{
-        InteractionBroker, KnownHostsVerifier, interaction_channel,
-    };
-    use std::sync::{Arc, Mutex};
-
-    struct DiagHandler {
-        verifier: KnownHostsVerifier,
-        host: String,
-        port: u16,
-        broker: InteractionBroker,
-        report: Arc<Mutex<Vec<String>>>,
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn engine_frame_serializes() {
+        let summary = super::engine_smoke().unwrap_or_else(|error| panic!("{error}"));
+        assert!(summary.starts_with("rows=24 "), "{summary}");
     }
 
-    impl russh::client::Handler for DiagHandler {
-        type Error = russh::Error;
-
-        async fn check_server_key(
-            &mut self,
-            key: &russh::keys::PublicKey,
-        ) -> Result<bool, Self::Error> {
-            let push = |entry: String| {
-                self.report
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(entry);
-            };
-            push(format!(
-                "server key presented: {} {}",
-                key.algorithm(),
-                key.fingerprint(russh::keys::HashAlg::Sha256)
-            ));
-            match self
-                .verifier
-                .verify(&self.host, self.port, key, &self.broker)
-                .await
-            {
-                Ok(()) => {
-                    push("verify: OK".to_owned());
-                    Ok(true)
-                }
-                Err(error) => {
-                    push(format!("verify FAILED: {error:?}"));
-                    Err(russh::Error::UnknownKey)
-                }
-            }
-        }
+    #[test]
+    fn frames_move_across_threads() {
+        let summary = super::frame_is_send().unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(summary, "frames-moved-across-thread rows=24");
     }
-
-    let _ = std::fs::remove_file(throwaway_known_hosts);
-    let report: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-
-    let verifier = KnownHostsVerifier::new(throwaway_known_hosts);
-    let (broker, mut interactions) = interaction_channel();
-    let responder = {
-        let broker = broker.clone();
-        let report = Arc::clone(&report);
-        tokio::spawn(async move {
-            while let Some((id, prompt)) = interactions.recv().await {
-                let response = match prompt {
-                    InteractionRequest::HostKey(_) => {
-                        InteractionResponse::HostKey(HostKeyDecision::AcceptAndStore)
-                    }
-                    other => {
-                        report
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .push(format!("unexpected interaction: {other:?}"));
-                        InteractionResponse::Cancel
-                    }
-                };
-                let _ = broker.respond(id, response);
-            }
-        })
-    };
-
-    let handler = DiagHandler {
-        verifier,
-        host: host.to_owned(),
-        port,
-        broker,
-        report: Arc::clone(&report),
-    };
-    let config = Arc::new(russh::client::Config {
-        inactivity_timeout: Some(std::time::Duration::from_secs(15)),
-        ..Default::default()
-    });
-
-    match tokio::time::timeout(std::time::Duration::from_secs(30), async move {
-        let stream = tokio::net::TcpStream::connect((host, port)).await?;
-        russh::client::connect_stream(config, stream, handler).await
-    })
-    .await
-    {
-        Ok(Ok(handle)) => {
-            report
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push("handshake: OK".to_owned());
-            let _ = handle
-                .disconnect(russh::Disconnect::ByApplication, "diagnose", "en")
-                .await;
-        }
-        Ok(Err(error)) => {
-            report
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(format!("handshake FAILED: {error:?}"));
-        }
-        Err(_) => {
-            report
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push("handshake TIMEOUT (30s)".to_owned());
-        }
-    }
-    responder.abort();
-    let _ = std::fs::remove_file(throwaway_known_hosts);
-
-    let entries = report
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .join(" | ");
-    format!("diagnose-real: {entries}")
 }

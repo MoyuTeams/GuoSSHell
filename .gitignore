@@ -36,3 +36,23 @@ DerivedData/
 /lib/src/bincode
 /lib/src/serde
 /lib/src/bindings
+
+# 本地 fork 工作副本与开发期依赖覆盖（不入库；入库的依赖永远指向已推送的 git rev）
+/.forks/
+/pubspec_overrides.yaml
+
+# Android 本机构建与签名凭证
+/android/local.properties
+/android/key.properties
+*.jks
+*.keystore
+*.p12
+/.local-signing/
+
+# CI 打包结果
+/dist/
+/coverage/
+
+# Python 检查缓存
+__pycache__/
+*.pyc

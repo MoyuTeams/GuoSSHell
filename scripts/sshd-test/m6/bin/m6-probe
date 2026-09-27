@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""M6：查询终端当前的模式与光标（TUI 退出后查残留）。
+
+依次发 DECRQM（CSI ? Pm $ p）、CPR（CSI 6n），最后发 DA1（CSI c）作为结束标记：
+终端按顺序作答，收到 DA1 的应答就说明前面的都答完了（没答的即不支持）；最多等 3 秒。
+输出一行：M6-MODES {"1049": 2, "25": 1, ..., "cpr": [行, 列]}
+DECRPM 的值：1 置位、2 复位、3 永久置位、4 永久复位、0 不认识。
+"""
+
+import json
+import os
+import re
+import select
+import sys
+import termios
+import time
+import tty
+
+MODES = [1, 25, 1000, 1002, 1003, 1004, 1006, 1049, 2004, 2026]
+
+
+def main() -> int:
+    fd = sys.stdin.fileno()
+    if not os.isatty(fd):
+        print("M6-MODES {}")
+        return 1
+    saved = termios.tcgetattr(fd)
+    answer = b""
+    try:
+        tty.setraw(fd)
+        query = "".join(f"\x1b[?{mode}$p" for mode in MODES) + "\x1b[6n\x1b[c"
+        os.write(sys.stdout.fileno(), query.encode())
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not re.search(rb"\x1b\[\?[\d;]*c", answer):
+            ready, _, _ = select.select([fd], [], [], 0.05)
+            if ready:
+                answer += os.read(fd, 4096)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+    result: dict = {}
+    for mode, value in re.findall(rb"\x1b\[\?(\d+);(\d+)\$y", answer):
+        result[mode.decode()] = int(value)
+    cpr = re.search(rb"\x1b\[(\d+);(\d+)R", answer)
+    if cpr:
+        result["cpr"] = [int(cpr.group(1)), int(cpr.group(2))]
+    result["da1"] = bool(re.search(rb"\x1b\[\?[\d;]*c", answer))
+    print("M6-MODES " + json.dumps(result, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

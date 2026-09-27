@@ -1,0 +1,6 @@
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.ttf binary
+*.jar binary
+assets/licenses/rust-crates.txt whitespace=cr-at-eol

@@ -202,10 +202,10 @@ async fn run_real_command(channel: Channel<Msg>, command: String) {
     // 真 sshd 的收尾序列：exit-status → EOF → close（App 据此弹「已断开」）。
     let _ = child.start_kill();
     let status = child.wait().await;
-    if let Ok(status) = status {
-        if let Some(c) = status.code() {
-            code = c as u32;
-        }
+    if let Ok(status) = status
+        && let Some(c) = status.code()
+    {
+        code = c as u32;
     }
     let _ = channel.exit_status(code).await;
     let _ = channel.eof().await;

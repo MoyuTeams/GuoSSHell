@@ -1,0 +1,7 @@
+{
+  "hasCompletedOnboarding": true,
+  "theme": "dark",
+  "projects": {
+    "/home/probe/m6": { "hasTrustDialogAccepted": true }
+  }
+}

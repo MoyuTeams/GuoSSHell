@@ -1,0 +1,19 @@
+{
+  "models": [
+    {
+      "slug": "m6-large",
+      "display_name": "M6 假模型",
+      "supported_reasoning_levels": [],
+      "shell_type": "unified_exec",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 1,
+      "support_verbosity": false,
+      "truncation_policy": { "mode": "bytes", "limit": 10000 },
+      "experimental_supported_tools": [],
+      "base_instructions": "M6 scripted model.",
+      "context_window": 1000000,
+      "supports_reasoning_summary_parameter": false
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""M6：同步输出（DEC 2026，BSU = CSI ?2026h，ESU = CSI ?2026l）的几种情形。
+
+  m6-sync pair    60 帧整屏重绘，每帧成对包在 BSU/ESU 里（画面应一帧一帧整齐出现）
+  m6-sync stall   BSU 之后不发 ESU、停 2 秒（终端应在约 150 ms 后照常显示）
+  m6-sync kill    子进程发出 BSU 和半帧后被 SIGKILL（之后的输出与提示符应照常显示）
+"""
+
+import os
+import signal
+import sys
+import time
+
+BSU = "\x1b[?2026h"
+ESU = "\x1b[?2026l"
+
+
+def write(text: str) -> None:
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def pair() -> None:
+    cols, rows = os.get_terminal_size()
+    for frame in range(1, 61):
+        body = [f"\x1b[3{frame % 7 + 1}m帧 {frame:02d} · 第 {row + 1:02d} 行".ljust(cols // 2) for row in range(rows - 2)]
+        write(BSU + "\x1b[H\x1b[2J" + "\r\n".join(body) + "\x1b[0m" + ESU)
+        time.sleep(1 / 30)
+    write("\x1b[H\x1b[2J")
+    print("M6-SYNC-PAIR-DONE")
+
+
+def stall() -> None:
+    write(BSU + "M6-SYNC-VISIBLE（BSU 之后没有 ESU）\r\n")
+    time.sleep(2)
+    print("M6-SYNC-STALL-DONE")
+
+
+def kill() -> None:
+    pid = os.fork()
+    if pid == 0:
+        write(BSU + "\x1b[H\x1b[2J半帧……")
+        os.kill(os.getpid(), signal.SIGKILL)
+    os.waitpid(pid, 0)
+    print("\r\nM6-SYNC-KILL-DONE")
+
+
+def main() -> int:
+    case = sys.argv[1] if len(sys.argv) > 1 else ""
+    handlers = {"pair": pair, "stall": stall, "kill": kill}
+    if case not in handlers:
+        print(__doc__)
+        return 2
+    handlers[case]()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

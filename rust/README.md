@@ -1,7 +1,7 @@
 # rust/ —— 本仓库的 Rust 代码
 
-当前内容是 **M0 的可执行验证**，不是产品代码。它把「SSH 本身在 iOS 上能不能用」
-这个问题在真机之前回答掉。完整规划见 [`../PLAN.md`](../PLAN.md)。
+这里是应用的上游内核入口，同时保留 **M0 的可执行验证**。`native/hub` 通过这里的
+再导出使用 rsHell；示例程序独立验证 SSH 与终端路径。完整规划见 [`../PLAN.md`](../PLAN.md)。
 
 上游内核**不在这个目录里**——它是 pin 到具体 rev 的 git 依赖。来源、为什么这么做、
 以及许可都在 [`UPSTREAM.md`](UPSTREAM.md)。
@@ -14,7 +14,7 @@
 | `examples/m0_loopback.rs` | **同进程起一个 russh 服务端**，把整条路径跑通。不需要任何外部服务器或凭证 |
 | `examples/m0.rs` | 打真实服务器：`cargo run --example m0 -- <host> <port> <user> <password> [known_hosts]` |
 | `examples/bench_frame.rs` | 帧传输性能基准，产出 `PLAN.md` §4 的全部数字 |
-| `Cargo.lock` | **进版本控制**（App 仓库 + git 依赖，复现性靠它） |
+| `../Cargo.lock` | workspace 共用且**进版本控制**的锁文件，固定官方 git 依赖及其传递依赖 |
 | `LICENSES/` | 上游 rsHell / portable-pty-psmux 的 MIT 许可副本 |
 
 ## 快速开始
@@ -40,15 +40,16 @@ PTY/shell 请求序列 + 写路径 : YES
 主机密钥 TOFU 已落盘        : YES (...)
 ```
 
-真机 / iPad 验证（M0b）见 [`../ios-host/README.md`](../ios-host/README.md)，
-起飞前检查跑 [`../scripts/link-check.sh`](../scripts/link-check.sh)。
+当前真机 / iPad 验证见 [`../docs/acceptance-device-2026-09-27.md`](../docs/acceptance-device-2026-09-27.md)，
+集成测试入口为 `../scripts/m6.sh`。
 
 ## 已实测结论
 
 - `alacritty_terminal 0.26.0` 全链为 `aarch64-apple-ios` 编译通过，**零改动**。
 - 上游四个 crate 为 iOS 编译**不需要任何源码改动**：keyring 的 `protected` feature
   从我们自己的 `Cargo.toml` 打开（Cargo 的 feature unification），
-  上游那份 `portable-pty-psmux` patch 在我们的目标上不参与编译。详见 `UPSTREAM.md`。
+  `portable-pty-psmux` 由同一官方提交的仓内 path 依赖提供，Windows 专用代码不参与
+  iOS / macOS 编译。详见 `UPSTREAM.md`。
 - 两个切片（device / simulator）都能链进一个 iOS 可执行文件，**只需要额外 `-liconv`**。
 - **PTY 家族的符号要靠 `-Wl,-dead_strip` 裁掉。** 不加时最终可执行文件会导入
   `_openpty` / `_login_tty` / `_fork` / `_posix_spawnp` 等；加上之后全部为 0，

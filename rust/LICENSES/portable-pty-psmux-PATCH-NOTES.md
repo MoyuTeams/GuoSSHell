@@ -16,6 +16,10 @@ rsHell changes the package manifest plus these four package source files:
 - `src/win/psuedocon.rs`: add the Job list to the ConPTY creation attributes.
 - `src/win/conpty.rs`: share contained/uncontained spawning and preserve the Job on retry.
 
-All other package files are byte-for-byte copies of the selected crates.io
-source. The package remains outside rsHell workspace lint membership and is
-compiled only through the root `[patch.crates-io]` override.
+`src/cmdbuilder.rs` also skips rustfmt traversal into test modules omitted from
+the published package; `src/win/mod.rs` and other touched Windows source lines
+have formatting-only changes. All other package files are copies of the
+selected crates.io source. The package remains outside rsHell workspace lint
+membership. `rshell-session` depends on this vendored fork by relative path in
+both normal and test builds, so downstream path/git consumers do not need a
+root `[patch.crates-io]` override.

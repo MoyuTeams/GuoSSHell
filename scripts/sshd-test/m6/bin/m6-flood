@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""M6：可控速率的彩色 / 中文洪水输出（吞吐与显示延迟）。
+
+  m6-flood <每秒行数> <秒数> [cjk]
+
+按绝对节拍输出，结束打印 M6-FLOOD-DONE lines=<行数>。
+"""
+
+import sys
+import time
+
+ZH = "终端渲染管线在高速输出下保持跟手宽字符不错位"
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        print(__doc__)
+        return 2
+    rate = float(sys.argv[1])
+    seconds = float(sys.argv[2])
+    cjk = len(sys.argv) > 3 and sys.argv[3] == "cjk"
+    total = int(rate * seconds)
+    start = time.monotonic()
+    for i in range(1, total + 1):
+        color = 31 + i % 7
+        text = (ZH * 3)[: 20 + i % 20] if cjk else f"line {i:06d} " + "abcdefghij" * (2 + i % 5)
+        sys.stdout.write(f"\x1b[{color}m{i:06d}\x1b[0m {text}\n")
+        if i % 16 == 0:
+            sys.stdout.flush()
+        delay = start + i / rate - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+    sys.stdout.flush()
+    print(f"M6-FLOOD-DONE lines={total} seconds={time.monotonic() - start:.2f}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

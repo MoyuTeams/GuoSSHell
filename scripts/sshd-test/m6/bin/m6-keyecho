@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""M6：按键与鼠标回显。原始模式下按要求打开终端模式，记录收到的每一段字节。
+
+  m6-keyecho [mouse|drag|motion|paste|appcursor]… [--seconds N]
+
+  mouse      鼠标点击上报（1000）+ SGR 编码（1006）
+  drag       按住拖动上报（1002）+ SGR
+  motion     全部移动上报（1003）+ SGR
+  paste      bracketed paste（2004）
+  appcursor  应用光标键（DECCKM）
+
+每次读到的字节写一行 JSON 到 /tmp/m6/input.log：{"t": 毫秒, "hex": "..."}，屏幕上同时打印
+可读形式。连按两次 Ctrl-]（0x1d）或到时间退出；退出前关掉打开的模式。
+"""
+
+import json
+import os
+import select
+import sys
+import termios
+import time
+import tty
+
+LOG = os.environ.get("M6_INPUT_LOG", "/tmp/m6/input.log")
+MODES = {
+    "mouse": [1000, 1006],
+    "drag": [1002, 1006],
+    "motion": [1003, 1006],
+    "paste": [2004],
+    "appcursor": [1],
+}
+
+
+def printable(data: bytes) -> str:
+    out = []
+    for byte in data:
+        if byte == 0x1B:
+            out.append("ESC")
+        elif byte < 0x20:
+            out.append(f"^{chr(byte + 0x40)}")
+        elif byte == 0x7F:
+            out.append("DEL")
+        elif byte < 0x80:
+            out.append(chr(byte))
+        else:
+            out.append(f"\\x{byte:02x}")
+    return " ".join(out) if len(data) > 1 and data[0] == 0x1B else "".join(out)
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    seconds = 300.0
+    if "--seconds" in args:
+        index = args.index("--seconds")
+        seconds = float(args[index + 1])
+        del args[index : index + 2]
+    modes = [mode for name in args for mode in MODES.get(name, [])]
+
+    fd = sys.stdin.fileno()
+    out = sys.stdout.fileno()
+    saved = termios.tcgetattr(fd)
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+    log = open(LOG, "a", buffering=1)
+    try:
+        tty.setraw(fd)
+        os.write(out, "".join(f"\x1b[?{m}h" for m in modes).encode())
+        os.write(out, f"M6-KEYECHO-READY {' '.join(args) or 'plain'}\r\n".encode())
+        deadline = time.monotonic() + seconds
+        quit_count = 0
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if not ready:
+                continue
+            data = os.read(fd, 4096)
+            if not data:
+                break
+            log.write(json.dumps({"t": int(time.time() * 1000), "hex": data.hex()}) + "\n")
+            os.write(out, f"{printable(data)}\r\n".encode())
+            quit_count = quit_count + 1 if data == b"\x1d" else 0
+            if quit_count >= 2:
+                break
+    finally:
+        os.write(out, "".join(f"\x1b[?{m}l" for m in reversed(modes)).encode())
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        log.close()
+    print("M6-KEYECHO-DONE")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

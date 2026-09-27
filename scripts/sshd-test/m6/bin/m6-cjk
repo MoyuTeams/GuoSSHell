@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""M6：宽字符排布图样。整行中文、宽字符后的着色段、emoji、组合字符、框线表格。
+
+画面一致性检查（引擎与 App 逐列比对）与截图复核都用它；以 M6-CJK-END 结尾。
+"""
+
+import os
+
+RED, GREEN, CYAN, RESET = "\x1b[31m", "\x1b[32m", "\x1b[36m", "\x1b[0m"
+
+
+def main() -> None:
+    cols = os.get_terminal_size().columns
+    print("M6-CJK-BEGIN")
+    # 1. 一整行中文（正好铺满）与多出半行的中文（折到下一行）。
+    print("中" * (cols // 2))
+    print("文" * (cols // 2 + cols // 4))
+    # 2. 宽字符后面的着色段：位置必须按列算。
+    print(f"中文{RED}X{RESET} tail 🚀{GREEN}Y{RESET} end 表格{CYAN}Z{RESET}|")
+    print(f"{RED}红{RESET}{GREEN}绿{RESET}{CYAN}青{RESET}ABC{RED}末{RESET}")
+    # 3. 组合字符与零宽连接（按引擎的宽度，不在 App 里重算）。
+    print("é ä ñ | 👍🏽 👨‍👩‍👧 🇨🇳 ⚠️ ✅ ⏺ ⎿ ✻ ●")
+    # 4. 框线表格，中英混排的单元格。
+    print("┌────────┬────────────┐")
+    print("│ 名称   │ 状态       │")
+    print("├────────┼────────────┤")
+    print(f"│ 帧率   │ {GREEN}正常{RESET}       │")
+    print(f"│ render │ {RED}慢{RESET} 12 ms   │")
+    print("└────────┴────────────┘")
+    print("M6-CJK-END")
+
+
+if __name__ == "__main__":
+    main()

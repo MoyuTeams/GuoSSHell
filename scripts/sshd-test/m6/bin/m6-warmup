@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# M6：容器启动后把三个 agent 各非交互地跑一次，做完首次运行的初始化（数据库、项目快照、
+# 插件依赖等），之后交互式的第一次启动不再慢。由 m6-entrypoint 在后台以 probe 运行。
+set -u
+
+# shellcheck source=/dev/null
+. /etc/m6/agents.env
+export ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL \
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL \
+  M6_API_KEY OPENCODE_DISABLE_MODELS_FETCH OPENCODE_DISABLE_AUTOUPDATE OPENCODE_DISABLE_SHARE
+
+dir="$HOME/m6/work/warmup"
+mkdir -p "$dir"
+cd "$dir" || exit 1
+prompt="[m6:cjk] 工作目录 $dir 预热"
+timeout 120 claude -p "$prompt" >/dev/null 2>&1
+timeout 120 codex exec "$prompt" >/dev/null 2>&1 </dev/null
+timeout 120 opencode run "$prompt" >/dev/null 2>&1 </dev/null
+echo "m6-warmup done"

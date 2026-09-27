@@ -1,0 +1,11 @@
+# M6 工作区
+
+coding agent 的验收场景在这里各开一个目录（m6-agent 创建），读文件的那一步读的就是这份说明。
+
+| 场景 | 内容 |
+|---|---|
+| stream / burst | 高速流式输出 |
+| tools | 连续工具调用 |
+| subagents | 多个 subagent 并发 |
+| long | 长会话 |
+| cjk | 中文为主的输出 |

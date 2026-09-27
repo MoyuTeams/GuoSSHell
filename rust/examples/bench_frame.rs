@@ -34,8 +34,12 @@ fn workload_ls(cols: u16, rows: u16) -> Vec<u8> {
     let mut out = b"\x1b[H\x1b[2J".to_vec();
     for index in 0..usize::from(rows) {
         out.extend_from_slice(
-            format!("\x1b[{};1Hdrwxr-xr-x 12 user staff 384 Sep 14 16:2{} ", index + 1, index % 10)
-                .as_bytes(),
+            format!(
+                "\x1b[{};1Hdrwxr-xr-x 12 user staff 384 Sep 14 16:2{} ",
+                index + 1,
+                index % 10
+            )
+            .as_bytes(),
         );
         out.extend_from_slice(b"\x1b[1;34m");
         out.extend_from_slice(format!("project_directory_{index}").as_bytes());
@@ -224,8 +228,26 @@ fn mean_micros<F: FnMut()>(mut body: F) -> f64 {
 
 fn main() {
     let sizes = [
-        ("iPad 横屏 120x40", TerminalSize { cols: 120, rows: 40, pixel_width: 0, pixel_height: 0, dpi: 264 }),
-        ("iPhone 竖屏 40x22", TerminalSize { cols: 40, rows: 22, pixel_width: 0, pixel_height: 0, dpi: 460 }),
+        (
+            "iPad 横屏 120x40",
+            TerminalSize {
+                cols: 120,
+                rows: 40,
+                pixel_width: 0,
+                pixel_height: 0,
+                dpi: 264,
+            },
+        ),
+        (
+            "iPhone 竖屏 40x22",
+            TerminalSize {
+                cols: 40,
+                rows: 22,
+                pixel_width: 0,
+                pixel_height: 0,
+                dpi: 460,
+            },
+        ),
     ];
 
     for (label, size) in sizes {
@@ -235,14 +257,38 @@ fn main() {
         println!("══════════════════════════════════════════════════════════");
         println!(
             "{:<12} {:>9} {:>7} {:>7} {:>10} {:>10} {:>7} {:>7} {:>8}",
-            "负载", "render", "run/行", "run总", "serde_json", "bincode", "runs", "脏3行", "非空cell"
+            "负载",
+            "render",
+            "run/行",
+            "run总",
+            "serde_json",
+            "bincode",
+            "runs",
+            "脏3行",
+            "非空cell"
         );
 
         let workloads = [
-            Workload { name: "ls --color", note: "短 run 密集", bytes: workload_ls(size.cols, size.rows) },
-            Workload { name: "git diff", note: "大面积为默认色", bytes: workload_diff(size.cols, size.rows) },
-            Workload { name: "TUI 满屏", note: "每 cell 独立底色（最坏）", bytes: workload_tui(size.cols, size.rows) },
-            Workload { name: "CJK 日志", note: "宽字符", bytes: workload_cjk(size.cols, size.rows) },
+            Workload {
+                name: "ls --color",
+                note: "短 run 密集",
+                bytes: workload_ls(size.cols, size.rows),
+            },
+            Workload {
+                name: "git diff",
+                note: "大面积为默认色",
+                bytes: workload_diff(size.cols, size.rows),
+            },
+            Workload {
+                name: "TUI 满屏",
+                note: "每 cell 独立底色（最坏）",
+                bytes: workload_tui(size.cols, size.rows),
+            },
+            Workload {
+                name: "CJK 日志",
+                note: "宽字符",
+                bytes: workload_cjk(size.cols, size.rows),
+            },
         ];
 
         for workload in &workloads {

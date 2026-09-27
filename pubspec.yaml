@@ -42,12 +42,22 @@ dependencies:
   # fork 决定约束：升级 = 换 ref + 跑它的测试 + 我们的回归。
   terminal_view:
     git:
-      url: https://github.com/Rachel030219/terminal_view.git
-      ref: "a3d42d9a840215bba81994ddade59a6c6cdead9d"
+      url: https://github.com/Anthony-Hoo/terminal_view.git
+      ref: "f0a1e0d9a717311ab622581508bdbacdf65f19de"
   rinf: ^8.10.1
+  path_provider: ^2.1.6
+  url_launcher: ^6.3.2
+  file_selector: ^1.1.0
+  # 分屏：可拖动分隔条的多窗格布局（MIT）。
+  multi_split_view: ^3.6.2
 
 dev_dependencies:
   flutter_test:
+    sdk: flutter
+  # M6 验收：在模拟器 / macOS 上驱动真实 App（integration_test），flutter drive 收截图与报告。
+  integration_test:
+    sdk: flutter
+  flutter_driver:
     sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to
@@ -67,6 +77,21 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # 终端内置字体：MesloLGS NF（Meslo LG 的 Nerd Font 补丁版，带 powerline / 图标字形；
+  # Apache 2.0，见 assets/fonts/LICENSE-MesloLGS-NF.txt）。只带常规与粗体，斜体由引擎合成。
+  fonts:
+    - family: MesloLGS NF
+      fonts:
+        - asset: assets/fonts/MesloLGS-NF-Regular.ttf
+        - asset: assets/fonts/MesloLGS-NF-Bold.ttf
+          weight: 700
+
+  # 许可页：上游 rsHell 的许可与 Rust 依赖的许可（scripts/licenses.sh 生成）。
+  assets:
+    - rust/LICENSES/rsHell-MIT.txt
+    - assets/fonts/LICENSE-MesloLGS-NF.txt
+    - assets/licenses/rust-crates.txt
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "m6/m6-coder",
+  "small_model": "m6/m6-small",
+  "enabled_providers": ["m6"],
+  "autoupdate": false,
+  "share": "disabled",
+  "permission": {
+    "external_directory": "allow",
+    "doom_loop": "allow",
+    "read": "allow"
+  },
+  "provider": {
+    "m6": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "M6 假上游",
+      "options": { "baseURL": "http://127.0.0.1:4010/v1", "apiKey": "m6" },
+      "models": {
+        "m6-coder": { "name": "M6 Coder" },
+        "m6-small": { "name": "M6 Small" }
+      }
+    }
+  }
+}

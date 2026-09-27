@@ -1,0 +1,37 @@
+# M6：Codex 指向容器内的假上游（aimock），不登录、不审批、不沙箱、不联网。
+model = "m6-large"
+model_provider = "m6"
+model_catalog_json = "/home/probe/.codex/m6-models.json"
+approval_policy = "never"
+sandbox_mode = "danger-full-access"
+web_search = "disabled"
+check_for_update_on_startup = false
+
+[model_providers.m6]
+name = "M6 假上游"
+base_url = "http://127.0.0.1:4010/v1"
+env_key = "M6_API_KEY"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+stream_idle_timeout_ms = 60000
+
+[features]
+# 不起共享的后台服务（它会自动更新）。
+daemon_auto_start = false
+
+# subagent 用 v2（工具在命名空间 collaboration 里）；一次并发 6 个子任务，线程上限放到 8。
+[features.multi_agent_v2]
+enabled = true
+max_concurrent_threads_per_session = 8
+
+[analytics]
+enabled = false
+
+[tui]
+auto_recap = false
+show_tooltips = false
+
+# /home/probe/m6 是 git 仓库，工作目录都在它下面：按 git 根判定已信任。
+[projects."/home/probe/m6"]
+trust_level = "trusted"

@@ -1,0 +1,75 @@
+name: 配置构建环境
+description: 固定 Flutter、Rust 与 rinf，恢复缓存并生成桥接代码
+inputs:
+  rust-targets:
+    description: 额外 Rust target，以逗号分隔
+    default: ''
+  cache-key:
+    description: 构建任务缓存标识
+    default: checks
+runs:
+  using: composite
+  steps:
+    - name: 读取工具链版本
+      id: versions
+      shell: bash
+      run: python scripts/ci/metadata.py tools
+    - name: 安装 Linux 构建依赖
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libssl-dev libsecret-1-dev xvfb dbus-x11 gnome-keyring
+    - name: 配置 Flutter
+      if: runner.arch != 'ARM64' || runner.os == 'macOS'
+      uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+      with:
+        flutter-version: ${{ steps.versions.outputs.flutter }}
+        channel: stable
+        architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+        cache: true
+    - name: 缓存原生 ARM64 Flutter SDK
+      if: runner.arch == 'ARM64' && runner.os != 'macOS'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/flutter-native
+        key: flutter-native-${{ runner.os }}-${{ runner.arch }}-${{ steps.versions.outputs.flutter_revision }}
+    - name: 从固定源码准备 ARM64 工具链
+      if: runner.arch == 'ARM64' && runner.os != 'macOS'
+      shell: bash
+      run: python scripts/ci/flutter_native.py
+    - name: 配置 Rust
+      uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      with:
+        toolchain: ${{ steps.versions.outputs.rust }}
+        components: clippy,rustfmt
+        targets: ${{ inputs.rust-targets }}
+    - name: Rust 编译缓存
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        key: ${{ inputs.cache-key }}
+        cache-on-failure: true
+    - name: rinf 工具缓存
+      id: rinf-cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ~/.cargo/bin/rinf*
+        key: rinf-${{ runner.os }}-${{ runner.arch }}-${{ steps.versions.outputs.rinf }}-${{ steps.versions.outputs.rust }}
+    - name: 安装 rinf 工具
+      if: steps.rinf-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        RINF_VERSION: ${{ steps.versions.outputs.rinf }}
+      run: cargo install rinf_cli --version "$RINF_VERSION" --locked --force
+    - name: 准备 Flutter 依赖和桥接
+      shell: bash
+      env:
+        PUB_HOSTED_URL: https://pub.dev
+      run: |
+        flutter config --no-analytics
+        if [[ "$RUNNER_OS" == "macOS" ]]; then
+          flutter config --no-enable-swift-package-manager
+        fi
+        flutter pub get --enforce-lockfile
+        rinf gen
+        git diff --exit-code -- Cargo.lock pubspec.lock

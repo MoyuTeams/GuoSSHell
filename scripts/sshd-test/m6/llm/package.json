@@ -1,0 +1,9 @@
+{
+  "name": "guosh-m6-llm",
+  "private": true,
+  "type": "module",
+  "description": "M6 假 AI 上游：aimock + 剧本",
+  "dependencies": {
+    "@copilotkit/aimock": "1.43.0"
+  }
+}

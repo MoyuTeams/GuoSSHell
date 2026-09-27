@@ -1,6 +1,6 @@
 # bracketed paste 未实现（上游缺 display_modes 字段）
 
-- 状态：待办（**已定为可能的第一个 fork 点**，见 PLAN §9 待定项 3）
+- 状态：**已解决**（2026-09-25）
 - 记录日期：2026-09-23
 
 ## 现状
@@ -18,3 +18,9 @@ adapter 把 `TermMode::BRACKETED_PASTE` 映射成 `TerminalDisplayModes`
 的新字段 `bracketed_paste`；我们读该字段，开启时粘贴包
 `\e[200~/\e[201~`，未开启直发原文。fork 后在 `rust/UPSTREAM.md`
 记录改了哪几行、为什么。
+
+## 结论
+
+rsHell fork 补丁 P1 暴露了 `TerminalDisplayModes.bracketed_paste`（见 `rust/UPSTREAM.md`）。
+粘贴与键入共用 `InputRequest`（粘贴标记 `paste = true`）以保留顺序，由 Rust 处理：换行统一成 CR、剔除 Tab 以外的控制字符（防 `\e[201~`
+注入），远端开启 DECSET 2004 时包 `\e[200~ … \e[201~`，未开启直发。

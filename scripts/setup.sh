@@ -25,11 +25,11 @@ for candidate in "$(command -v rustup 2>/dev/null || true)" "${HOME}/.cargo/bin/
 done
 
 echo "== 1/3 检查 git 依赖 =="
-grep -q 'git = "https://github.com/hugefiver/rsHell", rev = "b2ab865' "${RUST}/Cargo.toml" \
+grep -qE 'git = "https://github.com/[^"]+/rsHell", rev = "[0-9a-f]{40}"' "${RUST}/Cargo.toml" \
   || { echo "error: rust/Cargo.toml 里找不到 pin 住的上游 git 依赖" >&2; exit 1; }
-if [ -n "${CARGO}" ] && [ -f "${RUST}/Cargo.lock" ]; then
-  # 离线也要能过；拉不到只是提示，不算失败。
-  (cd "${RUST}" && "${CARGO}" fetch --locked) || \
+if [ -n "${CARGO}" ] && [ -f "${PROJECT}/Cargo.lock" ]; then
+  # 锁文件只有 workspace 根这一个。离线也要能过；拉不到只是提示，不算失败。
+  (cd "${PROJECT}" && "${CARGO}" fetch --locked) || \
     echo "   警告：cargo fetch 失败（可能是网络）。首次构建需要能访问 GitHub。"
 fi
 echo "   ok"
@@ -79,3 +79,4 @@ echo "  cd ${RUST}"
 echo "  cargo run --example m0_loopback                        # 不需要外部服务器"
 echo "  cargo run --release --example bench_frame              # 性能基准"
 echo "  cargo build --release --lib --target aarch64-apple-ios # iOS 静态库"
+echo "  ${PROJECT}/scripts/sshd-test.sh up                      # 本地验收 SSH 服务器（Docker，可选）"

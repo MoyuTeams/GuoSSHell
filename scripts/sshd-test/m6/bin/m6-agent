@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# M6：以场景标记为开场白启动 coding agent 的交互界面（指向容器内的假上游）。
+#
+#   m6-agent <claude|codex|opencode> <场景> [--inline]
+#
+# 场景：stream burst tools subagents long cjk（见 docs/acceptance-m6-2026-09-26.md §2.2）。
+# --inline：行内模式（Claude Code 经典渲染、Codex --no-alt-screen、opencode --mini）。
+set -euo pipefail
+
+usage() {
+  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  exit 2
+}
+
+agent="${1:-}"
+scenario="${2:-}"
+mode="${3:-}"
+[ -n "$agent" ] && [ -n "$scenario" ] || usage
+
+# shellcheck source=/dev/null
+. /etc/m6/agents.env
+export ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL \
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL \
+  M6_API_KEY OPENCODE_DISABLE_MODELS_FETCH OPENCODE_DISABLE_AUTOUPDATE OPENCODE_DISABLE_SHARE
+
+run="$HOME/m6/work/${agent}-${scenario}-$(date +%H%M%S)"
+mkdir -p "$run"
+cd "$run"
+prompt="[m6:${scenario}] 工作目录 ${run} 按剧本执行。"
+
+case "$agent" in
+  claude)
+    if [ "$mode" = "--inline" ]; then export CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1; fi
+    exec claude "$prompt"
+    ;;
+  codex)
+    if [ "$mode" = "--inline" ]; then exec codex --no-alt-screen "$prompt"; fi
+    exec codex "$prompt"
+    ;;
+  opencode)
+    if [ "$mode" = "--inline" ]; then exec opencode --mini --prompt "$prompt"; fi
+    exec opencode --prompt "$prompt"
+    ;;
+  *)
+    usage
+    ;;
+esac

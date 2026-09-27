@@ -15,10 +15,12 @@ fn main() {
         std::process::exit(2);
     }
     let port: u16 = args[1].parse().expect("port must be a u16");
-    let known_hosts = args
-        .get(4)
-        .cloned()
-        .unwrap_or_else(|| std::env::temp_dir().join("rshell-m0-known_hosts").display().to_string());
+    let known_hosts = args.get(4).cloned().unwrap_or_else(|| {
+        std::env::temp_dir()
+            .join("rshell-m0-known_hosts")
+            .display()
+            .to_string()
+    });
 
     eprintln!(
         "target={}:{} user={} known_hosts={known_hosts}",

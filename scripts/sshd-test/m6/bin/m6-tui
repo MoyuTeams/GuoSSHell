@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# M6：全屏 TUI 验收。先打印标记行，再启动 TUI；TUI 退出后打印标记行，并查询终端当前的模式
+# （备用屏、鼠标上报、光标可见…，见 m6-probe），看 TUI 有没有把终端留在不干净的状态。
+#
+#   m6-tui <btop|nvtop|nload|bmon|iftop|htop|程序> [参数…]
+set -uo pipefail
+
+name="${1:-}"
+[ -n "$name" ] || { sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+shift
+
+# shellcheck source=/dev/null
+. /etc/m6/agents.env
+export MOCK_NVML_CONFIG
+# iftop 在 /usr/sbin（Debian 给普通用户的 PATH 里没有）。
+export PATH="$PATH:/usr/sbin"
+
+case "$name" in
+  btop) cmd=(btop) ;;                           # 100 ms 一刷在 ~/.config/btop/btop.conf
+  nvtop) cmd=(nvtop -d 1) ;;                    # 0.1 s 一刷，假 GPU 见 /etc/m6/nvml.yaml
+  nload) cmd=(nload -t 200 -u K lo) ;;          # 回环上有 iperf3 的持续流量
+  bmon) cmd=(bmon -p lo -R 0.2) ;;
+  iftop) cmd=(iftop -i lo -nNP) ;;
+  htop) cmd=(htop -d 5) ;;
+  *) cmd=("$name") ;;
+esac
+
+printf 'M6-BEFORE %s\n' "$name"
+"${cmd[@]}" "$@"
+status=$?
+printf 'M6-AFTER %s status=%s\n' "$name" "$status"
+exec m6-probe

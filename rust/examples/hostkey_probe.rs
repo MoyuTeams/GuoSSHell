@@ -11,7 +11,7 @@ use rshell_core::{
 };
 use rshell_session::{
     AuthPlan, DefaultTerminalEngine, KnownHostsVerifier, NativeSshTransport, SessionTransport,
-    TerminalEngine, TransportRequest, interaction_channel,
+    TransportRequest, interaction_channel,
 };
 
 /// 第一层：裸 russh 客户端握手（check_server_key 一律接受）。
@@ -69,8 +69,11 @@ async fn transport_probe(host: &str, port: u16) -> Result<String, String> {
     profile.transport = TransportKind::NativeSsh;
     profile.authentication = rshell_core::AuthenticationKind::Password;
 
-    let auth = AuthPlan::from_secret(&profile, Some(secrecy::SecretString::from("wrong-password")))
-        .map_err(|error| format!("auth plan: {error:?}"))?;
+    let auth = AuthPlan::from_secret(
+        &profile,
+        Some(secrecy::SecretString::from("wrong-password")),
+    )
+    .map_err(|error| format!("auth plan: {error:?}"))?;
 
     let known_hosts = std::env::temp_dir().join("guosh-hostkey-probe-known_hosts");
     let _ = std::fs::remove_file(&known_hosts);
@@ -81,7 +84,10 @@ async fn transport_probe(host: &str, port: u16) -> Result<String, String> {
         let broker = broker.clone();
         tokio::spawn(async move {
             while let Some((id, prompt)) = interactions.recv().await {
-                println!("[transport] 交互请求：{:?}", std::mem::discriminant(&prompt));
+                println!(
+                    "[transport] 交互请求：{:?}",
+                    std::mem::discriminant(&prompt)
+                );
                 let _ = broker.respond(
                     id,
                     match prompt {
@@ -100,7 +106,7 @@ async fn transport_probe(host: &str, port: u16) -> Result<String, String> {
 
     let term_profile: ResolvedTerminalProfile =
         TerminalSettingsV1::default().resolve(&TerminalOverrides::default());
-    let mut engine = DefaultTerminalEngine::new(
+    let engine = DefaultTerminalEngine::new(
         &term_profile,
         TerminalSize {
             cols: 80,
