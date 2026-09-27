@@ -44,12 +44,13 @@
 
 ## 1. 项目定义
 
-**GuoSSHell 是跨平台的纯 SSH 客户端。** 当前平台见本文开头；早期 iOS 可行性分析保留为架构背景。
+**GuoSSHell = 移动端纯 SSH、桌面端远端 SSH 与本地终端的跨平台客户端。**
 
-明确不做的事：**不做本地 shell 面板**。上游 rsHell 的「本地终端」是一等公民，
-但 iOS 上不可能（没有 `fork`、没有 `openpty`、沙箱禁止 spawn 进程），所以 iOS 版
-把产品模型收窄为「远端 SSH 终端」。Rust 侧零改动——只要 Flutter 侧不暴露
-`UiCommand::NewLocalTab` / `UiCommand::StartLocal` 就行。
+当前平台见本文开头；早期 iOS 可行性分析保留为架构背景。
+
+移动端不提供本地 shell 面板，仍只显示 SSH 入口；桌面端本地 shell 与隔离的 System
+OpenSSH 属于桌面专项范围，须经 Rust 能力、安全边界与真实宿主验证才可开放。
+桌面 Fluent 根与原页面兼容入口不表示这些 transport 已实现。移动现有认证与交互保持不变。
 
 上游是 MIT，fork 与改名合规，但**必须保留原始版权与许可声明**。
 
@@ -540,12 +541,10 @@ rinf 单向信号流、Flutter 只画不解析）本身就与平台无关。
 
 需要注意的（都不是拦路虎，是「别写反」）：
 
-1. **不要在 Dart 层写 `Platform.isIOS` 分支。** 平台差异属于 Rust 侧
-   （`rshell-platform` 已经是这个形状）。Dart 侧一旦开始判断平台，就说明有逻辑漏到前端了。
-2. **「本地 shell 面板」按平台开关，而不是从协议里删掉。** iOS 上不暴露入口即可
-   （`UiCommand::NewLocalTab` / `StartLocal` 都还在协议里）。macOS / Android 上
-   `fork`+`openpty` 都在，**这两个平台可以白拿上游的本地面板能力**——那是产品的加分项。
-   **这条直接决定了现在不要为了 iOS 去改上游删传输**（见 §9.2）。
+1. **平台 UI 根由 Flutter 目标平台分流，业务能力由 Rust 判定。** Dart 只选择桌面 Fluent
+   或移动 Material 外壳，不能据此开启传输；桌面能力必须按 Rust 编译目标与运行条件验证。
+2. **「本地 shell 面板」只在桌面开放。** iOS/iPadOS、Android 不暴露入口，Rust 仍需拒绝
+   移动端伪造请求。不能把桌面 PTY 能力推断成 Android 产品功能（见 §9.2）。
 3. **帧协议与度量回传保持平台中立。** `TerminalSize{cols,rows,pixel_width,pixel_height,dpi}`
    由前端量完回传，天然适用于任何平台。
 4. **明文命名别带 `ios_` 前缀**，构建脚本按 `PLATFORM_NAME` 分派（`ios-host/build-rust.sh`
@@ -815,7 +814,7 @@ LoginGraceTime 把关，与 OpenSSH 客户端一致；交给传输层的连接�
 |---|---|
 | 桥用 **rinf**，不用 flutter_rust_bridge | 统一信号规约；单向信号流天然防止业务滑向 Dart。注意 rinf v8 已改用 serde + bincode（不再是 protobuf）；需要 protobuf 语义时用 `prost` 编码后塞进 `RustSignalBinary.binary` |
 | 边界类型**沿用** `rshell-core::protocol` | 上游已有完整可序列化协议，重建等于在 Dart 写业务模型（违反铁律 1） |
-| **不做本地 shell 面板** | iOS 不可能；Rust 侧零改动，Flutter 侧不暴露入口即可 |
+| **移动端不做本地 shell 面板；桌面端纳入专项范围** | 移动保持纯 SSH，桌面本地进程与 System SSH 需通过各宿主与安全验证后开放 |
 | 帧格式：**结构化帧 + run 压缩 + 脏行增量** | §4.3 实测 |
 | **帧流控：Dart 处理完回 `FrameAck`，同一时刻至多一帧在途** | rinf 的队列无界，逐块出帧会在高输出下积压；在途期间的变化只保留最新状态。两帧渲染起点至少相隔 8 ms（不合并 60 Hz 刷新），ACK 缺失 250 ms 后照发；选区、尺寸变化与断线后的末帧共用同一节拍，关闭窗格直接释放会话 |
 | 度量权威归 **Flutter** | 字体度量只有一个权威，就是实际画字的那一方。`TerminalSize{cols,rows,pixel_width,pixel_height,dpi}` 由 Flutter 测完回传 |

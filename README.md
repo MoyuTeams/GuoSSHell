@@ -1,6 +1,10 @@
 # GuoSSHell
 
-一个 **纯 SSH 客户端**，覆盖 iPhone / iPad、macOS、Windows、Linux 与 Android。
+一个跨平台终端客户端：iPhone / iPad 与 Android 仅提供远端 SSH；macOS、Windows、
+Linux 的产品范围包括远端 SSH 与桌面本地 shell。桌面 System OpenSSH 采用应用隔离的
+配置与主机信任边界，不能读取用户 SSH 配置、agent 或 known_hosts。
+当前桌面提供 Fluent 应用基座，连接目录／工作区／设置仍通过明确标识的原界面入口使用；
+桌面本地 shell、System OpenSSH 及配置全集尚不可用，不能把 UI 入口视为传输能力。
 业务与终端语义跑在 **Rust**
 （上游 [rsHell](https://github.com/hugefiver/rsHell) 的内核，直接作为固定提交的 git 依赖），
 只有渲染与交互用 **Flutter** 重写。Dart 不写业务逻辑。
@@ -14,9 +18,10 @@ GuoSSHell/
 ├── PLAN.md              实现规划：铁律 / 架构 / 实测事实 / 性能预算 / M0–M6 / 复用清单 / 陷阱
 ├── docs/                调研报告、验收文档、followups/（「存在但不马上修」的问题）
 ├── lib/                 Flutter app（纯展示与交互，无终端状态）
-│   ├── main.dart        入口：initializeRust + 许可登记 + MaterialApp
+│   ├── main.dart        入口：initializeRust + 许可登记 + 平台 UI 分流
 │   └── src/
 │       ├── bindings/    rinf gen 生成的 Dart 绑定（**不手改**；rinf 默认不入库）
+│       ├── desktop/     桌面 Fluent 基座、组件状态与原界面兼容入口
 │       ├── catalog/     连接目录与编辑
 │       ├── desktop/     Windows Fluent 工作区、自绘标题栏与窗口材质
 │       ├── keys/        私钥、OpenPGP 卡、安全密钥
@@ -131,6 +136,9 @@ Android 13 起的主题图标使用单色层，按壁纸主题色着色。
 ## 上游与许可
 
 GuoSSHell 以 [MIT 许可](LICENSE) 发布。
+
+桌面 UI 使用 [`fluent_ui` 4.16.1](https://pub.dev/packages/fluent_ui/versions/4.16.1)
+（BSD-3-Clause）；Dart 依赖许可由 Flutter 许可注册表收集，发行界面需提供查看入口。
 
 直接依赖官方 `hugefiver/rsHell` @ `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268`，MIT。
 该提交包含 GuoSSHell 所需的认证、连接与终端接口，以及顶部滚动区域的稳定行号修复。
