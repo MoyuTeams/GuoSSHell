@@ -171,6 +171,8 @@ class CustomTextEditState extends State<CustomTextEdit>
       _connection!.show();
     } else {
       final config = TextInputConfiguration(
+        // 文本客户端必须关联当前视图，Windows 引擎会拒绝缺少 viewId 的连接。
+        viewId: View.of(context).viewId,
         inputType: widget.inputType,
         inputAction: widget.inputAction,
         keyboardAppearance: widget.keyboardAppearance,

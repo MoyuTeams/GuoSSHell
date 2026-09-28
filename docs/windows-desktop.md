@@ -53,4 +53,6 @@ Windows 使用接受色调 alpha 的原生 Accent 亚克力分支，并关闭 Wi
 
 `scripts/ci/linux_plugin_check.py` 编译真实 GTK/Flutter 插件并检查自动注册不改变窗口外观、可见性或关闭处理；受信 Linux CI 在虚拟显示环境运行此项。
 
+`scripts/ci/windows_input_check.py` 启动隔离的环回 SSH 服务，运行 `integration_test/windows_terminal_input_test.dart`。验收向测试窗口发送原生键盘和已提交字符消息，核对英文数字、中文提交、回车及方向键到达对端的字节，并覆盖密码弹窗、设置返回、标签切换和鼠标清选区。此项不替代实体中文输入法的候选窗验收。
+
 其他平台的原生构建与实体设备适配仍由现有 CI 矩阵及对应平台验收负责。

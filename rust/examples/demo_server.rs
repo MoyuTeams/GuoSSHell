@@ -113,6 +113,19 @@ impl Handler for DemoHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         // 输入回显成青色（M1 终端只读，但服务器照常回显）。
+        if let Ok(path) = std::env::var("GUOSH_DEMO_INPUT_LOG") {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                for byte in data {
+                    let _ = write!(file, "{byte:02x}");
+                }
+                let _ = writeln!(file);
+            }
+        }
         let mut echo = b"\x1b[36m".to_vec();
         echo.extend_from_slice(data);
         echo.extend_from_slice(b"\x1b[0m");
@@ -307,6 +320,11 @@ fn demo_host_key() -> russh::keys::PrivateKey {
 
 /// 密钥的持久位置：`~/.guosh-demo/hostkey`（/tmp 会被系统清理）。
 fn dirs_demo_host_key() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("GUOSH_DEMO_DATA") {
+        let dir = std::path::PathBuf::from(path);
+        std::fs::create_dir_all(&dir).expect("测试数据目录");
+        return dir.join("hostkey");
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
     let dir = std::path::Path::new(&home).join(".guosh-demo");
     let _ = std::fs::create_dir_all(&dir);

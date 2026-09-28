@@ -162,6 +162,11 @@ void main() {
       await tester.pump();
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
       await tester.pump();
+      expect(
+        tester.testTextInput.setClientArgs?['viewId'],
+        tester.view.viewId,
+        reason: '原生文本客户端必须关联终端所属视图',
+      );
       expect(find.byType(TerminalSelectionHandles), findsNothing);
       mode.pointer(PointerDeviceKind.trackpad);
       expect(mode.touch, isFalse);

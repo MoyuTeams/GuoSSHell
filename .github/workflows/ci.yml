@@ -87,7 +87,12 @@ jobs:
         if: env.GUOSH_CI_FULL_CHECKS == 'true'
         run: cargo test --workspace --locked
       - name: Flutter 静态检查
-        run: flutter analyze --no-pub
+        run: |
+          # 本地渲染库保留上游测试，它的测试依赖需要独立解析。
+          pushd packages/terminal_view
+          flutter pub get
+          popd
+          flutter analyze --no-pub
       - name: Flutter 单元测试
         if: env.GUOSH_CI_FULL_CHECKS == 'true'
         run: flutter test --no-pub --coverage --reporter expanded
@@ -96,6 +101,9 @@ jobs:
         run: |
           flutter precache --linux
           xvfb-run -a python scripts/ci/linux_plugin_check.py
+      - name: Windows 原生 SSH 文字输入
+        if: runner.os == 'Windows' && env.GUOSH_CI_FULL_CHECKS == 'true'
+        run: python scripts/ci/windows_input_check.py
       - name: 生产 SSH 环回验证
         if: env.GUOSH_CI_FULL_CHECKS == 'true'
         run: cargo run --locked -p rshell-m0 --example m0_loopback
