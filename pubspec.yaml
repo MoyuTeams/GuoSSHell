@@ -101,6 +101,7 @@ flutter:
 
   # 标题栏图标与许可页资源；Rust 依赖许可由 scripts/licenses.sh 生成。
   assets:
+    - assets/icon/app_icon.png
     - rust/LICENSES/rsHell-MIT.txt
     - assets/fonts/LICENSE-MesloLGS-NF.txt
     - assets/fonts/LICENSE-MiSans.txt

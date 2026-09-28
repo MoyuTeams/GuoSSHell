@@ -174,6 +174,8 @@ def main():
 
     # Windows、Linux 与 Android 7.1 及更早版本：占画布 7/8 的圆角方块。
     desktop = tile("dark", 896)
+    # 自绘标题栏与 Windows 程序图标使用相同图案，64 像素兼顾高分屏。
+    render(desktop, 64, SOURCE / "app_icon.png")
     windows_icon(desktop, (16, 20, 24, 32, 40, 48, 64, 96, 256), ROOT / "windows/runner/resources/app_icon.ico")
     for size in (16, 24, 32, 48, 64, 128, 256, 512):
         render(desktop, size, ROOT / f"linux/icons/{size}x{size}/apps/guosshell.png")

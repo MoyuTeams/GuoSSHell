@@ -195,23 +195,24 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
                         child: Container(
                           color: Colors.transparent,
                           padding: const EdgeInsets.only(left: 18),
-                          child: const Row(
+                          child: Row(
                             children: [
-                              Icon(
-                                f.FluentIcons.command_prompt,
-                                size: 17,
-                                color: desktopAccent,
+                              Image.asset(
+                                'assets/icon/app_icon.png',
+                                width: 20,
+                                height: 20,
+                                excludeFromSemantics: true,
                               ),
-                              SizedBox(width: 12),
-                              Text(
+                              const SizedBox(width: 12),
+                              const Text(
                                 'GuoSSHell',
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w600,
                                 ),
                               ),
-                              SizedBox(width: 16),
-                              Text(
+                              const SizedBox(width: 16),
+                              const Text(
                                 'SSH 工作区',
                                 style: TextStyle(
                                   fontSize: 12,
