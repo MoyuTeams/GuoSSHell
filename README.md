@@ -20,6 +20,7 @@ GuoSSHell/
 │       ├── catalog/     连接目录与编辑
 │       ├── desktop/     Windows Fluent 工作区、自绘标题栏与窗口材质
 │       ├── keys/        私钥、OpenPGP 卡、安全密钥
+│       ├── lifecycle/   前后台状态、后台断开后的自动重连、Android 会话保活
 │       ├── settings/    设置与开源许可页
 │       ├── terminal/    帧解码与帧驱动的终端适配器、窗格、键位条、交互对话框
 │       └── workspace/   标签与分屏

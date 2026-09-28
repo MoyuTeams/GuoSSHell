@@ -8,6 +8,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'bindings/bindings.dart';
 import 'catalog/connection_list_page.dart';
+import 'lifecycle/app_visibility.dart';
 import 'terminal/session_target.dart';
 import 'workspace/workspace_page.dart';
 import 'desktop/windows_chrome.dart';
@@ -81,15 +82,16 @@ class _StartupGateState extends State<_StartupGate> {
   /// 自动连接的目标（没有为 null）。
   SessionTarget? _autoTarget;
 
-  /// 前后台切换告诉 Rust（进后台时它向系统申请一小段后台时间，连接不会立刻挂起）。
+  /// 前后台切换告诉 Rust（进后台时它向系统申请一小段后台时间，连接不会立刻挂起），
+  /// 也告诉窗格（在后台断开的连接回到前台时自动重连）。
   late final AppLifecycleListener _lifecycle;
 
   @override
   void initState() {
     super.initState();
     _lifecycle = AppLifecycleListener(
-      onShow: () => AppLifecycle(foreground: true).sendSignalToRust(),
-      onHide: () => AppLifecycle(foreground: false).sendSignalToRust(),
+      onShow: () => _setForeground(true),
+      onHide: () => _setForeground(false),
     );
     _readySub = AppReady.rustSignalStream.listen((pack) {
       if (!mounted) return;
@@ -120,6 +122,11 @@ class _StartupGateState extends State<_StartupGate> {
       _autoConnect();
     });
     _start();
+  }
+
+  static void _setForeground(bool foreground) {
+    AppLifecycle(foreground: foreground).sendSignalToRust();
+    AppVisibility.instance.update(foreground: foreground);
   }
 
   Future<void> _start() async {

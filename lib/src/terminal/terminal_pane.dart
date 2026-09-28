@@ -27,6 +27,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:guosh_shell/src/bindings/bindings.dart';
 
+import '../lifecycle/app_visibility.dart';
+import '../lifecycle/session_keeper.dart';
 import '../settings/terminal_font.dart';
 import '../settings/interface_font.dart';
 import 'terminal_clipboard_actions.dart';
@@ -116,11 +118,19 @@ class TerminalPaneController extends ChangeNotifier {
         (title != null && title != _remoteTitle);
     if (state != null) _state = state;
     if (title != null) _remoteTitle = title;
+    if (state != null) {
+      SessionKeeper.instance.report(
+        this,
+        live:
+            state == SessionState.connecting || state == SessionState.connected,
+      );
+    }
     if (changed) notifyListeners();
   }
 
   @override
   void dispose() {
+    SessionKeeper.instance.report(this, live: false);
     selection.dispose();
     focusNode.dispose();
     super.dispose();
@@ -245,9 +255,18 @@ class _TerminalPaneState extends State<TerminalPane> {
   String _localNetworkSettingsUrl = '';
   ConnectHint _hint = ConnectHint.none;
 
+  /// 在后台断开的连接，回到前台时自动重连一次。
+  final ResumeReconnect _resumeReconnect = ResumeReconnect(
+    AppVisibility.instance,
+  );
+
+  /// 正在进行的是自动重连（横幅文案不同）。
+  bool _autoReconnecting = false;
+
   @override
   void initState() {
     super.initState();
+    AppVisibility.instance.addListener(_onVisibilityChanged);
     _statusSub = SessionStatus.rustSignalStream.listen(_onStatus);
     _frameSub = FrameUpdate.rustSignalStream.listen(_onFrame);
     _selectionSub = SelectionState.rustSignalStream.listen(_onSelectionState);
@@ -278,6 +297,7 @@ class _TerminalPaneState extends State<TerminalPane> {
       DisconnectRequest(sessionId: _sessionId).sendSignalToRust();
     }
     if (_controller._pane == this) _controller._pane = null;
+    AppVisibility.instance.removeListener(_onVisibilityChanged);
     _statusSub?.cancel();
     _frameSub?.cancel();
     _selectionSub?.cancel();
@@ -323,9 +343,28 @@ class _TerminalPaneState extends State<TerminalPane> {
       _detail = msg.detail;
       _localNetworkSettingsUrl = msg.localNetworkSettingsUrl;
       _hint = msg.hint;
+      if (state != SessionState.connecting) _autoReconnecting = false;
     });
     // 连接中视图几何可能又变了（键盘弹出、旋转）：连上即补发最新尺寸。
     if (state == SessionState.connected) _flushResize();
+    if (state == SessionState.failed &&
+        msg.failure == FailureKind.connectionLost) {
+      if (_resumeReconnect.onLost()) _autoReconnect();
+    } else if (state != SessionState.connecting) {
+      _resumeReconnect.cancel();
+    }
+  }
+
+  void _onVisibilityChanged() {
+    if (!mounted) return;
+    if (_resumeReconnect.onShown()) _autoReconnect();
+  }
+
+  /// 连接在后台断开：回到前台后替用户点一次「重试」。
+  void _autoReconnect() {
+    if (_state != SessionState.failed) return;
+    _reconnect();
+    setState(() => _autoReconnecting = true);
   }
 
   /// 连接过程中的问题（密码、主机密钥、keyboard-interactive）→ 对话框 → 回答。
@@ -804,6 +843,7 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   /// 断开之后再连：同一会话，画面与滚回保留，新的输出接在后面。
   void _reconnect() {
+    _resumeReconnect.cancel();
     _promptsDismissed.value = false;
     _controller._report(state: SessionState.connecting);
     setState(() {
@@ -867,7 +907,11 @@ class _TerminalPaneState extends State<TerminalPane> {
           text: '请按系统提示插上（或靠近）安全密钥，并触摸它',
           detail: '正在连接 $title',
         ),
-        ConnectHint.none => _Banner(icon: Icons.sync, text: '正在连接 $title…'),
+        ConnectHint.none => _Banner(
+          icon: Icons.sync,
+          text: _autoReconnecting ? '正在重新连接 $title…' : '正在连接 $title…',
+          detail: _autoReconnecting ? '连接在 App 切到后台时断开了' : '',
+        ),
       },
       SessionState.failed => _Banner(
         icon: Icons.error_outline,
@@ -883,9 +927,11 @@ class _TerminalPaneState extends State<TerminalPane> {
           TextButton(onPressed: _reconnect, child: const Text('重试')),
           TextButton(onPressed: widget.onClose, child: const Text('关闭')),
         ],
-        hint: _localNetworkSettingsUrl.isEmpty
-            ? null
-            : '服务器在局域网内时，需要允许 GuoSSHell 访问本地网络。',
+        hint: _localNetworkSettingsUrl.isNotEmpty
+            ? '服务器在局域网内时，需要允许 GuoSSHell 访问本地网络。'
+            : _failure == FailureKind.connectionLost
+            ? '在服务器上使用 tmux 或 zellij，重新连接后可以接着之前的工作。'
+            : null,
       ),
       SessionState.closed => _Banner(
         icon: Icons.link_off,

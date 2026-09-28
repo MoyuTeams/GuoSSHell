@@ -1,5 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- 有 SSH 会话连着时的前台服务（SessionKeeperService），通知显示会话数。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="GuoSSHell"
         android:allowBackup="false"
@@ -27,6 +31,16 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- SSH 会话不属于系统预设的前台服务类型（dataSync 在 Android 15 起每天限 6 小时），
+             按 specialUse 声明并写明用途。 -->
+        <service
+            android:name="com.guosshell.SessionKeeperService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps the user's open SSH terminal sessions connected while the app is in the background; runs only while a session is open and stops when all sessions end."/>
+        </service>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data
