@@ -114,6 +114,8 @@ Linux 需要 Secret Service；Windows 私钥使用 DPAPI，Android 使用 Keysto
 
 ## 上游与许可
 
+GuoSSHell 以 [MIT 许可](LICENSE) 发布。
+
 直接依赖官方 `hugefiver/rsHell` @ `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268`，MIT。
 该提交包含 GuoSSHell 所需的认证、连接与终端接口，以及顶部滚动区域的稳定行号修复。
 接口与平台依赖边界见 [`rust/UPSTREAM.md`](rust/UPSTREAM.md)。
