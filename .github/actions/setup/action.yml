@@ -14,6 +14,18 @@ runs:
       id: versions
       shell: bash
       run: python scripts/ci/metadata.py tools
+    - name: 选定 Xcode
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        XCODE_VERSION: ${{ steps.versions.outputs.xcode }}
+      run: |
+        sudo xcode-select --switch "/Applications/Xcode_${XCODE_VERSION}.app"
+        # 先取完整输出再截第一行：管道给 head 会让 xcodebuild 写入已关闭的管道而崩溃。
+        actual="$(xcodebuild -version)"
+        actual="${actual%%$'\n'*}"
+        echo "$actual"
+        [[ "$actual" == "Xcode $XCODE_VERSION" ]]
     - name: 安装 Linux 构建依赖
       if: runner.os == 'Linux'
       shell: bash

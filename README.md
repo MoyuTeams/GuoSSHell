@@ -38,7 +38,7 @@ GuoSSHell/
 ├── macos/               Flutter 的 macOS 宿主（沙箱 entitlements）
 ├── integration_test/    M6 集成测试：终端协议、全屏 TUI、coding agent（m6_harness.dart 是公共部分）
 ├── test_driver/         flutter drive 的驱动：截图与报告写进 build/m6/
-├── assets/              内置字体、Rust 依赖许可清单（许可页用）
+├── assets/              内置字体、Rust 依赖许可清单（许可页用）、应用图标源文件（icon/）
 ├── about.toml / .hbs    cargo-about 配置与输出模板（scripts/licenses.sh）
 └── scripts/
     ├── ci/              版本校验、构建打包、签名文件管理与 Release 门禁
@@ -48,6 +48,7 @@ GuoSSHell/
     ├── m6.sh            M6 编排：模拟器矩阵、真机、集成测试、XCUITest、macOS profile、报告汇总
     ├── m6-report.py     把 M6 的测试报告汇总成 markdown
     ├── m1bar.sh         60Hz 帧率自检进度条
+    ├── icons.py         从 assets/icon/ 重新生成各平台应用图标
     └── licenses.sh      重新生成许可页里的 Rust 依赖许可
 ```
 
@@ -111,6 +112,14 @@ Linux 需要 Secret Service；Windows 私钥使用 DPAPI，Android 使用 Keysto
 真机的覆盖、结果、限制与复测命令见 [真机 E2E 补充验收](docs/acceptance-device-2026-09-27.md)。
 官方 rsHell 兼容性与审查修复回归见 [PR 审查修复验收](docs/acceptance-review-2026-09-27.md)。
 签名覆盖、设备标识与测试地址只保存在本机；日志、截图和报告位于 `build/m6/`。
+
+## 应用图标
+
+源文件是 `assets/icon/` 下的 `light.svg`（亮色）与 `dark.svg`（暗色）。iOS / iPadOS 18 起按系统外观切换两版，
+其余平台使用暗色版：Android、Windows 与 Linux 的图标格式没有外观变体，macOS 26 起的外观变体需要 Icon Composer 格式，
+见 [跟进条目](docs/followups/20260928_macOS图标的系统外观变体.md)。
+Android 13 起的主题图标使用单色层，按壁纸主题色着色。
+修改源文件后运行 `python3 scripts/icons.py` 重新生成各平台图标，需要 `rsvg-convert` 与 ImageMagick。
 
 ## 上游与许可
 

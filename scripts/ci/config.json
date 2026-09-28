@@ -2,32 +2,33 @@
   "flutter": "3.47.5",
   "rust": "1.98.1",
   "rinf": "8.10.1",
+  "xcode": "26.6",
   "android_ndk": "28.2.13676358",
   "targets": [
     {
       "id": "macos-universal",
-      "runner": "macos-15",
+      "runner": "macos-26",
       "platform": "macos",
       "arch": "universal",
       "rust_targets": "aarch64-apple-darwin,x86_64-apple-darwin"
     },
     {
       "id": "ios-arm64",
-      "runner": "macos-15",
+      "runner": "macos-26",
       "platform": "ios",
       "arch": "arm64",
       "rust_targets": "aarch64-apple-ios"
     },
     {
       "id": "ios-simulator-arm64",
-      "runner": "macos-15",
+      "runner": "macos-26",
       "platform": "ios-simulator",
       "arch": "arm64",
       "rust_targets": "aarch64-apple-ios-sim"
     },
     {
       "id": "ios-simulator-x64",
-      "runner": "macos-15-intel",
+      "runner": "macos-26-intel",
       "platform": "ios-simulator",
       "arch": "x64",
       "rust_targets": "x86_64-apple-ios"

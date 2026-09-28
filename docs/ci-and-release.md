@@ -30,6 +30,8 @@ macOS、Linux、Windows 三类 runner 执行 Rust 格式检查、Clippy 和 Flut
 Flutter 与 rinf 绑定在干净环境生成，依赖必须满足已提交的锁文件。Actions 自身固定到
 完整提交 SHA，普通任务只有仓库读取权限，只有最后的发布任务获得 `contents: write`。
 Linux / Windows arm64 使用固定 Flutter 源码和原生 Dart SDK，拒绝静默退回 x64 工具链。
+Apple 平台使用 macOS 26 runner（x86_64 iOS 模拟器使用 Intel 镜像），并切换到 `config.json`
+固定的 Xcode 版本，实际版本不符时构建失败。
 Android 使用兼容 rinf 的 Gradle 8 工具链，升级边界见
 `docs/followups/20260927_rinf的Gradle9接口兼容.md`。
 
