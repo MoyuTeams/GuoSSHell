@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/scheduler.dart';
@@ -28,6 +29,8 @@ import 'package:guosh_shell/src/bindings/bindings.dart';
 
 import '../settings/terminal_font.dart';
 import '../settings/interface_font.dart';
+import 'terminal_clipboard_actions.dart';
+import 'terminal_input_mode.dart';
 import 'terminal_zoom.dart';
 import 'frame.dart';
 import 'frame_terminal.dart';
@@ -88,7 +91,7 @@ class TerminalPaneController extends ChangeNotifier {
   /// 最近画上的一帧的序号（画面一致性自检按它与 Rust 发出的帧对齐）。
   int get lastFrameSeq => _lastFrameSeq;
   int _lastFrameSeq = 0;
-  bool get canCopy => selection.selection != null;
+  bool get canCopy => selection.selection?.normalized.isCollapsed == false;
 
   /// 复制选区（取文在引擎里）。
   void copy() => _pane?._copySelection();
@@ -176,6 +179,25 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   /// Flutter 自带的选区菜单（iOS 上是系统风格气垫）。
   final ContextMenuController _selectionMenu = ContextMenuController();
+  final _inputMode = TerminalInputMode.shared;
+  late final _pointerClipboard = TerminalClipboardActions(
+    selection: () {
+      final selected = _terminalController.selection?.normalized;
+      return selected == null || selected.isCollapsed
+          ? null
+          : (selected.begin, selected.end);
+    },
+    requestCopy: () => CopyRequest(sessionId: _sessionId).sendSignalToRust(),
+    writeClipboard: (text) => Clipboard.setData(ClipboardData(text: text)),
+    clearSelection: () {
+      if (!mounted) return;
+      _selectionEcho = null;
+      _terminalController.setExternalSelection(null, null);
+      _sendSelectionRequest(clear: true);
+    },
+    paste: _pasteClipboard,
+    onError: (error) => debugPrint('终端剪贴板操作失败：$error'),
+  );
 
   /// 样式与选区菜单锚点共用缩放后的度量，实际尺寸照常传给远端 PTY。
   late final _settings = SettingsState.latestRustSignal!.message;
@@ -243,6 +265,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     _scroll.addListener(_onScroll);
     _controller._pane = this;
     _zoom.addListener(_onZoomChanged);
+    _inputMode.addListener(_onInputModeChanged);
     InterfaceTypography.terminal.addListener(_onTerminalFontChanged);
     _startSession();
   }
@@ -262,6 +285,8 @@ class _TerminalPaneState extends State<TerminalPane> {
     _perfSub?.cancel();
     _promptSub?.cancel();
     _promptsDismissed.dispose();
+    _pointerClipboard.dispose();
+    _inputMode.removeListener(_onInputModeChanged);
     _terminalController
       ..removeListener(_onSelectionChanged)
       ..onSelectionIntent = null;
@@ -506,8 +531,7 @@ class _TerminalPaneState extends State<TerminalPane> {
   /// 引擎取文回来 → 进剪贴板 + 清选区（对齐 Termux）。
   void _onClipboardText(RustSignalPack<ClipboardText> pack) {
     if (!mounted || pack.message.sessionId != _sessionId) return;
-    Clipboard.setData(ClipboardData(text: pack.message.text));
-    _sendSelectionRequest(clear: true);
+    unawaited(_pointerClipboard.receiveCopy(pack.message.text));
   }
 
   /// fork 上报的选区意图 → 换算成引擎绝对行 → 发 SelectionRequest。
@@ -684,11 +708,18 @@ class _TerminalPaneState extends State<TerminalPane> {
   TerminalGeometry? _sentGeometry;
   Timer? _resizeTimer;
 
-  /// 选区变化 → 系统风格的选区菜单（Flutter 自带，iOS 上渲染成气垫）。
-  /// 选区清空时收起。
+  void _onInputModeChanged() {
+    if (!_inputMode.touch) _selectionMenu.remove();
+  }
+
+  /// 只有触屏选区显示浮动菜单；鼠标选区仅高亮，由右键直接复制或粘贴。
   void _onSelectionChanged() {
     if (!mounted) return;
-    if (_terminalController.selection == null) {
+    if (!_inputMode.touch) {
+      _selectionMenu.remove();
+      return;
+    }
+    if (_terminalController.selection?.normalized.isCollapsed != false) {
       _selectionMenu.remove();
       return;
     }
@@ -744,7 +775,7 @@ class _TerminalPaneState extends State<TerminalPane> {
   /// 复制选区：取文在引擎里（Dart 不碰 BufferLine），发请求等 ClipboardText。
   void _copySelection() {
     if (_state != SessionState.connected) return;
-    CopyRequest(sessionId: _sessionId).sendSignalToRust();
+    _pointerClipboard.copy();
   }
 
   /// 全选：滚回与屏幕的全部内容（引擎的选区终点列是排除式的，所以终点取列数）。
@@ -787,6 +818,7 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   /// 发起会话：分配编号，等终端量好几何后发 ConnectRequest。
   void _startSession() {
+    _pointerClipboard.cancelCopy();
     _sessionId = _nextSessionId++;
     _promptsDismissed.value = false;
     _selectionEcho = null;
@@ -900,7 +932,7 @@ class _TerminalPaneState extends State<TerminalPane> {
                   child: TerminalZoomSurface(
                     zoom: _zoom,
                     onStart: widget.onActivate,
-                    child: _TerminalSurface(
+                    child: TerminalViewport(
                       key: _terminalSurfaceKey,
                       terminal: _terminal,
                       controller: _terminalController,
@@ -908,6 +940,12 @@ class _TerminalPaneState extends State<TerminalPane> {
                       focusNode: _terminalFocus,
                       style: _style,
                       onKeyEvent: widget.onKeyEvent,
+                      inputMode: _inputMode,
+                      onSecondaryTap: () {
+                        if (_state != SessionState.connected) return;
+                        _terminalFocus.requestFocus();
+                        unawaited(_pointerClipboard.rightClick());
+                      },
                       backgroundOpacity: widget.backgroundOpacity,
                     ),
                   ),
@@ -926,16 +964,18 @@ class _TerminalPaneState extends State<TerminalPane> {
 
 /// fork 的 TerminalView 需要有界高度（内部是 Scrollable）。
 /// 会话期常驻（连接前也要完成首次布局，几何才能随 ConnectRequest 发出）。
-class _TerminalSurface extends StatelessWidget {
+class TerminalViewport extends StatelessWidget {
   final FrameTerminal terminal;
   final TerminalController controller;
   final ScrollController scrollController;
   final FocusNode focusNode;
   final TerminalStyle style;
   final double backgroundOpacity;
+  final TerminalInputMode inputMode;
+  final VoidCallback? onSecondaryTap;
   final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
 
-  const _TerminalSurface({
+  const TerminalViewport({
     super.key,
     required this.terminal,
     required this.controller,
@@ -943,13 +983,28 @@ class _TerminalSurface extends StatelessWidget {
     required this.focusNode,
     required this.style,
     required this.backgroundOpacity,
+    required this.inputMode,
+    this.onSecondaryTap,
     this.onKeyEvent,
   });
 
   @override
   Widget build(BuildContext context) {
     // 滚动条跟着 fork 的 Scrollable（滚回）；远端接管滚动时 fork 不滚，也就不显示。
-    return Scrollbar(controller: scrollController, child: _terminalView());
+    return ListenableBuilder(
+      listenable: inputMode,
+      builder: (context, _) => Listener(
+        onPointerDown: (event) => inputMode.pointer(event.kind),
+        onPointerHover: (event) {
+          if (!event.synthesized && event.kind == PointerDeviceKind.mouse) {
+            inputMode.pointer(event.kind);
+          }
+        },
+        onPointerSignal: (event) => inputMode.pointer(event.kind),
+        onPointerPanZoomStart: (event) => inputMode.pointer(event.kind),
+        child: Scrollbar(controller: scrollController, child: _terminalView()),
+      ),
+    );
   }
 
   Widget _terminalView() {
@@ -958,7 +1013,13 @@ class _TerminalSurface extends StatelessWidget {
       controller: controller,
       scrollController: scrollController,
       focusNode: focusNode,
-      onKeyEvent: onKeyEvent,
+      onKeyEvent: (node, event) {
+        if (!event.synthesized &&
+            (event is KeyDownEvent || event is KeyRepeatEvent)) {
+          inputMode.keyboard();
+        }
+        return onKeyEvent?.call(node, event) ?? KeyEventResult.ignored;
+      },
       autoResize: true,
       shortcuts: _terminalShortcuts,
       // iOS 软键盘的退格不产生硬件按键事件，必须靠编辑增量探测
@@ -967,6 +1028,11 @@ class _TerminalSurface extends StatelessWidget {
       textStyle: style,
       theme: TerminalThemes.defaultTheme,
       backgroundOpacity: backgroundOpacity,
+      showSelectionHandles: inputMode.touch,
+      // 渲染库仅在事件没有交给远端鼠标模式时调用此回调；Shift 可保留本地操作。
+      onSecondaryTapUp: onSecondaryTap == null
+          ? null
+          : (_, _) => onSecondaryTap!(),
       keyboardType: TextInputType.emailAddress,
       keyboardAppearance: Brightness.dark,
     );

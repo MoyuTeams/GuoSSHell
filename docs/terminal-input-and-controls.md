@@ -14,6 +14,14 @@ iSH 通过 `UIKeyCommand` 注册终端组合；Blink 使用 WebKit 输入并单�
 - [iSH 硬件组合键](https://github.com/ish-app/ish/blob/83348361fe65311f6e87ad2e1cbb0ac38d123f69/app/TerminalView.m)
 - [Blink 原生输入入口](https://github.com/blinksh/blink/blob/a90b4423c8b7a86770c24a7eaa6c13b0a5904b18/KB/Native/Views/KBWebView.swift)
 
+## 选区与复制粘贴
+
+- 所有平台按实际输入方式切换选区控件，包括 iPad 接入键盘、鼠标或触控板的场景。
+- 鼠标拖选不显示触屏手柄或浮动菜单；有选区时右键复制，剪贴板写入成功后清除原选区，无选区时右键粘贴。复制期间重新选择的内容保留。
+- 触摸或触控笔操作显示选区手柄，并在选中内容时显示复制粘贴菜单；改用鼠标、触控板或硬件键盘时收起这些控件。
+- 远端程序启用鼠标上报时仍接收鼠标操作；按住 Shift 可拖选或使用本地右键复制粘贴。
+- 选区文字由 Rust 引擎提供；剪贴板操作未完成时忽略重复右键，避免粘贴旧内容。
+
 ## 缩放
 
 - 在终端画面用两指捏合或展开；触控板捏合也支持。

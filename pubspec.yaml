@@ -39,13 +39,9 @@ dependencies:
   meta: ^1.19.0
   tuple: ^2.0.2
 
-  # 终端渲染层：我们的 fork（TerminalSurface 接口收窄，方案 A）。
-  # 上游 Termphin/terminal_view v0.2.0 的直接后裔；ref 由 PLAN §6.1 的
-  # fork 决定约束：升级 = 换 ref + 跑它的测试 + 我们的回归。
+  # 固定 fork 快照及局部适配见 packages/terminal_view/UPSTREAM.md。
   terminal_view:
-    git:
-      url: https://github.com/Anthony-Hoo/terminal_view.git
-      ref: "f0a1e0d9a717311ab622581508bdbacdf65f19de"
+    path: packages/terminal_view
   rinf: ^8.10.1
   path_provider: ^2.1.6
   url_launcher: ^6.3.2

@@ -611,10 +611,10 @@ render object 与它自己的 `Terminal` 缓冲类型耦合，换数据源必须
 painter 不违反铁律 4。
 
 **M2 fork 决定（2026-09-16，/grill-me 定案）：**
-上游 `Termphin/terminal_view` @ v0.2.0，MIT；**GitHub fork + git 依赖**（与 Rust 上游
-对称，源码不进本仓库）：fork 仓库 `Anthony-Hoo/terminal_view` 的 `guosh/frame-source` 分支。
-开发期在仓库根放 `pubspec_overrides.yaml` 指向本地工作副本 `.forks/terminal_view`
-（两者都不入库），改完推 fork、`pubspec.yaml` 换 ref。
+上游 `Termphin/terminal_view` @ v0.2.0，MIT；使用 `Anthony-Hoo/terminal_view`
+的固定快照作为 `packages/terminal_view` 本地依赖。来源提交及局部适配范围见
+[UPSTREAM.md](packages/terminal_view/UPSTREAM.md)。应用按实际输入方式控制选区手柄，
+包的默认行为保持兼容。
 接缝用**方案 A**：render/widget 依赖的 `Terminal` 收窄成接口，painter 与行/段落缓存
 **零改动**，App 侧写帧适配器把解码后的帧**填进池化的真 BufferLine**（内容逐 run 比对、
 相同则复用对象且不碰 `version`——行 Picture 重放的命中条件）；包内 parser/buffer

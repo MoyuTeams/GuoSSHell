@@ -643,11 +643,9 @@ packages:
   terminal_view:
     dependency: "direct main"
     description:
-      path: "."
-      ref: f0a1e0d9a717311ab622581508bdbacdf65f19de
-      resolved-ref: f0a1e0d9a717311ab622581508bdbacdf65f19de
-      url: "https://github.com/Anthony-Hoo/terminal_view.git"
-    source: git
+      path: "packages/terminal_view"
+      relative: true
+    source: path
     version: "0.2.1"
   test_api:
     dependency: transitive
