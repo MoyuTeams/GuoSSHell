@@ -2,6 +2,9 @@ import 'dart:async';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:fluent_ui/fluent_ui.dart' as f;
+
+import '../desktop/windows_chrome.dart';
 
 import '../bindings/bindings.dart';
 import 'key_requests.dart';
@@ -100,6 +103,7 @@ class _KeyImportPageState extends State<KeyImportPage> {
 
   @override
   Widget build(BuildContext context) {
+    if (isWindowsDesktop) return _desktop();
     final scheme = Theme.of(context).colorScheme;
     return Scaffold(
       appBar: AppBar(
@@ -179,4 +183,80 @@ class _KeyImportPageState extends State<KeyImportPage> {
       ),
     );
   }
+
+  Widget _desktop() => f.ContentDialog(
+    constraints: const BoxConstraints(maxWidth: 600, maxHeight: 700),
+    title: const Text('导入私钥'),
+    actions: [
+      f.Button(
+        onPressed: _busy ? null : () => Navigator.pop(context),
+        child: const Text('取消'),
+      ),
+      f.FilledButton(
+        onPressed: _busy ? null : _import,
+        child: Text(_busy ? '正在导入…' : '导入'),
+      ),
+    ],
+    content: SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          f.InfoLabel(
+            label: '名称',
+            child: f.TextBox(
+              controller: _name,
+              enabled: !_busy,
+              placeholder: '可选，默认使用私钥注释',
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              const Expanded(child: Text('私钥')),
+              f.HyperlinkButton(
+                onPressed: _busy ? null : _pickFile,
+                child: const Text('从文件选择'),
+              ),
+            ],
+          ),
+          f.TextBox(
+            controller: _key,
+            enabled: !_busy,
+            minLines: 5,
+            maxLines: 8,
+            autocorrect: false,
+            enableSuggestions: false,
+            style: const TextStyle(fontFamily: 'Consolas', fontSize: 12),
+            placeholder: 'PEM 或 OpenSSH 私钥',
+          ),
+          const SizedBox(height: 16),
+          f.InfoLabel(
+            label: '口令（可选）',
+            child: f.TextBox(
+              controller: _passphrase,
+              focusNode: _passphraseFocus,
+              enabled: !_busy,
+              obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text(
+            '私钥由 Windows DPAPI 加密后存储在当前用户的数据目录中。',
+            style: TextStyle(fontSize: 12, color: desktopMuted),
+          ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 16),
+              child: f.InfoBar(
+                title: const Text('导入失败'),
+                content: Text(_error!),
+                severity: f.InfoBarSeverity.error,
+              ),
+            ),
+        ],
+      ),
+    ),
+  );
 }

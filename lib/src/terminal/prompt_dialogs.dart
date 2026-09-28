@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../bindings/bindings.dart';
+import '../desktop/windows_chrome.dart';
+import '../desktop/windows_prompt.dart';
 
 /// 对话框的回答。`accept = false` 为取消 / 拒绝。
 @immutable
@@ -11,11 +13,12 @@ class PromptAnswer {
   final List<String> answers;
   final bool remember;
 
-  const PromptAnswer.accepted(this.answers, {this.remember = false}) : accept = true;
+  const PromptAnswer.accepted(this.answers, {this.remember = false})
+    : accept = true;
   const PromptAnswer.declined()
-      : accept = false,
-        answers = const [],
-        remember = false;
+    : accept = false,
+      answers = const [],
+      remember = false;
 }
 
 /// 按问题种类弹对话框。[dismissed] 变 true 时（会话已失败或被关闭）对话框自行关闭，
@@ -30,12 +33,17 @@ Future<PromptAnswer> showPromptDialog(
     barrierDismissible: false,
     builder: (context) => _DismissOn(
       dismissed: dismissed,
-      child: switch (prompt.kind) {
-        PromptKind.password || PromptKind.passphrase => _PasswordDialog(prompt: prompt),
-        PromptKind.hostKey => _HostKeyDialog(prompt: prompt),
-        PromptKind.keyboardInteractive => _KeyboardInteractiveDialog(prompt: prompt),
-        PromptKind.cardPin => _CardPinDialog(prompt: prompt),
-      },
+      child: isWindowsDesktop
+          ? WindowsPrompt(prompt: prompt)
+          : switch (prompt.kind) {
+              PromptKind.password ||
+              PromptKind.passphrase => _PasswordDialog(prompt: prompt),
+              PromptKind.hostKey => _HostKeyDialog(prompt: prompt),
+              PromptKind.keyboardInteractive => _KeyboardInteractiveDialog(
+                prompt: prompt,
+              ),
+              PromptKind.cardPin => _CardPinDialog(prompt: prompt),
+            },
     ),
   );
   return answer ?? const PromptAnswer.declined();
@@ -64,7 +72,9 @@ class _DismissOnState extends State<_DismissOn> {
   void _check() {
     if (!widget.dismissed.value || !mounted) return;
     final route = ModalRoute.of(context);
-    if (route != null && route.isActive) Navigator.of(context).removeRoute(route);
+    if (route != null && route.isActive) {
+      Navigator.of(context).removeRoute(route);
+    }
   }
 
   @override
@@ -99,7 +109,8 @@ class _PasswordDialogState extends State<_PasswordDialog> {
   }
 
   void _submit() {
-    Navigator.of(context).pop(PromptAnswer.accepted([_password.text], remember: _remember));
+    Navigator.of(context)
+        .pop(PromptAnswer.accepted([_password.text], remember: _remember));
   }
 
   @override
@@ -112,7 +123,11 @@ class _PasswordDialogState extends State<_PasswordDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(passphrase ? '私钥「${prompt.name}」 · ${_target(prompt)}' : _target(prompt)),
+          Text(
+            passphrase
+                ? '私钥「${prompt.name}」 · ${_target(prompt)}'
+                : _target(prompt),
+          ),
           const SizedBox(height: 12),
           TextField(
             controller: _password,
@@ -139,7 +154,8 @@ class _PasswordDialogState extends State<_PasswordDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(context).pop(const PromptAnswer.declined()),
+          onPressed: () =>
+              Navigator.of(context).pop(const PromptAnswer.declined()),
           child: const Text('取消'),
         ),
         FilledButton(onPressed: _submit, child: const Text('连接')),
@@ -168,7 +184,8 @@ class _CardPinDialogState extends State<_CardPinDialog> {
   }
 
   void _submit() {
-    Navigator.of(context).pop(PromptAnswer.accepted([_pin.text], remember: _remember));
+    Navigator.of(context)
+        .pop(PromptAnswer.accepted([_pin.text], remember: _remember));
   }
 
   @override
@@ -212,7 +229,8 @@ class _CardPinDialogState extends State<_CardPinDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(context).pop(const PromptAnswer.declined()),
+          onPressed: () =>
+              Navigator.of(context).pop(const PromptAnswer.declined()),
           child: const Text('取消'),
         ),
         FilledButton(onPressed: _submit, child: const Text('连接')),
@@ -269,11 +287,13 @@ class _HostKeyDialogState extends State<_HostKeyDialog> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(const PromptAnswer.declined()),
+            onPressed: () =>
+                Navigator.of(context).pop(const PromptAnswer.declined()),
             child: const Text('取消'),
           ),
           FilledButton(
-            onPressed: () => Navigator.of(context).pop(const PromptAnswer.accepted([])),
+            onPressed: () =>
+                Navigator.of(context).pop(const PromptAnswer.accepted([])),
             child: const Text('信任并连接'),
           ),
         ],
@@ -308,7 +328,8 @@ class _HostKeyDialogState extends State<_HostKeyDialog> {
       ),
       actions: [
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(const PromptAnswer.declined()),
+          onPressed: () =>
+              Navigator.of(context).pop(const PromptAnswer.declined()),
           child: const Text('断开'),
         ),
         TextButton(
@@ -328,10 +349,12 @@ class _KeyboardInteractiveDialog extends StatefulWidget {
   const _KeyboardInteractiveDialog({required this.prompt});
 
   @override
-  State<_KeyboardInteractiveDialog> createState() => _KeyboardInteractiveDialogState();
+  State<_KeyboardInteractiveDialog> createState() =>
+      _KeyboardInteractiveDialogState();
 }
 
-class _KeyboardInteractiveDialogState extends State<_KeyboardInteractiveDialog> {
+class _KeyboardInteractiveDialogState
+    extends State<_KeyboardInteractiveDialog> {
   late final List<TextEditingController> _answers = [
     for (final _ in widget.prompt.fields) TextEditingController(),
   ];
@@ -346,7 +369,9 @@ class _KeyboardInteractiveDialogState extends State<_KeyboardInteractiveDialog> 
 
   void _submit() {
     Navigator.of(context).pop(
-      PromptAnswer.accepted([for (final controller in _answers) controller.text]),
+      PromptAnswer.accepted([
+        for (final controller in _answers) controller.text,
+      ]),
     );
   }
 
@@ -378,15 +403,20 @@ class _KeyboardInteractiveDialogState extends State<_KeyboardInteractiveDialog> 
                 textInputAction: index == prompt.fields.length - 1
                     ? TextInputAction.done
                     : TextInputAction.next,
-                onSubmitted: index == prompt.fields.length - 1 ? (_) => _submit() : null,
-                inputFormatters: [FilteringTextInputFormatter.deny(RegExp('[\r\n]'))],
+                onSubmitted: index == prompt.fields.length - 1
+                    ? (_) => _submit()
+                    : null,
+                inputFormatters: [
+                  FilteringTextInputFormatter.deny(RegExp('[\r\n]')),
+                ],
               ),
           ],
         ),
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.of(context).pop(const PromptAnswer.declined()),
+          onPressed: () =>
+              Navigator.of(context).pop(const PromptAnswer.declined()),
           child: const Text('取消'),
         ),
         FilledButton(onPressed: _submit, child: const Text('确定')),

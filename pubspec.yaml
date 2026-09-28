@@ -30,6 +30,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -50,8 +52,15 @@ dependencies:
   file_selector: ^1.1.0
   # 分屏：可拖动分隔条的多窗格布局（MIT）。
   multi_split_view: ^3.6.2
+  # Windows 桌面专属的 Fluent 控件、窗口管理与原生亚克力材质。
+  fluent_ui: ^4.16.1
+  window_manager:
+    path: packages/window_manager
+  flutter_acrylic:
+    path: packages/flutter_acrylic
 
 dev_dependencies:
+  path_provider_platform_interface: ^2.1.2
   flutter_test:
     sdk: flutter
   # M6 验收：在模拟器 / macOS 上驱动真实 App（integration_test），flutter drive 收截图与报告。
@@ -78,19 +87,27 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # 终端内置字体：MesloLGS NF（Meslo LG 的 Nerd Font 补丁版，带 powerline / 图标字形；
-  # Apache 2.0，见 assets/fonts/LICENSE-MesloLGS-NF.txt）。只带常规与粗体，斜体由引擎合成。
+  # 界面默认 MiSans；终端默认 MesloLGS NF。许可随应用提供，用户可分别导入 TTF。
   fonts:
+    - family: MiSans
+      fonts:
+        - asset: assets/fonts/MiSans-Regular.otf
+          weight: 400
+        - asset: assets/fonts/MiSans-Semibold.otf
+          weight: 600
+        - asset: assets/fonts/MiSans-Bold.otf
+          weight: 700
     - family: MesloLGS NF
       fonts:
         - asset: assets/fonts/MesloLGS-NF-Regular.ttf
         - asset: assets/fonts/MesloLGS-NF-Bold.ttf
           weight: 700
 
-  # 许可页：上游 rsHell 的许可与 Rust 依赖的许可（scripts/licenses.sh 生成）。
+  # 标题栏图标与许可页资源；Rust 依赖许可由 scripts/licenses.sh 生成。
   assets:
     - rust/LICENSES/rsHell-MIT.txt
     - assets/fonts/LICENSE-MesloLGS-NF.txt
+    - assets/fonts/LICENSE-MiSans.txt
     - assets/licenses/rust-crates.txt
 
   # To add assets to your application, add an assets section, like this:

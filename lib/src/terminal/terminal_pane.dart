@@ -27,6 +27,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:guosh_shell/src/bindings/bindings.dart';
 
 import '../settings/terminal_font.dart';
+import '../settings/interface_font.dart';
 import 'terminal_zoom.dart';
 import 'frame.dart';
 import 'frame_terminal.dart';
@@ -131,6 +132,9 @@ class TerminalPane extends StatefulWidget {
   /// 一个标签里有多个窗格时，活动窗格描一圈边。
   final bool highlighted;
 
+  /// Windows 材质背景可透过画布；其他平台默认保持原来的不透明终端。
+  final double backgroundOpacity;
+
   /// 在窗格里按下（点、拖、选）：它成为活动窗格。
   final VoidCallback onActivate;
 
@@ -144,6 +148,7 @@ class TerminalPane extends StatefulWidget {
     super.key,
     required this.controller,
     this.highlighted = false,
+    this.backgroundOpacity = 1,
     required this.onActivate,
     required this.onClose,
     this.onKeyEvent,
@@ -174,7 +179,7 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   /// 样式与选区菜单锚点共用缩放后的度量，实际尺寸照常传给远端 PTY。
   late final _settings = SettingsState.latestRustSignal!.message;
-  late final TerminalStyle _baseStyle = terminalStyle(_settings);
+  TerminalStyle get _baseStyle => terminalStyle(_settings);
   late final TerminalZoom _zoom = TerminalZoom(
     defaultSize: _settings.fontSize,
     minSize: _settings.minFontSize,
@@ -183,6 +188,11 @@ class _TerminalPaneState extends State<TerminalPane> {
   TerminalStyle get _style => _baseStyle.copyWith(fontSize: _zoom.size);
 
   void _onZoomChanged() {
+    _selectionMenu.remove();
+    if (mounted) setState(() {});
+  }
+
+  void _onTerminalFontChanged() {
     _selectionMenu.remove();
     if (mounted) setState(() {});
   }
@@ -233,6 +243,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     _scroll.addListener(_onScroll);
     _controller._pane = this;
     _zoom.addListener(_onZoomChanged);
+    InterfaceTypography.terminal.addListener(_onTerminalFontChanged);
     _startSession();
   }
 
@@ -257,6 +268,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     _selectionMenu.remove();
     _resizeTimer?.cancel();
     _zoom.dispose();
+    InterfaceTypography.terminal.removeListener(_onTerminalFontChanged);
     _scroll.dispose();
     super.dispose();
   }
@@ -869,7 +881,9 @@ class _TerminalPaneState extends State<TerminalPane> {
               : null,
         ),
         child: ColoredBox(
-          color: Colors.black,
+          color: widget.backgroundOpacity == 1
+              ? Colors.black
+              : Colors.transparent,
           child: Stack(
             children: [
               Positioned.fill(
@@ -894,6 +908,7 @@ class _TerminalPaneState extends State<TerminalPane> {
                       focusNode: _terminalFocus,
                       style: _style,
                       onKeyEvent: widget.onKeyEvent,
+                      backgroundOpacity: widget.backgroundOpacity,
                     ),
                   ),
                 ),
@@ -917,6 +932,7 @@ class _TerminalSurface extends StatelessWidget {
   final ScrollController scrollController;
   final FocusNode focusNode;
   final TerminalStyle style;
+  final double backgroundOpacity;
   final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
 
   const _TerminalSurface({
@@ -926,6 +942,7 @@ class _TerminalSurface extends StatelessWidget {
     required this.scrollController,
     required this.focusNode,
     required this.style,
+    required this.backgroundOpacity,
     this.onKeyEvent,
   });
 
@@ -949,6 +966,7 @@ class _TerminalSurface extends StatelessWidget {
       deleteDetection: true,
       textStyle: style,
       theme: TerminalThemes.defaultTheme,
+      backgroundOpacity: backgroundOpacity,
       keyboardType: TextInputType.emailAddress,
       keyboardAppearance: Brightness.dark,
     );

@@ -45,6 +45,9 @@ p256 = { version = "0.14", features = ["ecdsa"] }
 # clientDataJSON 里的 challenge 是 base64url。
 ciborium = "0.2"
 base64ct = { version = "1", features = ["alloc"] }
+# 校验用户选择的 TTF，并用内容摘要标识字体缓存。
+ttf-parser = "=0.25.1"
+sha2 = "0.11"
 
 # 业务内核唯一入口：`rshell-m0`（根 workspace 成员，path 依赖）。
 # 它再导出 rshell-core / rshell-session，并把上游 git 依赖的 rev pin 在

@@ -1,6 +1,6 @@
 # PLAN.md — GuoSSHell
 
-> 把 rsHell 的 **Rust 业务内核**原样搬到一个 Flutter 前端的 iOS / iPadOS 应用上。
+> GuoSSHell 使用 rsHell 的 **Rust 业务内核**和 Flutter 前端，提供跨平台纯 SSH 客户端。
 > 这份文件是实现期的唯一参考。所有结论都标注了证据来源；标「实测」的都是本机跑出来的，可复现。
 
 - 当前上游：官方 `hugefiver/rsHell` @ `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268`
@@ -42,7 +42,7 @@
 
 ## 1. 项目定义
 
-**GuoSSHell = 一个纯 SSH 客户端的 iOS / iPadOS 版本。**
+**GuoSSHell 是跨平台的纯 SSH 客户端。** 当前平台见本文开头；早期 iOS 可行性分析保留为架构背景。
 
 明确不做的事：**不做本地 shell 面板**。上游 rsHell 的「本地终端」是一等公民，
 但 iOS 上不可能（没有 `fork`、没有 `openpty`、沙箱禁止 spawn 进程），所以 iOS 版
@@ -758,7 +758,7 @@ LoginGraceTime 把关，与 OpenSSH 客户端一致；交给传输层的连接�
 都放宽到 30 分钟，只防一直没人回答。
 失败分类（认证、主机密钥、网络、超时、钥匙串…）过边界，文案在 Dart；目标在局域网且
 失败属网络或超时类时，Rust 给出系统设置 URL（iOS `app-settings:`），Dart 用 url_launcher 打开。
-字体：内置 MesloLGS NF（常规与粗体，斜体由引擎合成），可选系统 Menlo；缺字回退内置字体。
+字体：界面内置 MiSans，终端内置 MesloLGS NF；均支持 TTF 导入与预览，具体行为见 [字体设置](docs/fonts.md)。
 
 **M2a 粘贴与鼠标决定（2026-09-25）：**
 粘贴与键入共用 `InputRequest`（粘贴标记 `paste = true`）以保留顺序，由 Rust 处理：换行统一成 CR，剔除 Tab 以外的控制字符（防
@@ -1219,7 +1219,7 @@ flutter/Cargokit 全权负责。M0b 的 Xcode 工程建法在 git 历史的
       勾选核对后替换旧条目（rsHell 补丁 P3）
 - [x] keyboard-interactive（容器开启 PAM 问答）；认证失败、网络失败、目标无效的分类提示；
       局域网目标的本地网络提示与设置入口
-- [x] 设置：内置 MesloLGS NF / 系统 Menlo、字号；新会话生效
+- [x] 设置：字体与字号；当前配置和生效范围见 [字体设置](docs/fonts.md)
 - [ ] 真机：钥匙串读写、本地网络权限弹窗与被拒后的提示（待硬件）
 
 **M3a —— 私钥认证与同步 —— ✅ 已完成（2026-09-25，模拟器验收）**

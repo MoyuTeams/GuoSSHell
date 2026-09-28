@@ -20,6 +20,7 @@ mod card;
 mod catalog;
 mod connect;
 mod external_signer;
+mod fonts;
 mod frame_codec;
 mod keys;
 mod lifecycle;

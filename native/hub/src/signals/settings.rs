@@ -1,16 +1,52 @@
-//! 设置（上游默认 `TerminalProfile` 的字体、字号与滚回行数）。
+//! 字体文件、窗口外观与终端设置的界面协议。
 
-use rinf::{DartSignal, RustSignal};
+use rinf::{DartSignal, DartSignalBinary, RustSignal, RustSignalBinary};
 use serde::{Deserialize, Serialize};
 
 /// 取当前设置。
 #[derive(Deserialize, DartSignal)]
 pub struct SettingsQuery {}
 
+/// action 为 query、preview、apply 或 reset；字体文件经二进制通道传递。
+#[derive(Deserialize, DartSignalBinary)]
+pub struct FontFileRequest {
+    pub request_id: u32,
+    pub slot: String,
+    pub action: String,
+    pub file_name: String,
+}
+
+#[derive(Serialize, RustSignalBinary)]
+pub struct FontFileState {
+    pub request_id: u32,
+    pub slot: String,
+    pub family: String,
+    pub label: String,
+    pub error: String,
+    pub applied: bool,
+}
+
+/// Windows 外观独立于终端配置，避免拖动透明度时覆盖其他设置。
+#[derive(Deserialize, DartSignal)]
+pub struct WindowsAppearanceQuery {}
+
+#[derive(Deserialize, DartSignal)]
+pub struct SaveWindowsAppearance {
+    pub acrylic: bool,
+    pub opacity: f64,
+}
+
+#[derive(Serialize, RustSignal)]
+pub struct WindowsAppearanceState {
+    pub acrylic: bool,
+    pub opacity: f64,
+    /// 保存失败时返回原值与错误，界面撤销预览。
+    pub error: String,
+}
+
 /// 只提交被修改的字段，避免尚未收到旧回包时覆盖其他设置。
 #[derive(Default, Deserialize, DartSignal)]
 pub struct SaveSettings {
-    pub font_family: Option<String>,
     pub font_size: Option<f64>,
     pub scrollback_lines: Option<u32>,
     pub show_key_bar: Option<bool>,
@@ -31,10 +67,7 @@ pub struct KeyBarLayoutResult {
 /// 当前设置。设置变化后重发。
 #[derive(Serialize, RustSignal)]
 pub struct SettingsState {
-    pub font_family: String,
     pub font_size: f64,
-    /// 可选的字体（App 内置或系统自带）。
-    pub font_families: Vec<String>,
     pub min_font_size: f64,
     pub max_font_size: f64,
     /// 每个会话保留的滚回行数（已按本机上界收窄）。

@@ -1,20 +1,20 @@
-//! 设置：上游默认 `TerminalProfile` 里的字体、字号与滚回行数（引擎也从这份配置取
-//! 终端参数）。滚回行数另有按本机物理内存分档的上界。
+//! 终端字号与滚回设置、窗口外观，以及字体文件请求的分发。
 
 use std::sync::Arc;
 
-use rinf::{DartSignal, RustSignal, debug_print};
+use rinf::{DartSignal, DartSignalBinary, RustSignal, RustSignalBinary, debug_print};
 use rshell_m0::rshell_core::{TerminalProfile, TerminalSettingsV1};
 use rshell_m0::rshell_storage::{SqliteRepository, StorageError};
 use tokio::task::spawn_blocking;
 
 use crate::app::AppContext;
+use crate::signals::settings::{FontFileRequest, FontFileState};
 use crate::signals::settings::{
-    KeyBarLayoutResult, SaveKeyBarLayout, SaveSettings, SettingsQuery, SettingsState,
+    KeyBarLayoutResult, SaveKeyBarLayout, SaveSettings, SaveWindowsAppearance, SettingsQuery,
+    SettingsState, WindowsAppearanceQuery, WindowsAppearanceState,
 };
 
-/// 可选字体：第一个随 App 内置（带 powerline / Nerd Font 字形），其余是系统自带。
-pub const FONT_FAMILIES: [&str; 2] = ["MesloLGS NF", "Menlo"];
+pub const DEFAULT_TERMINAL_FONT: &str = "MesloLGS NF";
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 32.0;
@@ -72,15 +72,17 @@ pub fn default_profile(repository: &SqliteRepository) -> Result<TerminalProfile,
         .unwrap_or_else(TerminalProfile::p0_default))
 }
 
-/// 默认配置里的字体不是本 App 提供的（上游迁移种下的默认值就是这样）时，
-/// 换成本 App 的默认字体与字号。
+/// 识别本应用的历史配置，避免启动时重置已有字号；字库选择由 fonts 模块管理。
 pub fn adopt_app_defaults(repository: &SqliteRepository) -> Result<(), String> {
     let mut profile =
         default_profile(repository).map_err(|error| format!("load settings: {error:?}"))?;
-    if FONT_FAMILIES.contains(&profile.settings.font_family.as_str()) {
+    if matches!(
+        profile.settings.font_family.as_str(),
+        DEFAULT_TERMINAL_FONT | "Menlo"
+    ) {
         return Ok(());
     }
-    profile.settings.font_family = FONT_FAMILIES[0].to_owned();
+    profile.settings.font_family = DEFAULT_TERMINAL_FONT.to_owned();
     profile.settings.font_size = DEFAULT_FONT_SIZE;
     repository
         .save_terminal_profile(profile)
@@ -110,8 +112,38 @@ pub async fn run(context: Arc<AppContext>) {
     let query_rx = SettingsQuery::get_dart_signal_receiver();
     let save_rx = SaveSettings::get_dart_signal_receiver();
     let layout_rx = SaveKeyBarLayout::get_dart_signal_receiver();
+    let appearance_query_rx = WindowsAppearanceQuery::get_dart_signal_receiver();
+    let appearance_save_rx = SaveWindowsAppearance::get_dart_signal_receiver();
+    let font_file_rx = FontFileRequest::get_dart_signal_receiver();
     loop {
         tokio::select! {
+            pack = font_file_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let task_context = context.clone();
+                let request_id = pack.message.request_id;
+                let slot = pack.message.slot.clone();
+                let result = spawn_blocking(move || {
+                    let root = task_context.known_hosts.parent().unwrap_or_else(|| std::path::Path::new("."));
+                    crate::fonts::handle(root, &task_context.preferences, pack.message, pack.binary)
+                }).await;
+                match result {
+                    Ok((state, binary)) => state.send_signal_to_dart(binary),
+                    Err(error) => FontFileState { request_id, slot, family: String::new(), label: String::new(), error: error.to_string(), applied: false }.send_signal_to_dart(Vec::new()),
+                }
+                continue;
+            }
+            pack = appearance_query_rx.recv() => {
+                if pack.is_none() { break; }
+                publish_appearance(&context, String::new());
+                continue;
+            }
+            pack = appearance_save_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let request = pack.message;
+                let result = save_appearance(&context.preferences, request.acrylic, request.opacity);
+                publish_appearance(&context, result.err().unwrap_or_default());
+                continue;
+            }
             pack = query_rx.recv() => {
                 if pack.is_none() {
                     break;
@@ -152,15 +184,39 @@ pub async fn run(context: Arc<AppContext>) {
     }
 }
 
-/// 存设置。字体必须是可选字体之一（否则不改），字号与滚回行数夹到允许范围。
+/// 透明度只改变背景材质；限制范围保证终端及界面文字的可读性。
+fn appearance_opacity(value: f64) -> Result<f64, String> {
+    if !value.is_finite() {
+        return Err("透明度必须是有限数值".to_owned());
+    }
+    Ok(value.clamp(0.35, 1.0))
+}
+
+fn save_appearance(
+    preferences: &crate::keys::PreferenceFile,
+    acrylic: bool,
+    opacity: f64,
+) -> Result<(), String> {
+    let opacity = appearance_opacity(opacity)?;
+    preferences.update(|value| {
+        value.windows_acrylic = Some(acrylic);
+        value.windows_opacity = Some(opacity);
+    })
+}
+
+fn publish_appearance(context: &AppContext, error: String) {
+    let preferences = context.preferences.get();
+    WindowsAppearanceState {
+        acrylic: preferences.windows_acrylic.unwrap_or(true),
+        opacity: appearance_opacity(preferences.windows_opacity.unwrap_or(0.78)).unwrap_or(0.78),
+        error,
+    }
+    .send_signal_to_dart();
+}
+
+/// 保存终端参数，字号与滚回行数限制在允许范围内。
 fn save(repository: &SqliteRepository, request: &SaveSettings) -> Result<(), StorageError> {
     let mut profile = default_profile(repository)?;
-    if let Some(family) = FONT_FAMILIES
-        .iter()
-        .find(|family| Some(**family) == request.font_family.as_deref())
-    {
-        profile.settings.font_family = (*family).to_owned();
-    }
     if let Some(size) = request.font_size
         && size.is_finite()
     {
@@ -176,12 +232,7 @@ fn save(repository: &SqliteRepository, request: &SaveSettings) -> Result<(), Sto
 async fn publish(context: &Arc<AppContext>) {
     let settings = terminal_settings(context).await;
     SettingsState {
-        font_family: settings.font_family,
         font_size: f64::from(settings.font_size),
-        font_families: FONT_FAMILIES
-            .iter()
-            .map(|family| (*family).to_owned())
-            .collect(),
         min_font_size: f64::from(MIN_FONT_SIZE),
         max_font_size: f64::from(MAX_FONT_SIZE),
         scrollback_lines: u32::try_from(settings.scrollback_lines).unwrap_or(u32::MAX),
@@ -329,9 +380,45 @@ fn validate_key_bar_rows(rows: &[Vec<String>]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
-    use super::{FONT_FAMILIES, adopt_app_defaults, default_profile, save, scrollback_cap_for};
+    use super::{
+        DEFAULT_TERMINAL_FONT, adopt_app_defaults, default_profile, save, scrollback_cap_for,
+    };
     use crate::signals::settings::SaveSettings;
     use rshell_m0::rshell_storage::SqliteRepository;
+
+    #[test]
+    fn windows_appearance_compatible_with_old_preferences() {
+        let old: crate::keys::Preferences =
+            serde_json::from_str(r#"{"sync_keys":true,"show_key_bar":false}"#).expect("旧偏好");
+        assert!(old.sync_keys);
+        assert_eq!(old.show_key_bar, Some(false));
+        assert!(old.windows_acrylic.is_none());
+        assert!(old.windows_opacity.is_none());
+        assert_eq!(super::appearance_opacity(0.0).expect("下界"), 0.35);
+        assert_eq!(super::appearance_opacity(2.0).expect("上界"), 1.0);
+        assert!(super::appearance_opacity(f64::NAN).is_err());
+        assert!(super::appearance_opacity(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn windows_appearance_survives_reopen_without_changing_other_preferences() {
+        let path =
+            std::env::temp_dir().join(format!("guosh-appearance-{}.json", uuid::Uuid::new_v4()));
+        let preferences = crate::keys::PreferenceFile::open(path.clone());
+        preferences
+            .update(|value| {
+                value.show_key_bar = Some(true);
+                value.sync_keys = true;
+            })
+            .expect("其他偏好");
+        super::save_appearance(&preferences, false, 0.6).expect("保存外观");
+        assert!(super::save_appearance(&preferences, true, f64::NAN).is_err());
+        let reopened = crate::keys::PreferenceFile::open(path).get();
+        assert_eq!(reopened.windows_acrylic, Some(false));
+        assert_eq!(reopened.windows_opacity, Some(0.6));
+        assert_eq!(reopened.show_key_bar, Some(true));
+        assert!(reopened.sync_keys);
+    }
 
     #[test]
     fn key_bar_layout_survives_reopen_and_other_preferences() {
@@ -428,13 +515,15 @@ mod tests {
         let repository = repository();
         adopt_app_defaults(&repository).expect("adopt defaults");
         let profile = default_profile(&repository).expect("profile");
-        assert_eq!(profile.settings.font_family, FONT_FAMILIES[0]);
+        assert_eq!(profile.settings.font_family, DEFAULT_TERMINAL_FONT);
         assert_eq!(profile.settings.font_size, 14.0);
 
+        let mut legacy = profile;
+        legacy.settings.font_family = "Menlo".to_owned();
+        repository.save_terminal_profile(legacy).expect("历史配置");
         save(
             &repository,
             &SaveSettings {
-                font_family: Some("Menlo".to_owned()),
                 font_size: Some(17.0),
                 scrollback_lines: Some(3_000),
                 show_key_bar: Some(true),
@@ -449,13 +538,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fonts_are_ignored_and_sizes_clamped() {
+    fn terminal_sizes_are_clamped_without_changing_profile_font() {
         let repository = repository();
         adopt_app_defaults(&repository).expect("adopt defaults");
         save(
             &repository,
             &SaveSettings {
-                font_family: Some("Comic Sans".to_owned()),
                 font_size: Some(200.0),
                 scrollback_lines: Some(10),
                 show_key_bar: Some(false),
@@ -463,7 +551,7 @@ mod tests {
         )
         .expect("save");
         let profile = default_profile(&repository).expect("profile");
-        assert_eq!(profile.settings.font_family, FONT_FAMILIES[0]);
+        assert_eq!(profile.settings.font_family, DEFAULT_TERMINAL_FONT);
         assert_eq!(profile.settings.font_size, 32.0);
         assert_eq!(profile.settings.scrollback_lines, 1_000);
     }
@@ -473,10 +561,6 @@ mod tests {
         let repository = repository();
         adopt_app_defaults(&repository).expect("应用默认设置");
         for request in [
-            SaveSettings {
-                font_family: Some("Menlo".to_owned()),
-                ..SaveSettings::default()
-            },
             SaveSettings {
                 font_size: Some(22.0),
                 ..SaveSettings::default()
@@ -493,7 +577,7 @@ mod tests {
             save(&repository, &request).expect("按字段保存设置");
         }
         let settings = default_profile(&repository).expect("最终设置").settings;
-        assert_eq!(settings.font_family, "Menlo");
+        assert_eq!(settings.font_family, DEFAULT_TERMINAL_FONT);
         assert_eq!(settings.font_size, 22.0);
         assert_eq!(settings.scrollback_lines, 2_000);
     }

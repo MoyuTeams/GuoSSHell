@@ -18,6 +18,7 @@ GuoSSHell/
 │   └── src/
 │       ├── bindings/    rinf gen 生成的 Dart 绑定（**不手改**；rinf 默认不入库）
 │       ├── catalog/     连接目录与编辑
+│       ├── desktop/     Windows Fluent 工作区、自绘标题栏与窗口材质
 │       ├── keys/        私钥、OpenPGP 卡、安全密钥
 │       ├── settings/    设置与开源许可页
 │       ├── terminal/    帧解码与帧驱动的终端适配器、窗格、键位条、交互对话框
@@ -102,7 +103,9 @@ Linux 需要 Secret Service；Windows 私钥使用 DPAPI，Android 使用 Keysto
 
 ## 缩放与功能按钮
 
-终端支持屏幕或触控板双指捏合，以及 `⌘+` / `⌘−` 缩放；`⌘0` 恢复默认字号。
+Windows 的 Fluent 工作区、沉浸标题栏、桌面快捷键和亚克力设置见 [Windows 桌面界面](docs/windows-desktop.md)。其他平台保留各自的导航与窗口行为。
+
+终端支持屏幕或触控板双指捏合；Apple 平台使用 `⌘+` / `⌘−` / `⌘0` 缩放和恢复字号，Windows 使用 `Ctrl` 对应组合。
 下方编辑图标打开可视化双排预览：直接拖动排序、跨排移动、从目录拖入按钮或拖出删除，保存后立即生效。
 按钮等宽、无边框圆角，默认方向键为倒 T 形；支持空位、自定义文本和恢复默认。
 使用说明见 [终端输入、缩放与功能按钮](docs/terminal-input-and-controls.md)。
@@ -112,6 +115,10 @@ Linux 需要 Secret Service；Windows 私钥使用 DPAPI，Android 使用 Keysto
 真机的覆盖、结果、限制与复测命令见 [真机 E2E 补充验收](docs/acceptance-device-2026-09-27.md)。
 官方 rsHell 兼容性与审查修复回归见 [PR 审查修复验收](docs/acceptance-review-2026-09-27.md)。
 签名覆盖、设备标识与测试地址只保存在本机；日志、截图和报告位于 `build/m6/`。
+
+## 界面与终端字体
+
+界面默认 MiSans，终端默认 MesloLGS NF。所有平台均可选择 TTF 文件、预览后应用，并分别恢复内置字体。使用方法、生效范围和许可见 [字体设置](docs/fonts.md)。
 
 ## 应用图标
 
