@@ -50,12 +50,9 @@ dependencies:
   file_selector: ^1.1.0
   # 分屏：可拖动分隔条的多窗格布局（MIT）。
   multi_split_view: ^3.6.2
-  # Windows 桌面专属的 Fluent 控件、窗口管理与原生亚克力材质。
+  # Windows 桌面专属的 Fluent 控件与窗口管理；窗口材质由 Windows 宿主实现。
   fluent_ui: ^4.16.1
-  window_manager:
-    path: packages/window_manager
-  flutter_acrylic:
-    path: packages/flutter_acrylic
+  window_manager: 0.5.2
 
 dev_dependencies:
   path_provider_platform_interface: ^2.1.2

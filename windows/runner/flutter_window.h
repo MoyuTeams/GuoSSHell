@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "win32_window.h"
+#include "window_material.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -28,6 +29,9 @@ class FlutterWindow : public Win32Window {
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
+
+  // 应用自有的窗口材质通道，须先于 Flutter 实例销毁。
+  std::unique_ptr<WindowMaterial> window_material_;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

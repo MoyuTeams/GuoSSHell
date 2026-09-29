@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:fluent_ui/fluent_ui.dart' as f;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_acrylic/flutter_acrylic.dart' as acrylic;
+import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../bindings/bindings.dart';
@@ -57,13 +57,8 @@ class WindowsDesktopWindow {
     await windowManager.setMinimumSize(const Size(760, 520));
     await windowManager.setBackgroundColor(Colors.transparent);
     await windowManager.setPreventClose(true);
-    try {
-      await acrylic.Window.initialize();
-      WindowsAppearance.instance.materialAvailable = true;
-    } catch (_) {
-      // 系统不支持材质时保留完全不透明且可操作的窗口。
-      WindowsAppearance.instance.materialAvailable = false;
-    }
+    // 首次应用失败时 applyMaterial 会关闭材质，保留完全不透明且可操作的窗口。
+    WindowsAppearance.instance.materialAvailable = true;
     initialized = true;
     await WindowsAppearance.instance.applyMaterial();
     WindowsAppearance.instance.connect();
@@ -73,6 +68,8 @@ class WindowsDesktopWindow {
 /// 这里只保留外观预览；持久化及合法值校验由 Rust 完成。
 class WindowsAppearance extends ChangeNotifier {
   static final instance = WindowsAppearance();
+  // 由 Windows 宿主 windows/runner/window_material.cpp 实现。
+  static const _material = MethodChannel('guosshell/window_material');
   bool acrylicEnabled = true;
   double opacity = 0.78;
   bool materialAvailable = false;
@@ -108,15 +105,14 @@ class WindowsAppearance extends ChangeNotifier {
     if (!materialAvailable) return Future.value();
     _effectQueue = _effectQueue.then((_) async {
       try {
-        await acrylic.Window.setEffect(
-          effect: acrylicEnabled
-              ? acrylic.WindowEffect.acrylic
-              : acrylic.WindowEffect.solid,
+        await _material.invokeMethod<void>('setMaterial', {
+          'acrylic': acrylicEnabled,
           // 原生层只提供模糊，色调透明度统一由 Flutter 背景遮罩控制。
-          customAcrylic: true,
-          color: acrylicEnabled ? const Color(0x01191d25) : desktopBackground,
-          dark: true,
-        );
+          'color': (acrylicEnabled
+                  ? const Color(0x01191d25)
+                  : desktopBackground)
+              .toARGB32(),
+        });
       } catch (_) {
         materialAvailable = false;
         notifyListeners();

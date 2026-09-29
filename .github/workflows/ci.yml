@@ -91,11 +91,6 @@ jobs:
       - name: Flutter 单元测试
         if: env.GUOSH_CI_FULL_CHECKS == 'true'
         run: flutter test --no-pub --coverage --reporter expanded
-      - name: Linux 插件注册隔离
-        if: runner.os == 'Linux' && env.GUOSH_CI_FULL_CHECKS == 'true'
-        run: |
-          flutter precache --linux
-          xvfb-run -a python scripts/ci/linux_plugin_check.py
       - name: Windows 原生 SSH 文字输入
         if: runner.os == 'Windows' && env.GUOSH_CI_FULL_CHECKS == 'true'
         run: python scripts/ci/windows_input_check.py

@@ -1,4 +1,0 @@
-# 保留第三方源码的风格；仍检查类型与编译错误。
-analyzer:
-  errors:
-    deprecated_member_use: ignore

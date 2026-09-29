@@ -35,7 +35,7 @@ Ctrl+C、Ctrl+D、Ctrl+W 等控制键保留远端终端含义；文本输入框�
 
 设置中的「窗口外观」提供亚克力开关及 0–65% 背景透明度。拖动即时预览，松开后保存；文字、图标和终端显式背景色不随透明度降低。
 
-Windows 使用接受色调 alpha 的原生 Accent 亚克力分支，并关闭 Windows 11 的固定色调系统背景，避免重复叠加不透明材质。统一通过 Flutter 背景遮罩控制透明度，不使用会让文字一起变淡的整窗透明度。系统材质不可用或启用高对比度时使用不透明背景。
+材质由 Windows 宿主的 `windows/runner/window_material.cpp` 实现，经方法通道 `guosshell/window_material` 切换：使用接受色调 alpha 的原生 Accent 亚克力，并关闭 Windows 11 的固定色调系统背景，避免重复叠加不透明材质。统一通过 Flutter 背景遮罩控制透明度，不使用会让文字一起变淡的整窗透明度。系统材质不可用或启用高对比度时使用不透明背景。
 
 窗口偏好由 Rust 保存，使用 `windows_acrylic`、`windows_opacity` 字段；缺省时使用默认值，不覆盖字体或键位条设置。
 
@@ -43,15 +43,13 @@ Windows 使用接受色调 alpha 的原生 Accent 亚克力分支，并关闭 Wi
 
 布局参考官方 rsHell 固定提交 `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268` 中的 `crates/rshell-ui/src/main_window_shell.rs`、`main_window_layout.rs`、`connection_sidebar_widgets.rs`：常驻侧栏、标签工作区、分屏和明确的键盘焦点。只复用交互结构，不引入 GTK，也不暴露本地 shell。
 
-控件使用 `fluent_ui`，窗口行为使用 [window_manager 的局部适配](../packages/window_manager/UPSTREAM.md)，材质使用 [flutter_acrylic 的局部适配](../packages/flutter_acrylic/UPSTREAM.md)。保留各平台实现与自动注册；Linux 的窗口事件接管和透明绘制仅在显式初始化后生效，应用仅由 Windows 入口调用这些接口。
+控件使用 `fluent_ui`，窗口行为使用 pub.dev 发布版 `window_manager`，应用仅由 Windows 入口调用其接口。材质不依赖第三方插件。
 
 ## 验证
 
 `test/windows_desktop_test.dart` 覆盖平台分流、控制键保留、窄窗口布局、目录查询关联、标签重排、标题栏生命周期和主机密钥确认。
 
 `integration_test/windows_desktop_test.dart` 验证窗口行为、Fluent 编辑器、两类字体的加载与持久化、透明度设置。运行前通过 `GUOSH_DESKTOP_TEST_DATA` 指定隔离数据目录；测试自动结束，不作为交互版分发。
-
-`scripts/ci/linux_plugin_check.py` 编译真实 GTK/Flutter 插件并检查自动注册不改变窗口外观、可见性或关闭处理；受信 Linux CI 在虚拟显示环境运行此项。
 
 `scripts/ci/windows_input_check.py` 启动隔离的环回 SSH 服务，运行 `integration_test/windows_terminal_input_test.dart`。验收向测试窗口发送原生键盘和已提交字符消息，核对英文数字、中文提交、回车及方向键到达对端的字节，并覆盖密码弹窗、设置返回、标签切换和鼠标清选区。此项不替代实体中文输入法的候选窗验收。
 
