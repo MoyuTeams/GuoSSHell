@@ -8,7 +8,7 @@ publish = false
 # M0 的编译-链接探针 crate，现为**根 workspace 的成员**（../Cargo.toml）。
 # 上游内核不在本仓库里 —— 它是官方仓库、pin 住 rev 的 git 依赖；
 # `native/hub`（rinf 信号层）通过本 crate 的 `pub use` 再导出拿类型，
-# 所以**上游 rev 只在这里 pin 这一处**。来源、接口与许可见 UPSTREAM.md。
+# 所以**上游 rev 只在这里 pin 这一处**。来源、接口与许可见根目录 UPSTREAM.md。
 
 [lib]
 name = "rshell_m0"

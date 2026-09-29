@@ -31,9 +31,9 @@ GuoSSHell/
 │   └── src/             lib.rs · signals/ · session.rs · connect.rs · keys.rs · card/ · security_key/ …
 ├── rust/                rshell-m0：上游内核的 pin 点（再导出 rshell-core/session）+ M0 探针与示例
 │   ├── Cargo.toml       上游走 git 依赖，rev 只在这里 pin 这一处
-│   ├── UPSTREAM.md      上游来源、为什么用 git 依赖、许可
 │   └── examples/        m0.rs · m0_loopback.rs · bench_frame.rs · demo_server.rs
 ├── Cargo.toml           根 workspace（members = native/*, rust）+ release profile
+├── UPSTREAM.md          上游依赖的来源、固定版本与改动记录（规则见 AGENTS.md）
 ├── ios/                 Flutter 的 iOS 宿主（Runner；PrivacyInfo.xcprivacy）
 │   └── RunnerUITests/   XCUITest：iPad 键鼠、后台恢复与真实旋转；真机使用 profile（M6）
 ├── macos/               Flutter 的 macOS 宿主（沙箱 entitlements）
@@ -134,7 +134,7 @@ GuoSSHell 以 [MIT 许可](LICENSE) 发布。
 
 直接依赖官方 `hugefiver/rsHell` @ `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268`，MIT。
 该提交包含 GuoSSHell 所需的认证、连接与终端接口，以及顶部滚动区域的稳定行号修复。
-接口与平台依赖边界见 [`rust/UPSTREAM.md`](rust/UPSTREAM.md)。
+接口与平台依赖边界见 [`UPSTREAM.md`](UPSTREAM.md)。
 
 我们只依赖 4 个内核 crate（`rshell-core` / `rshell-session` / `rshell-platform` /
 `rshell-storage`），**不用** `rshell-ui`（22,812 行 GTK4/Relm4 界面层，正是要用 Flutter 替掉的那层）。

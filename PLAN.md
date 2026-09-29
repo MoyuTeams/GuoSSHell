@@ -5,7 +5,7 @@
 
 - 当前上游：官方 `hugefiver/rsHell` @ `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268`
   （2026-09-27，MIT），**作为固定提交的 git 依赖**。上游源码不进本仓库，
-  所需认证与终端接口均已合并到官方仓库；依赖边界见 `rust/UPSTREAM.md`。
+  所需认证与终端接口均已合并到官方仓库；依赖边界见 `UPSTREAM.md`。
   **改上游的原则**：优先复用官方接口；必要的新增能力向上游提交。升级时同步更新 `rev`
   与根锁文件，按 §9.2 第 3 条验证后再使用。
 - 应用名：**GuoSSHell**
@@ -19,7 +19,8 @@
   - `docs/acceptance-m6-2026-09-26.md`（M6 验收计划：coding agent、全屏 TUI、设备矩阵）
   - `docs/acceptance-device-2026-09-27.md`（真机 E2E 结果、性能门槛与修饰键问题）
   - `docs/acceptance-review-2026-09-27.md`（官方 rsHell 兼容性与 PR 审查修复回归）
-  - `rust/`（可运行的 M0 代码 + `bench_frame` 性能基准 + `UPSTREAM.md`）
+  - `rust/`（可运行的 M0 代码 + `bench_frame` 性能基准）
+  - `UPSTREAM.md`（上游依赖的来源、固定版本与改动记录）
 
 ---
 
@@ -138,7 +139,7 @@ Flutter 侧不暴露入口即可。
   2. 上游的 `[patch.crates-io] portable-pty-psmux` —— 它的改动**全在 `src/win/*`**
      与一个只给 dev-dependencies 用的 feature，我们的目标根本不编译这些文件。
      而且换成 git 依赖后，cargo 不再解析依赖的 dev-dependencies，那个 feature 冲突自己消失。
-  详见 `rust/UPSTREAM.md`（含证据与代价）。
+  详见 `UPSTREAM.md`（含证据与代价）。
 
 - **链接可行性已经用命令行验过，不需要 Xcode**（`./scripts/link-check.sh`）：
   两个切片各自链进一个 iOS 可执行文件，**唯一的额外链接标志是 `-liconv`**。
@@ -822,7 +823,7 @@ LoginGraceTime 把关，与 OpenSSH 客户端一致；交给传输层的连接�
 | M0 主机密钥策略：**TOFU 自动接受并落盘** | M0 前提是「不接 UI」，走完整确认会自相矛盾。**明确的技术债，M3 还清** |
 | release profile **不要设 `panic = "abort"`** | 上游 actor 靠 `catch_unwind` 把 panic 转成 `SessionEvent::Crashed`（有 `actor_panic_gtk_survival_macos` 测试守着），abort 会毁掉这条韧性设计 |
 | iPad 优先，iPhone 作为子项 | iPad 有大屏 + 硬件键盘 + 指针支持，能把最难的 IME/软键盘问题推到 M1-b |
-| **仓库形态：独立仓库 + 官方上游 git 依赖** | 本仓库只装应用自己的代码。上游固定到官方仓库的具体 `rev`，根 `Cargo.lock` 进版本控制保证复现；升级需通过内核与应用回归，见 `rust/UPSTREAM.md` |
+| **仓库形态：独立仓库 + 官方上游 git 依赖** | 本仓库只装应用自己的代码。上游固定到官方仓库的具体 `rev`，根 `Cargo.lock` 进版本控制保证复现；升级需通过内核与应用回归，见 `UPSTREAM.md` |
 | **keyring 的 iOS feature 从我们这边打开** | 不用改上游 `Cargo.toml`——Cargo 的 feature 是按包统一的。见 §3.2 |
 | **使用上游仓内的 `portable-pty-psmux`** | Cargo 从同一官方提交解析 path 依赖，无需本仓库另设 root patch；Windows 专用代码不参与 iOS / macOS 编译 |
 | **iOS 上不删上游的本地传输，靠 `-Wl,-dead_strip` 裁符号** | 保留了 M5 里 macOS/Android 白拿本地面板的可能；将来真要摘掉就得 fork 上游（见 §9.2） |
@@ -860,7 +861,7 @@ LoginGraceTime 把关，与 OpenSSH 客户端一致；交给传输层的连接�
      §2 里列过它「需要 iOS 分支」，但那可能是「实现时才发现不需要」——
      等到 M0-c（内网权限）或 M3（keyring）真的碰到壁垒再决定。
    **决策规则**：新增能力向官方上游提交；应用升级到精确 `rev` 时同步更新根锁文件和
-   `rust/UPSTREAM.md`，验证上游内核、应用认证与会话回归、Flutter 测试及 iOS 构建。
+   `UPSTREAM.md`，验证上游内核、应用认证与会话回归、Flutter 测试及 iOS 构建。
 4. **自动发现（mDNS）要不要做**：本期明确不做，但如果 M0-c 的手填体验在局域网里太差，
    可以把它拉回来做一个独立里程碑（编号往后排，不要把 §5 的 M5 占掉——M5 是平台宽度）。
    候选插件已在 §6.1。

@@ -4,7 +4,7 @@
 再导出使用 rsHell；示例程序独立验证 SSH 与终端路径。完整规划见 [`../PLAN.md`](../PLAN.md)。
 
 上游内核**不在这个目录里**——它是 pin 到具体 rev 的 git 依赖。来源、为什么这么做、
-以及许可都在 [`UPSTREAM.md`](UPSTREAM.md)。
+以及许可都在 [`UPSTREAM.md`](../UPSTREAM.md)。
 
 ## 文件
 
@@ -49,7 +49,7 @@ PTY/shell 请求序列 + 写路径 : YES
 - 上游四个 crate 为 iOS 编译**不需要任何源码改动**：keyring 的 `protected` feature
   从我们自己的 `Cargo.toml` 打开（Cargo 的 feature unification），
   `portable-pty-psmux` 由同一官方提交的仓内 path 依赖提供，Windows 专用代码不参与
-  iOS / macOS 编译。详见 `UPSTREAM.md`。
+  iOS / macOS 编译。详见根目录 `UPSTREAM.md`。
 - 两个切片（device / simulator）都能链进一个 iOS 可执行文件，**只需要额外 `-liconv`**。
 - **PTY 家族的符号要靠 `-Wl,-dead_strip` 裁掉。** 不加时最终可执行文件会导入
   `_openpty` / `_login_tty` / `_fork` / `_posix_spawnp` 等；加上之后全部为 0，

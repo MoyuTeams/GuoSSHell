@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # GuoSSHell 环境准备。幂等，可重复执行。
 #
-# 上游内核是 git 依赖（pin 到具体 commit，见 rust/UPSTREAM.md），
+# 上游内核是 git 依赖（pin 到具体 commit，见 UPSTREAM.md），
 # 所以这里不需要克隆任何东西，但首次需要联网让 cargo 把它拉下来。
 set -euo pipefail
 
