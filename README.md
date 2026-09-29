@@ -136,5 +136,8 @@ GuoSSHell 以 [MIT 许可](LICENSE) 发布。
 该提交包含 GuoSSHell 所需的认证、连接与终端接口，以及顶部滚动区域的稳定行号修复。
 接口与平台依赖边界见 [`UPSTREAM.md`](UPSTREAM.md)。
 
+终端渲染使用团队 fork `MoyuTeams/terminal_view`（基于 `Termphin/terminal_view`，MIT），
+以 git 依赖固定到精确提交，改动与理由同样记录在 `UPSTREAM.md`。
+
 我们只依赖 4 个内核 crate（`rshell-core` / `rshell-session` / `rshell-platform` /
 `rshell-storage`），**不用** `rshell-ui`（22,812 行 GTK4/Relm4 界面层，正是要用 Flutter 替掉的那层）。
