@@ -643,9 +643,11 @@ packages:
   terminal_view:
     dependency: "direct main"
     description:
-      path: "packages/terminal_view"
-      relative: true
-    source: path
+      path: "."
+      ref: fb19f119821cf327a3bee4f11d522826b062e54d
+      resolved-ref: fb19f119821cf327a3bee4f11d522826b062e54d
+      url: "https://github.com/MoyuTeams/terminal_view.git"
+    source: git
     version: "0.2.1"
   test_api:
     dependency: transitive

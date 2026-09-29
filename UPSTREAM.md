@@ -91,3 +91,46 @@ apple-native-keyring-store = { version = "1.0.1", features = ["protected"] }
 | `rust/LICENSES/portable-pty-psmux-PATCH-NOTES.md` | 上游 portable-pty-psmux 补丁来源说明副本 |
 
 MIT 许可声明需随软件或其重要部分一起分发；发布时应保留这些第三方许可。
+
+## terminal_view（终端渲染，团队 fork）
+
+| 项 | 值 |
+|---|---|
+| 上游仓库 | https://github.com/Termphin/terminal_view（pub.dev `terminal_view` 0.2.0，fork 自 xterm.dart 4.0.0） |
+| fork | https://github.com/MoyuTeams/terminal_view ，分支 `guosh/frame-source` |
+| 固定提交 | `fb19f119821cf327a3bee4f11d522826b062e54d` |
+| 上游基线 | `19c6ebb4bb03898f3d626c588acd0e0a1d92c152`（Termphin `main`） |
+| 许可证 | MIT，随包保留上游 `LICENSE` 与 `NOTICE` |
+
+```yaml
+terminal_view:
+  git:
+    url: https://github.com/MoyuTeams/terminal_view.git
+    ref: fb19f119821cf327a3bee4f11d522826b062e54d
+```
+
+以下改动都在渲染库的控件、输入连接或绘制内部，应用只能通过 `TerminalView`
+的公开参数和 `TerminalSurface` 接入，无法从外部替换，因此只能在 fork 中修改。
+理由编号对应 AGENTS.md「上游依赖」第 2 条。
+
+| 改动 | fork 提交 | 理由 |
+|---|---|---|
+| `TerminalSurface`：渲染层只依赖收窄的终端接口，由应用填入 Rust 引擎的帧，包内解析器与缓冲区不参与 | `3b4eb92` | ③ 接缝：渲染对象原先绑定包内 `Terminal` 状态机，终端状态的唯一权威在 Rust 引擎 |
+| 选区由嵌入方持有：选区手势只上报意图，高亮按回传坐标绘制；触屏选区手柄作为控件层叠加 | `a3d42d9` | ③ 接缝：选区坐标由引擎计算；② iOS/Android 缺少可拖动的选区手柄 |
+| `showSelectionHandles` 参数，默认开启 | `8613ae4` | ③ 接缝：手柄对鼠标选区也显示并遮挡单元格，库未提供关闭入口；应用按实际输入设备控制 |
+| 文本输入配置关联当前 `FlutterView.viewId` | `37e2ee4` | ① Windows 引擎拒绝不带 `viewId` 的文本输入连接，文字与输入法提交无法到达终端 |
+| iOS 软键盘回车只发送一次 | `21d04c2` | ① 同一次回车同时经动作与文本两路到达，发出两个换行 |
+| 用平台 text editing delta 计算编辑；关闭智能标点 | `d6896f0` | ① 快速输入与输入法提交时重复发送字符 |
+| 硬件按键按键入顺序发送，超时从最后一次文本回调起算 | `1dec90a`、`0e71e52` | ① 回车、方向键等抢在先前字符之前到达 |
+| 撤销 iOS 双空格句号替换 | `70a6d30` | ① 终端收到用户未输入的退格与句号 |
+| 一次插入的多行文本按粘贴处理 | `1523ff0` | ① 粘贴内容被逐行执行，无法走 bracketed paste |
+| 中键按中键上报 | `e1a439d` | ① 中键被报成右键 |
+| 绘制下划线（可与删除线叠加） | `1cb45ce` | ② SGR 下划线被记录但从不绘制，man 参数、vim 拼写错误等信息丢失 |
+| 向远端应用上报鼠标拖动、悬停及修饰键 | `742f721` | ② 鼠标跟踪模式下拖动与悬停不上报，TUI 应用无法使用鼠标 |
+| 仅用户操作能让视图离开底部 | `a80a70b` | ① 清屏回弹后视图不再跟随输出 |
+| 含组合字符的单元格走完整字素绘制 | `f0a1e0d` | ① ASCII 批量绘制丢失组合标记 |
+| 同目录文件使用 `package:` 导入 | `fb19f11` | 代码规范，无行为变化 |
+
+Termphin `main` 在上游基线之后的提交尚未并入 fork。升级时先把 fork 变基到新的
+上游提交，去掉上游已等价修复的改动，更新本节的固定提交与表格，并运行库测试
+及应用的输入、选区、鼠标上报回归。

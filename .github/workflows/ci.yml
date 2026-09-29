@@ -87,12 +87,7 @@ jobs:
         if: env.GUOSH_CI_FULL_CHECKS == 'true'
         run: cargo test --workspace --locked
       - name: Flutter 静态检查
-        run: |
-          # 本地渲染库保留上游测试，它的测试依赖需要独立解析。
-          pushd packages/terminal_view
-          flutter pub get
-          popd
-          flutter analyze --no-pub
+        run: flutter analyze --no-pub
       - name: Flutter 单元测试
         if: env.GUOSH_CI_FULL_CHECKS == 'true'
         run: flutter test --no-pub --coverage --reporter expanded

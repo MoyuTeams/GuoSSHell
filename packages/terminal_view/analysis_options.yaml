@@ -1,6 +1,0 @@
-# 保留来源包的代码风格，继续检查类型和编译错误。
-analyzer:
-  errors:
-    deprecated_member_use: ignore
-  exclude:
-    - build/**

@@ -39,9 +39,11 @@ dependencies:
   meta: ^1.19.0
   tuple: ^2.0.2
 
-  # 固定 fork 快照及局部适配见 packages/terminal_view/UPSTREAM.md。
+  # 团队 fork，固定提交及改动见 UPSTREAM.md。
   terminal_view:
-    path: packages/terminal_view
+    git:
+      url: https://github.com/MoyuTeams/terminal_view.git
+      ref: fb19f119821cf327a3bee4f11d522826b062e54d
   rinf: ^8.10.1
   path_provider: ^2.1.6
   url_launcher: ^6.3.2

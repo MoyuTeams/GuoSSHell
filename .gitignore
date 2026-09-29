@@ -37,7 +37,7 @@ DerivedData/
 /lib/src/serde
 /lib/src/bindings
 
-# 本地 fork 工作副本与开发期依赖覆盖（不入库；正式依赖使用固定提交或 packages 内的来源快照）
+# 本地 fork 工作副本与开发期依赖覆盖（不入库；正式依赖一律固定到发布版本或 git 提交）
 /.forks/
 /pubspec_overrides.yaml
 
