@@ -41,7 +41,7 @@ pub struct CatalogQuery {
     pub query: String,
 }
 
-#[derive(Deserialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PasswordAction {
     /// 编辑时不动已存的密码。
     Keep,
@@ -104,4 +104,126 @@ pub struct CatalogResult {
     pub request_id: u32,
     pub error: CatalogError,
     pub connection_id: String,
+}
+
+/// 桌面目录协议独立于移动旧信号；目录读写不参与设置/profile 的 revision 事务。
+pub const DESKTOP_CATALOG_VERSION: u16 = 1;
+
+#[derive(Deserialize, Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopTransport {
+    NativeSsh,
+    SystemOpenSsh,
+    /// 上游连接目录尚无本地目标的存储类型；目前只能返回明确的不支持错误。
+    LocalShell,
+}
+
+#[derive(Deserialize, Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopCatalogTargetKind {
+    Ssh,
+    LocalShell,
+}
+
+#[derive(Deserialize, Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopAuthMethod {
+    Password,
+    PublicKey,
+    KeyboardInteractive,
+    Agent,
+}
+
+/// 完整目录投影。只有凭据存在性、应用私钥 ID 或用户选择的 System identity 路径，
+/// 不回传密码、私钥内容、口令或 credential_ref。
+#[derive(Serialize, SignalPiece)]
+pub struct DesktopConnectionSummary {
+    pub id: String,
+    pub name: String,
+    pub target_kind: DesktopCatalogTargetKind,
+    pub transport: DesktopTransport,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth: DesktopAuthMethod,
+    pub password_saved: bool,
+    pub key_id: String,
+    pub system_identity_path: String,
+    pub command: String,
+    /// 空串表示沿用应用默认 profile；非空为 UUID 引用。
+    pub profile_id: String,
+}
+
+#[derive(Deserialize, Serialize, DartSignal)]
+pub struct DesktopCatalogQuery {
+    pub version: u16,
+    pub request_id: u32,
+    pub query: String,
+}
+
+#[derive(Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopCatalogError {
+    None,
+    UnsupportedVersion,
+    DesktopOnly,
+    UnsupportedTransport,
+    TargetMismatch,
+    InvalidProfileId,
+    ProfileNotFound,
+    InvalidConnectionId,
+    InvalidIdentity,
+    InvalidAuthentication,
+    CredentialMismatch,
+    HostRequired,
+    HostInvalid,
+    PortInvalid,
+    UsernameRequired,
+    UsernameInvalid,
+    KeyRequired,
+    PasswordRequired,
+    NotFound,
+    Keychain,
+    Storage,
+}
+
+/// 查询的结果与请求 ID 关联，不依赖不具原子保证的“完整目录 revision”。
+#[derive(Serialize, RustSignal)]
+pub struct DesktopCatalogState {
+    pub version: u16,
+    pub request_id: u32,
+    pub error: DesktopCatalogError,
+    pub connections: Vec<DesktopConnectionSummary>,
+}
+
+/// 完整桌面编辑请求；空 ID 新建。每次保存须显式给出目标类型及传输种类。
+/// 密码只在请求中出现，绝不进入结果或日志。
+#[derive(Deserialize, Serialize, DartSignal)]
+pub struct DesktopSaveConnection {
+    pub version: u16,
+    pub request_id: u32,
+    pub id: String,
+    pub name: String,
+    pub target_kind: DesktopCatalogTargetKind,
+    pub transport: DesktopTransport,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth: DesktopAuthMethod,
+    pub password_action: PasswordAction,
+    pub password: String,
+    pub key_id: String,
+    pub system_identity_path: String,
+    pub command: String,
+    /// 空串表示应用默认 profile；非空必须是已存在的 UUID。
+    pub profile_id: String,
+}
+
+#[derive(Serialize, RustSignal)]
+pub struct DesktopCatalogResult {
+    pub version: u16,
+    pub request_id: u32,
+    pub error: DesktopCatalogError,
+    pub connection_id: String,
+}
+
+#[cfg(test)]
+pub(crate) fn inject_desktop_save(bytes: &[u8]) {
+    DesktopSaveConnection::send_dart_signal(bytes, &[]);
 }

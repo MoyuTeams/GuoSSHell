@@ -44,8 +44,13 @@ pub struct AppContext {
 impl AppContext {
     fn open(support_dir: &Path) -> Result<Self, String> {
         rshell_m0::register_credential_store()?;
+        let catalog_path = support_dir.join(CATALOG_FILE);
+        // 仅在数据库文件原先不存在时接管迁移种入的默认配置；已有文件不推测初始化状态。
+        let fresh_catalog = !catalog_path
+            .try_exists()
+            .map_err(|error| format!("inspect catalog: {error}"))?;
         let repository = Arc::new(
-            SqliteRepository::open(support_dir.join(CATALOG_FILE))
+            SqliteRepository::open(catalog_path)
                 .map_err(|error| format!("open catalog: {error:?}"))?,
         );
         repository
@@ -57,7 +62,7 @@ impl AppContext {
         if let Err(error) = credentials.reconcile() {
             debug_print!("[app] credential reconcile: {error:?}");
         }
-        settings::adopt_app_defaults(&repository)?;
+        settings::adopt_app_defaults(&repository, fresh_catalog)?;
         let context = Self {
             repository,
             credentials,

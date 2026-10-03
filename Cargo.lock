@@ -2154,7 +2154,7 @@ dependencies = [
 [[package]]
 name = "portable-pty-psmux"
 version = "0.9.6"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/hugefiver/rsHell?rev=0e2b3514343794dcac5d2ba03b1ad6439b762a2e#0e2b3514343794dcac5d2ba03b1ad6439b762a2e"
 dependencies = [
  "anyhow",
  "downcast-rs",
@@ -2384,12 +2384,13 @@ dependencies = [
 [[package]]
 name = "rshell-core"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/hugefiver/rsHell?rev=0e2b3514343794dcac5d2ba03b1ad6439b762a2e#0e2b3514343794dcac5d2ba03b1ad6439b762a2e"
 dependencies = [
  "async-channel",
  "async-trait",
  "secrecy",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
@@ -2417,7 +2418,7 @@ dependencies = [
 [[package]]
 name = "rshell-platform"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/hugefiver/rsHell?rev=0e2b3514343794dcac5d2ba03b1ad6439b762a2e#0e2b3514343794dcac5d2ba03b1ad6439b762a2e"
 dependencies = [
  "directories",
  "thiserror 2.0.20",
@@ -2427,7 +2428,7 @@ dependencies = [
 [[package]]
 name = "rshell-session"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/hugefiver/rsHell?rev=0e2b3514343794dcac5d2ba03b1ad6439b762a2e#0e2b3514343794dcac5d2ba03b1ad6439b762a2e"
 dependencies = [
  "alacritty_terminal",
  "async-channel",
@@ -2448,7 +2449,7 @@ dependencies = [
 [[package]]
 name = "rshell-storage"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/hugefiver/rsHell?rev=0e2b3514343794dcac5d2ba03b1ad6439b762a2e#0e2b3514343794dcac5d2ba03b1ad6439b762a2e"
 dependencies = [
  "async-trait",
  "keyring",

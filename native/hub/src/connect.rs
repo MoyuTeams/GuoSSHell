@@ -16,7 +16,8 @@ use rinf::{RustSignal, debug_print};
 use rshell_m0::rshell_core::{
     AuthenticationKind, CatalogMutation, ConnectionId, ConnectionProfile, HostKeyDecision,
     HostKeyPrompt, InteractionId, InteractionRequest, InteractionResponse,
-    KeyboardInteractivePrompt, SecretUpdate, SessionFailure, TerminalSize, TransportKind,
+    KeyboardInteractivePrompt, ResolvedTerminalProfile, SecretUpdate, SessionFailure, TerminalSize,
+    TransportKind,
 };
 use rshell_m0::rshell_session::{
     AuthPlan, ExternalSigner, InteractionBroker, KnownHostsVerifier, NativeSshTransport,
@@ -28,6 +29,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio::task::spawn_blocking;
 use tokio::time::Instant;
+use zeroize::Zeroize;
 
 use crate::app::AppContext;
 use crate::card::{CardFailure, CardSigner};
@@ -38,7 +40,10 @@ use crate::security_key::{SecurityKeySigner, SkFailure};
 use crate::session::SessionCommand;
 use crate::signals::interaction::{InteractionPrompt, InteractionReply, PromptField, PromptKind};
 use crate::signals::keys::KeyError;
-use crate::signals::{ConnectRequest, FailureKind};
+use crate::signals::{
+    ConnectRequest, DESKTOP_CONNECT_VERSION, DesktopConnectError, DesktopConnectRequest,
+    DesktopTargetKind, FailureKind,
+};
 
 /// 连接时等网络的总时长上限。等用户（主机密钥确认、问答、PIN、按卡）的时间不算在内——
 /// 那段由服务器把关（OpenSSH 的 LoginGraceTime），与 OpenSSH 客户端一致。
@@ -106,6 +111,12 @@ pub struct Channels<'a> {
     pub backlog: &'a mut VecDeque<SessionCommand>,
 }
 
+/// 一次连接的远端 PTY 参数；桌面传有效 TERM，旧连接沿用传输层默认值。
+pub struct RemoteTerminal<'a> {
+    pub size: TerminalSize,
+    pub terminal_type: Option<&'a str>,
+}
+
 impl Channels<'_> {
     /// 连接期间收到命令：Disconnect（或会话被丢弃）即中止，其余留到连上以后。
     fn defer(&mut self, command: Option<SessionCommand>) -> Result<(), Abort> {
@@ -123,6 +134,212 @@ impl Channels<'_> {
 pub struct Target {
     pub profile: ConnectionProfile,
     pub saved: bool,
+}
+
+pub struct DesktopTarget {
+    pub request: ConnectRequest,
+    pub target: Target,
+    pub settings: ResolvedTerminalProfile,
+    pub quick_password: SecretString,
+}
+
+/// 新协议只在桌面编译目标开放；即使移动端伪造信号，也无法进入目标解析或传输层。
+pub const fn desktop_supported() -> bool {
+    cfg!(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux"
+    ))
+}
+
+/// 校验桌面信号的判别目标及字段组合，不依赖存储或网络。
+fn validate_desktop(
+    request: &DesktopConnectRequest,
+) -> Result<(), (DesktopConnectError, &'static str)> {
+    validate_desktop_for::<{ desktop_supported() }>(request)
+}
+
+fn validate_desktop_for<const DESKTOP: bool>(
+    request: &DesktopConnectRequest,
+) -> Result<(), (DesktopConnectError, &'static str)> {
+    use DesktopConnectError as Error;
+    if request.version != DESKTOP_CONNECT_VERSION {
+        return Err((Error::UnsupportedVersion, "version"));
+    }
+    if !DESKTOP {
+        return Err((
+            Error::PlatformUnavailable,
+            "desktop transport is unavailable on this platform",
+        ));
+    }
+    if request.cols == 0 || request.rows == 0 {
+        return Err((Error::InvalidField, "cols/rows"));
+    }
+    if !request.profile_id.is_empty() && uuid::Uuid::parse_str(&request.profile_id).is_err() {
+        return Err((Error::InvalidProfileId, "profile_id"));
+    }
+    if !request.connection_id.is_empty() {
+        if uuid::Uuid::parse_str(&request.connection_id).is_err() {
+            return Err((Error::InvalidConnectionId, "connection_id"));
+        }
+        if !request.host.is_empty()
+            || request.port != 0
+            || !request.username.is_empty()
+            || !request.password.is_empty()
+            || !request.command.is_empty()
+        {
+            return Err((Error::InvalidField, "connection_id/temporary_target"));
+        }
+    } else {
+        match request.target {
+            DesktopTargetKind::LocalShell => {
+                if !request.host.is_empty()
+                    || request.port != 0
+                    || !request.username.is_empty()
+                    || !request.password.is_empty()
+                    || !request.command.is_empty()
+                {
+                    return Err((Error::InvalidField, "local_target"));
+                }
+            }
+            DesktopTargetKind::NativeSsh | DesktopTargetKind::SystemOpenSsh => {
+                if catalog::validate_target(&request.host, request.port, &request.username).is_err()
+                {
+                    return Err((Error::InvalidField, "host/port/username"));
+                }
+                if request.target == DesktopTargetKind::SystemOpenSsh
+                    && !request.password.is_empty()
+                {
+                    return Err((Error::InvalidField, "password"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 解析目录与终端配置，非 Native 分支只返回不可用，不构造传输层或启动程序。
+pub async fn resolve_desktop(
+    context: &Arc<AppContext>,
+    mut request: DesktopConnectRequest,
+) -> Result<DesktopTarget, (DesktopConnectError, String)> {
+    if let Err((error, field)) = validate_desktop(&request) {
+        request.password.zeroize();
+        return Err((error, field.to_owned()));
+    }
+    // 校验后立刻接管秘密；后续目录读取、目标拒绝均不留下普通 String 副本。
+    let quick_password = SecretString::from(std::mem::take(&mut request.password));
+    let task_context = context.clone();
+    let profile_id = request.profile_id.clone();
+    let connection_id = request.connection_id.clone();
+    let (settings, app_bindings, saved) = spawn_blocking(move || {
+        let saved = if connection_id.is_empty() {
+            None
+        } else {
+            let id = uuid::Uuid::parse_str(&connection_id)
+                .map(ConnectionId::from)
+                .map_err(|_| (DesktopConnectError::InvalidConnectionId, "connection_id"))?;
+            Some(
+                task_context
+                    .repository
+                    .load_catalog()
+                    .map_err(|_| (DesktopConnectError::Storage, "catalog"))?
+                    .connections
+                    .get(&id)
+                    .cloned()
+                    .ok_or((DesktopConnectError::ConnectionNotFound, "connection_id"))?,
+            )
+        };
+        let snapshot = task_context
+            .repository
+            .load_configuration()
+            .map_err(|_| (DesktopConnectError::Storage, "configuration"))?;
+        let wanted = if !profile_id.is_empty() {
+            profile_id
+        } else if let Some(id) = saved
+            .as_ref()
+            .and_then(|profile| profile.terminal_profile_id)
+        {
+            id.0.to_string()
+        } else {
+            snapshot.settings.default_terminal_profile.0.to_string()
+        };
+        let profile = snapshot
+            .profiles
+            .into_iter()
+            .find(|profile| profile.id.0.to_string() == wanted)
+            .ok_or((DesktopConnectError::ProfileNotFound, "profile_id"))?;
+        Ok::<_, (DesktopConnectError, &'static str)>((
+            profile.settings,
+            snapshot.settings.key_bindings,
+            saved,
+        ))
+    })
+    .await
+    .map_err(|_| (DesktopConnectError::Storage, "storage task".to_owned()))?
+    .map_err(|(error, field)| (error, field.to_owned()))?;
+
+    let expected = match request.target {
+        DesktopTargetKind::NativeSsh => TransportKind::NativeSsh,
+        DesktopTargetKind::SystemOpenSsh => TransportKind::SystemOpenSsh,
+        DesktopTargetKind::LocalShell => {
+            return Err((
+                DesktopConnectError::TransportUnavailable,
+                "transport not implemented".to_owned(),
+            ));
+        }
+    };
+    if saved
+        .as_ref()
+        .is_some_and(|profile| profile.transport != expected)
+    {
+        return Err((
+            DesktopConnectError::InvalidField,
+            "target/connection_id".to_owned(),
+        ));
+    }
+    if request.target != DesktopTargetKind::NativeSsh {
+        return Err((
+            DesktopConnectError::TransportUnavailable,
+            "transport not implemented".to_owned(),
+        ));
+    }
+    let native = ConnectRequest {
+        session_id: request.session_id,
+        connection_id: request.connection_id,
+        host: request.host,
+        port: request.port,
+        username: request.username,
+        password: String::new(),
+        command: request.command,
+        cols: request.cols,
+        rows: request.rows,
+        pixel_width: request.pixel_width,
+        pixel_height: request.pixel_height,
+        dpi: request.dpi,
+    };
+    let target = match saved {
+        Some(profile) => Target {
+            profile,
+            saved: true,
+        },
+        None => resolve_target(context, &native).await.map_err(|_| {
+            (
+                DesktopConnectError::InvalidField,
+                "host/port/username".to_owned(),
+            )
+        })?,
+    };
+    // 与连接覆盖项、应用绑定从同一设置快照解析；profile 的同键绑定优先。
+    let settings = settings
+        .resolve(&target.profile.terminal_overrides)
+        .with_app_key_bindings(&app_bindings);
+    Ok(DesktopTarget {
+        request: native,
+        target,
+        settings,
+        quick_password,
+    })
 }
 
 impl Target {
@@ -170,6 +387,12 @@ pub async fn resolve_target(
         .get(&id)
         .cloned()
         .ok_or_else(|| Abort::failed(FailureKind::NotFound, request.connection_id.clone()))?;
+    if profile.transport != TransportKind::NativeSsh {
+        return Err(Abort::failed(
+            FailureKind::InvalidTarget,
+            "目录目标不是 Native SSH".to_owned(),
+        ));
+    }
     Ok(Target {
         profile,
         saved: true,
@@ -182,12 +405,13 @@ pub async fn establish(
     session_id: u32,
     target: Target,
     quick_password: SecretString,
-    size: TerminalSize,
+    terminal: RemoteTerminal<'_>,
     mut channels: Channels<'_>,
     prompts: &mut PromptIds,
 ) -> Result<Connected, Abort> {
     let described = target.describe();
     let Target { profile, saved } = target;
+    let transport_request = native_transport_request(terminal.size, terminal.terminal_type)?;
     // 外部签名器（OpenPGP 卡或安全密钥）与它要会话代办的事（问 PIN、等用户）。
     let mut external: Option<(Signer, UnboundedReceiver<SignerRequest>)> = None;
 
@@ -264,7 +488,6 @@ pub async fn establish(
         })?;
 
     let (broker, mut requests) = interaction_channel();
-    let transport_request = TransportRequest::new(size);
     let (signer, mut signer_requests) = external.unzip();
     let result = {
         let connect = transport.connect(&transport_request, broker.clone());
@@ -319,6 +542,20 @@ pub async fn establish(
         store_password(context, profile.id, password).await;
     }
     Ok(Connected { transport, profile })
+}
+
+/// 旧会话维持上游默认 TERM；桌面会话由不可变的有效配置指定远端 PTY 的 TERM。
+fn native_transport_request(
+    size: TerminalSize,
+    terminal_type: Option<&str>,
+) -> Result<TransportRequest, Abort> {
+    let request = TransportRequest::new(size);
+    match terminal_type {
+        Some(terminal_type) => request
+            .with_terminal_type(terminal_type)
+            .map_err(|_| Abort::failed(FailureKind::InvalidTarget, "terminal_type".to_owned())),
+        None => Ok(request),
+    }
 }
 
 /// 连接的时限，只在等网络时走：有问题等用户回答时暂停。
@@ -819,17 +1056,75 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::{
         Abort, Budget, PendingPins, PromptIds, PromptKind, broker_response, forward_prompt,
-        forward_reply, is_empty_round,
+        forward_reply, is_empty_round, native_transport_request, validate_desktop,
+        validate_desktop_for,
     };
     use crate::signals::interaction::InteractionReply;
+    use crate::signals::{
+        DESKTOP_CONNECT_VERSION, DesktopConnectError, DesktopConnectRequest, DesktopTargetKind,
+    };
     use rshell_m0::rshell_core::{
         AuthPrompt, ConnectionProfile, HostKeyDecision, HostKeyPrompt, InteractionId,
-        InteractionRequest, InteractionResponse, KeyboardInteractivePrompt,
+        InteractionRequest, InteractionResponse, KeyboardInteractivePrompt, TerminalSize,
     };
     use rshell_m0::rshell_session::interaction_channel;
     use secrecy::ExposeSecret;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[test]
+    fn transport_request_uses_desktop_term_and_preserves_legacy_default() {
+        let size = TerminalSize {
+            cols: 80,
+            rows: 24,
+            pixel_width: 640,
+            pixel_height: 480,
+            dpi: 96,
+        };
+        let desktop = native_transport_request(size, Some("vt220"))
+            .ok()
+            .expect("桌面 TERM");
+        assert_eq!(desktop.initial_size(), size);
+        assert_eq!(desktop.terminal_type(), "vt220");
+        let legacy = native_transport_request(size, None)
+            .ok()
+            .expect("旧连接默认 TERM");
+        assert_eq!(legacy.terminal_type(), "xterm-256color");
+        assert!(matches!(
+            native_transport_request(size, Some("invalid\0term")),
+            Err(Abort::Failed { .. })
+        ));
+    }
+
+    #[test]
+    fn forged_mobile_desktop_transport_is_rejected_even_for_a_valid_shape() {
+        let request = DesktopConnectRequest {
+            version: DESKTOP_CONNECT_VERSION,
+            request_id: 1,
+            session_id: 1,
+            target: DesktopTargetKind::LocalShell,
+            profile_id: String::new(),
+            connection_id: String::new(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            command: String::new(),
+            cols: 80,
+            rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+            dpi: 96,
+        };
+        assert!(matches!(
+            validate_desktop_for::<false>(&request),
+            Err((DesktopConnectError::PlatformUnavailable, _))
+        ));
+        assert_eq!(
+            validate_desktop(&request).is_ok(),
+            super::desktop_supported()
+        );
+    }
 
     #[test]
     fn keyboard_interactive_rounds_without_questions_or_text_are_answered_silently() {

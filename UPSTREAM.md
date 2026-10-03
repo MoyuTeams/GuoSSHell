@@ -4,7 +4,7 @@
 每个 fork 或 git 固定的上游依赖在此记一节；直接使用 crates.io／pub.dev
 发布版且未修改的依赖不单独记录。
 
-## rsHell（Rust 内核，未修改）
+## rsHell（Rust 内核，固定功能分支）
 
 GuoSSHell 直接使用官方 rsHell 仓库的内核，通过 git 依赖固定到精确提交。
 `native/hub` 经 `rshell-m0` 的再导出使用这些类型，依赖来源统一在
@@ -13,15 +13,15 @@ GuoSSHell 直接使用官方 rsHell 仓库的内核，通过 git 依赖固定到
 | 项 | 值 |
 |---|---|
 | 上游仓库 | https://github.com/hugefiver/rsHell |
-| 固定提交 | `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268` |
-| 分支快照 | `master`，2026-09-27 |
+| 固定提交 | `0e2b3514343794dcac5d2ba03b1ad6439b762a2e` |
+| 分支快照 | `feat/desktop-config-transactions`，2026-10-04 |
 | 认证与终端接口合并提交 | `d71e81c5b7e786d3981e12d6a24a296ff74d3dae`（上游 PR #1） |
 | 许可证 | MIT，Copyright (c) 2026 hugefiver（副本见 `rust/LICENSES/rsHell-MIT.txt`） |
 
 ```toml
-rshell-core = { git = "https://github.com/hugefiver/rsHell", rev = "718d9b62a8f062af8f5787b5fc27f6c5bbb4f268" }
-rshell-session = { git = "https://github.com/hugefiver/rsHell", rev = "718d9b62a8f062af8f5787b5fc27f6c5bbb4f268" }
-rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "718d9b62a8f062af8f5787b5fc27f6c5bbb4f268" }
+rshell-core = { git = "https://github.com/hugefiver/rsHell", rev = "0e2b3514343794dcac5d2ba03b1ad6439b762a2e" }
+rshell-session = { git = "https://github.com/hugefiver/rsHell", rev = "0e2b3514343794dcac5d2ba03b1ad6439b762a2e" }
+rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "0e2b3514343794dcac5d2ba03b1ad6439b762a2e" }
 ```
 
 固定提交同时包含短的顶部滚动区域中 `stable_row` 的修复，普通输出和同步输出
@@ -41,8 +41,17 @@ rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "718d9b62a
 | 连接时限 | `NativeSshTransport::with_connect_timeout` 独立设置连接全过程的上限 | 管理网络时间预算，并在等待用户交互时暂停计时 |
 | 断链检测 | `NativeSshTransport::with_keepalive` 配置间隔与未应答次数 | 配置 keepalive，并处理结束后的界面状态 |
 | 同步输出 | `TerminalEngine::sync_deadline()` / `end_sync()` 暴露 DEC 2026 截止时间与结束入口 | 会话循环在无新输出时也调度到期刷新 |
+| 配置事务 | `SqliteRepository::load_configuration()` / `commit_configuration()` 提供配置快照、持久版本、冲突检测和受引用保护的配置档删除 | 桌面设置只在原子提交成功后确认保存，旧移动设置继续保留局部更新语义 |
+| 应用元数据 | `TerminalSettingsV1.extensions` 与解析结果按命名空间透传 JSON 数据，旧配置缺省为空且序列化省略；存储沿用完整配置 CAS | 解释字体绑定版本、保护未知载荷，并将绑定与配置档一起原子保存 |
 
-这些接口已在官方提交中提供，GuoSSHell 不再依赖 fork 分支上的补丁。
+认证与终端接口已在上游合并提交中提供；配置事务与可选元数据接口固定到上游功能分支。
+该分支扩展 `rshell-storage`：生产配置快照、SQLite 持久版本、原子条件提交、
+配置档删除及引用保护，并让旧保存入口更新版本。此扩展属于理由③：应用无法
+通过原有独立保存 API，把设置、配置档和版本检查放进存储 worker 的同一事务，
+也无法通过仅供测试的删除入口提供生产删除；应用侧补偿不能保证崩溃安全。
+`rshell-core` 的可选 `extensions` 仅保留应用元数据，不解释内容或版本，解析与绑定合并
+同样保留；沿用既有 `settings_json`，不新增数据库迁移。此扩展也属于理由③：原固定
+模型不能保留应用字段，应用侧独立文件无法让字体绑定参与配置档的同一配置事务。
 `with_connect_timeout` 的上限包括用户交互时间，暂停用户等待计时仍由调用方完成。
 `sync_deadline` 只提供截止时刻，调用方必须主动调用 `end_sync`。
 主机密钥文件中命中的哈希或通配条目若无法安全隔离端点，上游会拒绝替换并保留原文件；

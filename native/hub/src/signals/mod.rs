@@ -76,6 +76,112 @@ pub struct ConnectRequest {
     pub dpi: u32,
 }
 
+/// 桌面会话协议版本。旧 `ConnectRequest` 不参与此协议，也始终只连接 Native SSH。
+pub const DESKTOP_CONNECT_VERSION: u16 = 1;
+
+/// 桌面目标的判别字段；不能用空主机名推断本地会话。
+#[derive(Deserialize, Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopTargetKind {
+    NativeSsh,
+    SystemOpenSsh,
+    LocalShell,
+}
+
+/// 桌面连接。`connection_id` 非空时从目录取目标，目标字段必须为空；否则为临时目标。
+/// `profile_id` 为空时选应用默认终端配置。密码仅供 Native 临时目标使用，不会回显。
+#[derive(Deserialize, DartSignal)]
+pub struct DesktopConnectRequest {
+    pub version: u16,
+    pub request_id: u32,
+    pub session_id: u32,
+    pub target: DesktopTargetKind,
+    pub profile_id: String,
+    pub connection_id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub command: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub dpi: u32,
+}
+
+/// 桌面请求预校验结果；`Accepted` 仅表示已交给 Native 安全连接流程，非 SSH 已认证。
+#[derive(Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopConnectError {
+    Accepted,
+    UnsupportedVersion,
+    PlatformUnavailable,
+    TransportUnavailable,
+    InvalidField,
+    InvalidProfileId,
+    ProfileNotFound,
+    InvalidConnectionId,
+    ConnectionNotFound,
+    Storage,
+}
+
+#[derive(Serialize, RustSignal)]
+pub struct DesktopConnectResult {
+    pub request_id: u32,
+    pub session_id: u32,
+    pub error: DesktopConnectError,
+    /// 出错字段名或固定的不可用原因；不包含目标、密码或其他凭据。
+    pub detail: String,
+}
+
+/// AppReady 成功后查询桌面后端能力；版本与桌面连接协议共用。
+#[derive(Deserialize, Serialize, DartSignal)]
+pub struct DesktopCapabilitiesQuery {
+    pub protocol_version: u16,
+    pub request_id: u32,
+}
+
+#[cfg(test)]
+pub(crate) fn inject_desktop_capabilities_query(bytes: &[u8]) {
+    DesktopCapabilitiesQuery::send_dart_signal(bytes, &[]);
+}
+
+#[derive(Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopCapabilitiesStatus {
+    Ready,
+    UnsupportedVersion,
+    UnsupportedPlatform,
+    StorageUnavailable,
+}
+
+/// Native 当前确实支持的认证入口；不表示宿主设备的硬件或远端服务器已通过探测。
+#[derive(Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopCredentialKind {
+    Password,
+    ManagedPublicKey,
+    KeyboardInteractive,
+}
+
+#[derive(Serialize, SignalPiece)]
+pub struct DesktopTransportCapability {
+    pub target: DesktopTargetKind,
+    /// 仅表示当前 Rust 后端能否接收该目标，不代表网络、宿主程序或硬件已验证。
+    pub backend_available: bool,
+    pub unavailable_reason: String,
+    /// 只列出该目标当前可用的认证方式；不可用目标为空。
+    pub credentials: Vec<DesktopCredentialKind>,
+}
+
+/// 无秘密的桌面能力结果。revision 与 transport 能力来自查询时的后端状态；
+/// 存储/版本/平台不可用时 revision 为 None，不假装读取成功。
+#[derive(Serialize, RustSignal)]
+pub struct DesktopCapabilitiesResult {
+    pub protocol_version: u16,
+    pub request_id: u32,
+    pub status: DesktopCapabilitiesStatus,
+    pub configuration_revision: Option<u64>,
+    pub transports: Vec<DesktopTransportCapability>,
+}
+
 /// 视口变化（旋转 / 改窗口）。→ `engine.resize` + `transport.resize`（远端 window-change）。
 #[derive(Deserialize, DartSignal)]
 pub struct ResizeRequest {

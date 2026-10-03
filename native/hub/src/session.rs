@@ -16,8 +16,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::{Instant, sleep_until};
 
 use rshell_m0::rshell_core::{
-    CellPosition, KeyCode, KeyModifiers, MouseButton, MouseEventKind, RenderFrame, SelectionRange,
-    SessionFailure, TerminalInput, TerminalMouseEvent, TerminalSize, Viewport,
+    CellPosition, KeyCode, KeyModifiers, MouseButton, MouseEventKind, RenderFrame,
+    ResolvedTerminalProfile, SelectionRange, SessionFailure, TerminalInput, TerminalMouseEvent,
+    TerminalSize, Viewport,
 };
 use rshell_m0::rshell_session::{
     DefaultTerminalEngine, EngineDelta, EngineError, NativeSshTransport, SessionTransport,
@@ -25,17 +26,21 @@ use rshell_m0::rshell_session::{
 };
 
 use crate::app::AppContext;
-use crate::connect::{self, Abort, Channels, Connected, PromptIds};
+use crate::connect::{self, Abort, Channels, Connected, PromptIds, RemoteTerminal};
 use crate::frame_codec::pack_runs;
 use crate::local_network;
 use crate::settings;
 use crate::signals::interaction::InteractionReply;
 use crate::signals::{
-    ClipboardText, ConnectHint, ConnectRequest, CopyRequest, DisconnectRequest, FailureKind,
-    FrameAck, FrameUpdate, InputRequest, MouseRequest, PerfStats, ReconnectRequest, ResizeRequest,
-    ScreenCheck, ScreenCheckRequest, SelectionRequest, SelectionState, SessionState, SessionStatus,
-    ViewportRequest,
+    ClipboardText, ConnectHint, ConnectRequest, CopyRequest, DesktopCapabilitiesQuery,
+    DesktopConnectError, DesktopConnectRequest, DesktopConnectResult, DisconnectRequest,
+    FailureKind, FrameAck, FrameUpdate, InputRequest, MouseRequest, PerfStats, ReconnectRequest,
+    ResizeRequest, ScreenCheck, ScreenCheckRequest, SelectionRequest, SelectionState, SessionState,
+    SessionStatus, ViewportRequest,
 };
+
+#[path = "session_capabilities.rs"]
+mod capabilities;
 
 const NO_CURSOR: i32 = -1;
 /// 远端 PTY 最小可行尺寸；Flutter 在极端布局下可能量出 0。
@@ -121,6 +126,8 @@ impl SessionEnd {
 /// 常驻任务：接住 Dart 的会话类请求，按 `session_id` 转给对应的会话任务。
 pub async fn supervisor(context: Arc<AppContext>) {
     let connect_rx = ConnectRequest::get_dart_signal_receiver();
+    let desktop_rx = DesktopConnectRequest::get_dart_signal_receiver();
+    let capabilities_rx = DesktopCapabilitiesQuery::get_dart_signal_receiver();
     let resize_rx = ResizeRequest::get_dart_signal_receiver();
     let disconnect_rx = DisconnectRequest::get_dart_signal_receiver();
     let viewport_rx = ViewportRequest::get_dart_signal_receiver();
@@ -167,6 +174,38 @@ pub async fn supervisor(context: Arc<AppContext>) {
                 tokio::spawn(async move {
                     run_session(context, request, commands, replies).await;
                     let _ = finished.send((session_id, generation));
+                });
+            }
+            pack = desktop_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let request = pack.message;
+                let session_id = request.session_id;
+                if let Some(old) = sessions.remove(&session_id) {
+                    let _ = old.commands.send(SessionCommand::Disconnect);
+                }
+                generations += 1;
+                let generation = generations;
+                let (commands_tx, commands) = unbounded_channel();
+                let (replies_tx, replies) = unbounded_channel();
+                sessions.insert(session_id, SessionHandle {
+                    generation,
+                    commands: commands_tx,
+                    replies: replies_tx,
+                });
+                let context = context.clone();
+                let finished = finished_tx.clone();
+                tokio::spawn(async move {
+                    run_desktop_session(context, request, commands, replies).await;
+                    let _ = finished.send((session_id, generation));
+                });
+            }
+            pack = capabilities_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let context = context.clone();
+                tokio::spawn(async move {
+                    capabilities::handle(&context, pack.message)
+                        .await
+                        .send_signal_to_dart();
                 });
             }
             finished = finished_rx.recv() => {
@@ -243,6 +282,43 @@ pub async fn supervisor(context: Arc<AppContext>) {
                 }
             }
         }
+    }
+}
+
+async fn run_desktop_session(
+    context: Arc<AppContext>,
+    request: DesktopConnectRequest,
+    commands: UnboundedReceiver<SessionCommand>,
+    replies: UnboundedReceiver<InteractionReply>,
+) {
+    let (request_id, session_id) = (request.request_id, request.session_id);
+    match connect::resolve_desktop(&context, request).await {
+        Ok(prepared) => {
+            DesktopConnectResult {
+                request_id,
+                session_id,
+                error: DesktopConnectError::Accepted,
+                detail: String::new(),
+            }
+            .send_signal_to_dart();
+            run_session_inner(
+                context,
+                prepared.request,
+                Some(prepared.target),
+                Some(prepared.settings),
+                Some(prepared.quick_password),
+                commands,
+                replies,
+            )
+            .await;
+        }
+        Err((error, detail)) => DesktopConnectResult {
+            request_id,
+            session_id,
+            error,
+            detail,
+        }
+        .send_signal_to_dart(),
     }
 }
 
@@ -398,14 +474,29 @@ enum Next {
 
 async fn run_session(
     context: Arc<AppContext>,
+    request: ConnectRequest,
+    commands: UnboundedReceiver<SessionCommand>,
+    replies: UnboundedReceiver<InteractionReply>,
+) {
+    run_session_inner(context, request, None, None, None, commands, replies).await;
+}
+
+async fn run_session_inner(
+    context: Arc<AppContext>,
     mut request: ConnectRequest,
+    mut prepared_target: Option<connect::Target>,
+    desktop_settings: Option<ResolvedTerminalProfile>,
+    desktop_password: Option<SecretString>,
     mut commands: UnboundedReceiver<SessionCommand>,
     mut replies: UnboundedReceiver<InteractionReply>,
 ) {
     let session_id = request.session_id;
     // 快速连接的密码：所有权直接移进 SecretString（drop 时清零），请求里不留明文副本
     // （PLAN.md §2.2：secret 不可序列化，边界上手写转换）。只用于第一次连接，重连时再问。
-    let mut quick_password = Some(SecretString::from(std::mem::take(&mut request.password)));
+    let mut quick_password = Some(
+        desktop_password
+            .unwrap_or_else(|| SecretString::from(std::mem::take(&mut request.password))),
+    );
     // 首个 PTY 尺寸就是连接请求带来的几何（Dart 在布局完成后才发请求）；之后跟着改尺寸走。
     let mut size = clamped_size(TerminalSize {
         cols: request.cols,
@@ -427,9 +518,12 @@ async fn run_session(
             .take()
             .unwrap_or_else(|| SecretString::from(String::new()));
         let attempt = async {
-            let target = connect::resolve_target(&context, &request)
-                .await
-                .map_err(|abort| (abort, String::new(), 0))?;
+            let target = match prepared_target.take() {
+                Some(target) => target,
+                None => connect::resolve_target(&context, &request)
+                    .await
+                    .map_err(|abort| (abort, String::new(), 0))?,
+            };
             let described = target.describe();
             let (host, port) = (target.profile.host.clone(), target.profile.port);
             report(session_id, SessionState::Connecting, described.clone());
@@ -443,7 +537,12 @@ async fn run_session(
                 session_id,
                 target,
                 password,
-                size,
+                RemoteTerminal {
+                    size,
+                    terminal_type: desktop_settings
+                        .as_ref()
+                        .map(|settings| settings.terminal_type.as_str()),
+                },
                 channels,
                 &mut prompts,
             )
@@ -502,10 +601,13 @@ async fn run_session(
                 screen
             }
             None => {
-                let resolved = settings::terminal_settings(&context)
-                    .await
-                    .resolve(&profile.terminal_overrides);
-                match DefaultTerminalEngine::new(&resolved, size) {
+                let selected = match &desktop_settings {
+                    Some(settings) => settings.clone(),
+                    None => settings::terminal_settings(&context)
+                        .await
+                        .resolve(&profile.terminal_overrides),
+                };
+                match DefaultTerminalEngine::new(&selected, size) {
                     Ok(engine) => terminal.insert(Screen::new(engine, size)),
                     Err(error) => {
                         report_end(

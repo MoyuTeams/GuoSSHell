@@ -140,9 +140,8 @@ GuoSSHell 以 [MIT 许可](LICENSE) 发布。
 桌面 UI 使用 [`fluent_ui` 4.16.1](https://pub.dev/packages/fluent_ui/versions/4.16.1)
 （BSD-3-Clause）；Dart 依赖许可由 Flutter 许可注册表收集，发行界面需提供查看入口。
 
-直接依赖官方 `hugefiver/rsHell` @ `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268`，MIT。
-该提交包含 GuoSSHell 所需的认证、连接与终端接口，以及顶部滚动区域的稳定行号修复。
-接口与平台依赖边界见 [`UPSTREAM.md`](UPSTREAM.md)。
+直接依赖 `hugefiver/rsHell`，以 git 依赖固定到精确提交，MIT。
+固定提交、所需接口扩展与平台依赖边界统一见 [`UPSTREAM.md`](UPSTREAM.md)。
 
 终端渲染使用团队 fork `MoyuTeams/terminal_view`（基于 `Termphin/terminal_view`，MIT），
 以 git 依赖固定到精确提交，改动与理由同样记录在 `UPSTREAM.md`。

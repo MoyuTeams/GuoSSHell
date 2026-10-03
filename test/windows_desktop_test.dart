@@ -55,7 +55,7 @@ void main() {
     );
   });
 
-  testWidgets('非 Windows 平台维持原入口且不调用窗口插件', (tester) async {
+  testWidgets('非 Windows 桌面使用 Fluent，移动保持原入口且均不调用窗口插件', (tester) async {
     late BuildContext context;
     await tester.pumpWidget(
       MaterialApp(
@@ -76,10 +76,18 @@ void main() {
       debugDefaultTargetPlatformOverride = platform;
       await WindowsDesktopWindow.initialize();
       expect(WindowsDesktopWindow.initialized, isFalse);
-      final app = const GuoSSHellApp().build(context) as MaterialApp;
-      expect(app.builder, isNull);
-      expect(app.localizationsDelegates, isNull);
-      expect(app.theme!.visualDensity, ThemeData().visualDensity);
+      final app = const GuoSSHellApp().build(context);
+      if (platform == TargetPlatform.android ||
+          platform == TargetPlatform.iOS) {
+        expect(app, isA<MaterialApp>());
+        final mobile = app as MaterialApp;
+        expect(mobile.builder, isNull);
+        expect(mobile.localizationsDelegates, isNull);
+        expect(mobile.theme!.visualDensity, ThemeData().visualDensity);
+      } else {
+        expect(app, isA<f.FluentApp>());
+        expect((app as f.FluentApp).builder, isNotNull);
+      }
     }
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     expect(
