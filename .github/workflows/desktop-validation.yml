@@ -54,7 +54,7 @@ jobs:
         include:
           - os: windows-2025
             desktop: windows
-          - os: macos-15
+          - os: macos-26
             desktop: macos
           - os: ubuntu-24.04
             desktop: linux
