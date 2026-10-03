@@ -91,6 +91,7 @@ jobs:
       - name: 标注未运行的原生验收
         if: always()
         run: |
-          echo '### 桌面验证范围 / ${{ matrix.os }}' >> "$GITHUB_STEP_SUMMARY"
-          echo '本任务执行的检查、测试与构建是否通过，以以上步骤和作业状态为准；失败不得视为环境跳过。' >> "$GITHUB_STEP_SUMMARY"
-          echo '未执行原生窗口 smoke、进程级 PTY / System SSH 实链路；也未验证 macOS 沙箱内运行。缺少这些结果不代表运行通过，后续阶段接入真实验收。' >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' \
+            '### 桌面验证范围 / ${{ matrix.os }}' \
+            '本任务执行的检查、测试与构建是否通过，以以上步骤和作业状态为准；失败不得视为环境跳过。' \
+            '未执行原生窗口 smoke、进程级 PTY / System SSH 实链路；也未验证 macOS 沙箱内运行。缺少这些结果不代表运行通过，后续阶段接入真实验收。' >> "$GITHUB_STEP_SUMMARY"
