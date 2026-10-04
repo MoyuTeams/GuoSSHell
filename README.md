@@ -3,7 +3,8 @@
 一个跨平台终端客户端：iPhone / iPad 与 Android 仅提供远端 SSH；macOS、Windows、
 Linux 的产品范围包括远端 SSH 与桌面本地 shell。桌面 System OpenSSH 采用应用隔离的
 配置与主机信任边界，不能读取用户 SSH 配置、agent 或 known_hosts。
-当前桌面提供 Fluent 应用基座，连接目录／工作区／设置仍通过明确标识的原界面入口使用；
+桌面连接目录、连接编辑、密钥管理与认证提示使用 Fluent 界面；Windows 管理面板覆盖常驻工作区，
+macOS/Linux 的终端工作区与字体设置仍通过明确标识的兼容入口使用。
 桌面本地 shell、System OpenSSH 及配置全集尚不可用，不能把 UI 入口视为传输能力。
 业务与终端语义跑在 **Rust**
 （上游 [rsHell](https://github.com/hugefiver/rsHell) 的内核，直接作为固定提交的 git 依赖），
@@ -21,9 +22,8 @@ GuoSSHell/
 │   ├── main.dart        入口：initializeRust + 许可登记 + 平台 UI 分流
 │   └── src/
 │       ├── bindings/    rinf gen 生成的 Dart 绑定（**不手改**；rinf 默认不入库）
-│       ├── desktop/     桌面 Fluent 基座、组件状态与原界面兼容入口
+│       ├── desktop/     Fluent 目录／密钥／认证、Windows 常驻工作区与跨桌面兼容入口
 │       ├── catalog/     连接目录与编辑
-│       ├── desktop/     Windows Fluent 工作区、自绘标题栏与窗口材质
 │       ├── keys/        私钥、OpenPGP 卡、安全密钥
 │       ├── settings/    设置与开源许可页
 │       ├── terminal/    帧解码与帧驱动的终端适配器、窗格、键位条、交互对话框
@@ -100,6 +100,7 @@ flutter run -d <模拟器id 或 macos> \
 ## 持续集成与发版
 
 PR 与普通分支只做静态检查；`main`、`dev` 执行单元测试及多平台应用构建，下载产物见 Actions Artifacts。
+`feat-desktop` 另有三平台检查、单元测试和未签名 debug 构建，范围见[桌面开发验证](docs/desktop-validation-ci.md)。
 推送 `vX.Y.Z` 或 `vX.Y.Z-rc.1` 标签，提交已包含在发布仓库的 `main` 或 `dev` 且完整矩阵通过后发布 GitHub Release。
 Android 发布密钥仅存放于受分支与标签规则限制的 Environment；平台架构、签名状态和发版命令见 [CI 与 GitHub Release](docs/ci-and-release.md)。
 
@@ -108,7 +109,7 @@ Linux 需要 Secret Service；Windows 私钥使用 DPAPI，Android 使用 Keysto
 
 ## 缩放与功能按钮
 
-Windows 的 Fluent 工作区、沉浸标题栏、桌面快捷键和亚克力设置见 [Windows 桌面界面](docs/windows-desktop.md)。其他平台保留各自的导航与窗口行为。
+Windows 的 Fluent 工作区、常驻管理面板、沉浸标题栏、桌面快捷键和亚克力设置见 [Windows 桌面界面](docs/windows-desktop.md)。窗口插件与材质仅在 Windows 初始化；移动端保留原有导航。
 
 终端支持屏幕或触控板双指捏合；Apple 平台使用 `⌘+` / `⌘−` / `⌘0` 缩放和恢复字号，Windows 使用 `Ctrl` 对应组合。
 下方编辑图标打开可视化双排预览：直接拖动排序、跨排移动、从目录拖入按钮或拖出删除，保存后立即生效。

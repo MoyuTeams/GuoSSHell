@@ -27,6 +27,8 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'package:guosh_shell/src/bindings/bindings.dart';
 
+import '../desktop/interaction/desktop_prompt_dialogs.dart';
+import '../platform_target.dart';
 import '../settings/terminal_font.dart';
 import '../settings/interface_font.dart';
 import 'terminal_clipboard_actions.dart';
@@ -274,6 +276,10 @@ class _TerminalPaneState extends State<TerminalPane> {
   void dispose() {
     // 窗格从界面上移除（关窗格、关标签、离开工作区）即结束会话：连接中的一并取消，断开后
     // 还在等重连的也结束；只有连接前被取消的会话 Rust 那边已经收掉了。
+    // 先告知桌面弹窗拒绝，再注销提示监听。弹窗路由可能位于仍存在的工作区 Navigator 上。
+    if (appTargetFor(defaultTargetPlatform) == AppTarget.desktop) {
+      _promptsDismissed.value = true;
+    }
     if (_sessionId != 0 && _state != SessionState.cancelled) {
       DisconnectRequest(sessionId: _sessionId).sendSignalToRust();
     }
@@ -332,8 +338,10 @@ class _TerminalPaneState extends State<TerminalPane> {
   Future<void> _onPrompt(RustSignalPack<InteractionPrompt> pack) async {
     final prompt = pack.message;
     if (!mounted || prompt.sessionId != _sessionId) return;
-    final answer = await showPromptDialog(context, prompt, _promptsDismissed);
-    if (prompt.sessionId != _sessionId) return;
+    final answer = await (appTargetFor(defaultTargetPlatform) == AppTarget.desktop
+        ? showDesktopPromptDialog(context, prompt, _promptsDismissed)
+        : showPromptDialog(context, prompt, _promptsDismissed));
+    if (!mounted || prompt.sessionId != _sessionId) return;
     InteractionReply(
       sessionId: prompt.sessionId,
       promptId: prompt.promptId,

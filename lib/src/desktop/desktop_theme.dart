@@ -50,6 +50,7 @@ abstract final class DesktopMotion {
 FluentThemeData desktopTheme({
   required bool highContrast,
   required bool reduceMotion,
+  String fontFamily = DesktopType.family,
 }) {
   final foreground = highContrast
       ? DesktopColors.highContrastText
@@ -83,7 +84,7 @@ FluentThemeData desktopTheme({
             focusStrokeColorOuter: DesktopColors.highContrastText,
           )
         : null,
-    fontFamily: DesktopType.family,
+    fontFamily: fontFamily,
     typography: Typography.raw(
       display: TextStyle(
         fontSize: DesktopType.title,

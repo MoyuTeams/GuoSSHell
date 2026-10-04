@@ -1,13 +1,28 @@
 import 'package:fluent_ui/fluent_ui.dart';
 
+import '../terminal/session_target.dart';
+import 'catalog/desktop_catalog_gateway.dart';
+import 'catalog/desktop_catalog_page.dart';
 import 'desktop_status.dart';
 import 'desktop_theme.dart';
+import 'keys/desktop_keys_page.dart';
+import 'keys/desktop_key_actions.dart';
+import 'keys/desktop_key_sync_state.dart';
 
-/// 阶段一只有 UI 基座；旧功能单独开兼容窗口，不能算作已迁移页面。
+/// 目录和密钥进入 Fluent；尚未迁移的工作区与设置继续使用兼容入口。
 class DesktopShell extends StatefulWidget {
-  final VoidCallback openLegacy;
+  final ValueChanged<SessionTarget>? openTarget;
+  final VoidCallback? openSettings;
+  final DesktopCatalogGateway catalogGateway;
+  final DesktopKeyActions? keyActions;
 
-  const DesktopShell({super.key, required this.openLegacy});
+  const DesktopShell({
+    super.key,
+    this.openTarget,
+    this.openSettings,
+    this.catalogGateway = const RustDesktopCatalogGateway(),
+    this.keyActions,
+  });
 
   @override
   State<DesktopShell> createState() => _DesktopShellState();
@@ -15,6 +30,29 @@ class DesktopShell extends StatefulWidget {
 
 class _DesktopShellState extends State<DesktopShell> {
   int _selected = 0;
+  final DesktopKeySyncState _keySyncState = DesktopKeySyncState();
+
+  @override
+  void dispose() {
+    _keySyncState.dispose();
+    super.dispose();
+  }
+
+  void _unavailableTarget(SessionTarget _) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => ContentDialog(
+        title: const Text('工作区入口不可用'),
+        content: const Text('未配置工作区入口，连接尚未启动。'),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -40,12 +78,32 @@ class _DesktopShellState extends State<DesktopShell> {
               PaneItem(
                 icon: const Icon(FluentIcons.home),
                 title: const Text('概览'),
-                body: _Overview(openLegacy: widget.openLegacy),
+                body: _Overview(
+                  onOpenCatalog: () => setState(() => _selected = 2),
+                  onOpenSettings: widget.openSettings,
+                ),
               ),
               PaneItem(
                 icon: const Icon(FluentIcons.test_plan),
                 title: const Text('组件状态'),
                 body: const DesktopShowcase(),
+              ),
+              PaneItem(
+                icon: const Icon(FluentIcons.folder_open),
+                title: const Text('连接目录'),
+                body: DesktopCatalogPage(
+                  gateway: widget.catalogGateway,
+                  openTarget: widget.openTarget ?? _unavailableTarget,
+                  keySyncState: _keySyncState,
+                ),
+              ),
+              PaneItem(
+                icon: const Icon(FluentIcons.password_field),
+                title: const Text('密钥管理'),
+                body: DesktopKeysPage(
+                  syncState: _keySyncState,
+                  actions: widget.keyActions,
+                ),
               ),
             ],
           ),
@@ -56,23 +114,33 @@ class _DesktopShellState extends State<DesktopShell> {
 }
 
 class _Overview extends StatelessWidget {
-  final VoidCallback openLegacy;
+  final VoidCallback onOpenCatalog;
+  final VoidCallback? onOpenSettings;
 
-  const _Overview({required this.openLegacy});
+  const _Overview({required this.onOpenCatalog, this.onOpenSettings});
 
   @override
   Widget build(BuildContext context) {
     return DesktopPage(
       title: '连接工作台',
-      description: '桌面 Fluent 导航已就绪；连接目录、工作区和设置仍由原界面提供。',
+      description: '连接目录与密钥管理已迁移至 Fluent；工作区与字体设置暂由明确标记的兼容界面提供。',
       children: [
         const DesktopStatus(
           kind: DesktopStatusKind.empty,
-          title: '桌面页面尚未迁移',
-          detail: '打开兼容界面，继续使用现有 SSH 连接与终端功能。',
+          title: '从连接目录开始',
+          detail: '选择已保存的连接或快速连接；工作区内的新标签与分屏选择器仍待迁移。',
         ),
         const SizedBox(height: DesktopSpacing.lg),
-        FilledButton(onPressed: openLegacy, child: const Text('打开原界面（尚未迁移）')),
+        Wrap(
+          spacing: DesktopSpacing.md,
+          runSpacing: DesktopSpacing.md,
+          children: [
+            FilledButton(onPressed: onOpenCatalog, child: const Text('打开连接目录')),
+            Button(onPressed: onOpenSettings, child: const Text('打开字体设置（兼容）')),
+          ],
+        ),
+        const SizedBox(height: DesktopSpacing.sm),
+        const Text('兼容设置仅提供现有界面／终端字体的选择、预览与恢复；完整 Fluent 设置尚未迁移。'),
       ],
     );
   }

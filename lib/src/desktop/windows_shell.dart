@@ -7,25 +7,43 @@ import 'package:multi_split_view/multi_split_view.dart';
 
 import '../bindings/bindings.dart';
 import '../catalog/catalog_requests.dart';
-import '../catalog/connection_editor_page.dart';
 import '../settings/key_bar_editor.dart';
 import '../terminal/key_bar_layout.dart';
 import '../terminal/session_target.dart';
 import '../terminal/terminal_key_bar.dart';
 import '../terminal/terminal_pane.dart';
 import '../workspace/workspace.dart';
+import 'catalog/desktop_catalog_gateway.dart';
+import 'catalog/desktop_connection_editor.dart';
 import 'desktop_shortcuts.dart';
+import 'desktop_theme.dart';
 import 'desktop_widgets.dart';
+import 'keys/desktop_key_actions.dart';
+import 'keys/desktop_key_sync_state.dart';
+import 'keys/desktop_keys_page.dart';
 import 'windows_chrome.dart';
 import 'windows_settings.dart';
 import 'windows_sidebar.dart';
-import 'windows_keys.dart';
 
 /// Windows 常驻工作区。目录、设置和编辑器的切换不销毁终端会话。
 class WindowsShell extends StatefulWidget {
-  const WindowsShell({super.key, this.initial, this.queryCatalog});
+  const WindowsShell({
+    super.key,
+    this.initial,
+    this.queryCatalog,
+    this.gateway,
+    this.keyActions,
+    this.paneBuilder,
+  });
   final SessionTarget? initial;
   final ValueChanged<String>? queryCatalog;
+  final DesktopCatalogGateway? gateway;
+  final DesktopKeyActions? keyActions;
+
+  /// 生命周期测试可替换叶子渲染，工作区和会话树仍由本壳创建和持有。
+  /// 生产入口不传入此项，继续使用 TerminalPane，不据替身声明真实 SSH 已连接。
+  @visibleForTesting
+  final Widget Function(WorkspacePane)? paneBuilder;
   @override
   State<WindowsShell> createState() => _WindowsShellState();
 }
@@ -36,6 +54,9 @@ class _WindowsShellState extends State<WindowsShell> {
   final _searchFocus = FocusNode();
   final _tabs = <WorkspaceTab, f.Tab>{};
   final _subscriptions = <StreamSubscription>[];
+  late final DesktopCatalogGateway _gateway;
+  late final DesktopKeyActions _keyActions;
+  late final DesktopKeySyncState _keySyncState;
   List<ConnectionSummary>? _connections;
   SettingsState? _settings = SettingsState.latestRustSignal?.message;
   String? _selectedId;
@@ -47,13 +68,22 @@ class _WindowsShellState extends State<WindowsShell> {
   @override
   void initState() {
     super.initState();
+    _gateway = widget.gateway ?? const RustDesktopCatalogGateway();
+    _keyActions =
+        widget.keyActions ?? DesktopKeyActions(query: _gateway.queryKeys);
+    _keySyncState = DesktopKeySyncState(
+      states: _gateway.keyStates,
+      initial: widget.gateway == null
+          ? KeyListState.latestRustSignal?.message
+          : null,
+    );
     _workspace.addListener(_changed);
     if (widget.initial case final initial?) _workspace.openTab(initial);
     _subscriptions.add(
-      CatalogState.rustSignalStream.listen((pack) {
-        if (!mounted || pack.message.query != _search.text) return;
+      _gateway.catalogStates.listen((state) {
+        if (!mounted || state.query != _search.text) return;
         setState(() {
-          _connections = pack.message.connections;
+          _connections = state.connections;
           if (!_connections!.any((item) => item.id == _selectedId)) {
             _selectedId = null;
           }
@@ -72,7 +102,7 @@ class _WindowsShellState extends State<WindowsShell> {
 
   void _query() => widget.queryCatalog != null
       ? widget.queryCatalog!(_search.text)
-      : CatalogQuery(query: _search.text).sendSignalToRust();
+      : _gateway.query(_search.text);
 
   void _changed() {
     if (!mounted) return;
@@ -89,6 +119,7 @@ class _WindowsShellState extends State<WindowsShell> {
     }
     _workspace.removeListener(_changed);
     _workspace.dispose();
+    _keySyncState.dispose();
     _search.dispose();
     _searchFocus.dispose();
     super.dispose();
@@ -113,15 +144,24 @@ class _WindowsShellState extends State<WindowsShell> {
   }) async {
     if (_dialogOpen) return;
     _dialogOpen = true;
-    final target = await f.showDialog<SessionTarget>(
-      context: context,
-      builder: (_) => ConnectionEditorPage(
-        existing: existing,
-        quick: quick,
-        returnTarget: true,
-      ),
-    );
-    _dialogOpen = false;
+    SessionTarget? target;
+    try {
+      target = await f.showDialog<SessionTarget>(
+        context: context,
+        builder: (dialogContext) => _managementPanel(
+          dialogContext,
+          DesktopConnectionEditor(
+            gateway: _gateway,
+            existing: existing,
+            quick: quick,
+            keyActions: _keyActions,
+            keySyncState: _keySyncState,
+          ),
+        ),
+      );
+    } finally {
+      _dialogOpen = false;
+    }
     if (!mounted) return;
     if (target != null) _workspace.openTab(target);
     _query();
@@ -142,13 +182,52 @@ class _WindowsShellState extends State<WindowsShell> {
   Future<void> _keys() async {
     if (_dialogOpen) return;
     _dialogOpen = true;
-    await f.showDialog<void>(
-      context: context,
-      builder: (_) => const WindowsKeys(),
-    );
-    _dialogOpen = false;
+    try {
+      await f.showDialog<void>(
+        context: context,
+        builder: (dialogContext) => _managementPanel(
+          dialogContext,
+          DesktopKeysPage(actions: _keyActions, syncState: _keySyncState),
+        ),
+      );
+    } finally {
+      _dialogOpen = false;
+    }
     _focusActive();
   }
+
+  /// 只在现有 Navigator 上覆盖 Fluent 面板，不建立第二工作区或迁移会话树。
+  Widget _managementPanel(BuildContext dialogContext, Widget page) => Padding(
+    padding: const EdgeInsets.all(DesktopSpacing.xl),
+    child: Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: DesktopMetrics.contentWidth,
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(DesktopMetrics.radius),
+          child: ColoredBox(
+            color: f.FluentTheme.of(dialogContext).scaffoldBackgroundColor,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(DesktopSpacing.sm),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: f.Button(
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('返回工作区'),
+                    ),
+                  ),
+                ),
+                Expanded(child: page),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 
   Future<bool> _confirmClose() async {
     final count = _workspace.panes
@@ -229,8 +308,8 @@ class _WindowsShellState extends State<WindowsShell> {
     }
     try {
       final result = await (action == 'duplicate'
-          ? duplicateConnection(item.id)
-          : deleteConnection(item.id));
+          ? _gateway.duplicate(item.id)
+          : _gateway.delete(item.id));
       if (mounted) {
         setState(
           () => _error = result.error == CatalogError.none
@@ -513,15 +592,18 @@ class _WindowsShellState extends State<WindowsShell> {
   }
 
   Widget _paneNode(PaneNode node, WorkspaceTab tab) => switch (node) {
-    PaneLeaf(:final pane) => TerminalPane(
-      key: pane.key,
-      controller: pane.controller,
-      backgroundOpacity: 0.12,
-      highlighted: tab.root is PaneSplit && tab.active == pane,
-      onActivate: () => _workspace.activate(pane),
-      onClose: () => _workspace.close(pane),
-      onKeyEvent: _key,
-    ),
+    PaneLeaf(:final pane) =>
+      widget.paneBuilder != null
+          ? KeyedSubtree(key: pane.key, child: widget.paneBuilder!(pane))
+          : TerminalPane(
+              key: pane.key,
+              controller: pane.controller,
+              backgroundOpacity: 0.12,
+              highlighted: tab.root is PaneSplit && tab.active == pane,
+              onActivate: () => _workspace.activate(pane),
+              onClose: () => _workspace.close(pane),
+              onKeyEvent: _key,
+            ),
     PaneSplit(:final axis, :final layout) => MultiSplitView(
       key: ObjectKey(node),
       axis: axis,

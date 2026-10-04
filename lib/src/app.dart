@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'bindings/bindings.dart';
 import 'catalog/connection_list_page.dart';
+import 'desktop/catalog/desktop_catalog_gateway.dart';
 import 'desktop/desktop_shell.dart';
 import 'desktop/desktop_status.dart';
 import 'desktop/desktop_theme.dart';
@@ -31,12 +32,14 @@ class GuoSSHellApp extends StatelessWidget {
   final AppTarget? targetOverride;
   final StartupPort? startupOverride;
   final Widget? legacyHomeOverride;
+  final DesktopCatalogGateway? desktopCatalogGatewayOverride;
 
   const GuoSSHellApp({
     super.key,
     this.targetOverride,
     this.startupOverride,
     @visibleForTesting this.legacyHomeOverride,
+    @visibleForTesting this.desktopCatalogGatewayOverride,
   });
 
   @override
@@ -63,6 +66,7 @@ class GuoSSHellApp extends StatelessWidget {
           desktop: true,
           windows: true,
           startup: startupOverride,
+          catalogGateway: desktopCatalogGatewayOverride,
         ),
       );
     }
@@ -73,6 +77,7 @@ class GuoSSHellApp extends StatelessWidget {
           final media = MediaQuery.of(context);
           return fluent.FluentTheme(
             data: desktopTheme(
+              fontFamily: fontFamily,
               highContrast: media.highContrast,
               reduceMotion:
                   media.disableAnimations || media.accessibleNavigation,
@@ -84,6 +89,7 @@ class GuoSSHellApp extends StatelessWidget {
           desktop: true,
           startup: startupOverride,
           legacyHome: legacyHomeOverride,
+          catalogGateway: desktopCatalogGatewayOverride,
         ),
       );
     }
@@ -157,12 +163,14 @@ class _StartupGate extends StatefulWidget {
   final bool windows;
   final StartupPort? startup;
   final Widget? legacyHome;
+  final DesktopCatalogGateway? catalogGateway;
 
   const _StartupGate({
     this.desktop = false,
     this.windows = false,
     this.startup,
     this.legacyHome,
+    this.catalogGateway,
   });
 
   @override
@@ -273,7 +281,7 @@ class _StartupGateState extends State<_StartupGate> {
     });
   }
 
-  void _openLegacy([SessionTarget? target]) {
+  void _openLegacy(SessionTarget target) {
     final reduceMotion =
         MediaQuery.disableAnimationsOf(context) ||
         MediaQuery.accessibleNavigationOf(context);
@@ -284,6 +292,18 @@ class _StartupGateState extends State<_StartupGate> {
           initialTarget: target,
           homeOverride: widget.legacyHome,
         ),
+      ),
+    );
+  }
+
+  void _openLegacySettings() {
+    final reduceMotion =
+        MediaQuery.disableAnimationsOf(context) ||
+        MediaQuery.accessibleNavigationOf(context);
+    Navigator.of(context).push(
+      _DesktopLegacyRoute(
+        reduceMotion: reduceMotion,
+        builder: (_) => const LegacyMaterialSurface.settings(),
       ),
     );
   }
@@ -315,8 +335,13 @@ class _StartupGateState extends State<_StartupGate> {
         );
       }
       return widget.windows
-          ? WindowsShell(initial: _autoTarget)
-          : DesktopShell(openLegacy: _openLegacy);
+          ? WindowsShell(initial: _autoTarget, gateway: widget.catalogGateway)
+          : DesktopShell(
+              openTarget: _openLegacy,
+              openSettings: _openLegacySettings,
+              catalogGateway:
+                  widget.catalogGateway ?? const RustDesktopCatalogGateway(),
+            );
     }
     if (error != null) {
       return Scaffold(

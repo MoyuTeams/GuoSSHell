@@ -15,6 +15,10 @@ Windows 使用独立的 Fluent 深色工作区，窗口管理与亚克力只在 
 
 ## 键盘
 
+连接编辑器可直接导入私钥或登记 OpenPGP 卡，成功后选中新凭据并保留连接草稿。编辑与密钥面板不替换工作区或会话；返回后点击终端可继续输入。
+
+密钥页面逐项显示本机／同步存储位置。迁移请求、未确认结果与操作锁由常驻壳持有，切换面板不会解除；删除确认重新核对引用及存储位置，同步私钥明确提示删除的跨设备影响。
+
 | 操作 | 快捷键 |
 |---|---|
 | 快速连接、新建标签 | Ctrl+Shift+T |
@@ -41,7 +45,7 @@ Ctrl+C、Ctrl+D、Ctrl+W 等控制键保留远端终端含义；文本输入框�
 
 ## 参考与边界
 
-布局参考官方 rsHell 固定提交 `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268` 中的 `crates/rshell-ui/src/main_window_shell.rs`、`main_window_layout.rs`、`connection_sidebar_widgets.rs`：常驻侧栏、标签工作区、分屏和明确的键盘焦点。只复用交互结构，不引入 GTK，也不暴露本地 shell。
+布局参考 rsHell 的 `crates/rshell-ui/src/main_window_shell.rs`、`main_window_layout.rs`、`connection_sidebar_widgets.rs`：常驻侧栏、标签工作区、分屏和明确的键盘焦点。依赖固定版本见根 `UPSTREAM.md`。只复用交互结构，不引入 GTK；当前 Local/System 传输仍不可用。
 
 控件使用 `fluent_ui`，窗口行为使用 pub.dev 发布版 `window_manager`，应用仅由 Windows 入口调用其接口。材质不依赖第三方插件。
 
@@ -52,5 +56,11 @@ Ctrl+C、Ctrl+D、Ctrl+W 等控制键保留远端终端含义；文本输入框�
 `integration_test/windows_desktop_test.dart` 验证窗口行为、Fluent 编辑器、两类字体的加载与持久化、透明度设置。运行前通过 `GUOSH_DESKTOP_TEST_DATA` 指定隔离数据目录；测试自动结束，不作为交互版分发。
 
 `scripts/ci/windows_input_check.py` 启动隔离的环回 SSH 服务，运行 `integration_test/windows_terminal_input_test.dart`。验收向测试窗口发送原生键盘和已提交字符消息，核对英文数字、中文提交、回车及方向键到达对端的字节，并覆盖密码弹窗、设置返回、标签切换和鼠标清选区。此项不替代实体中文输入法的候选窗验收。
+
+`flutter test integration_test/desktop_catalog_smoke_test.dart -d windows --no-pub` 验证真实 Windows 壳中的目录 CRUD、私钥文件错误及独占存储清理。
+
+`pwsh -NoProfile -File scripts/ci/windows_auth_check.ps1` 验证隔离 Native SSH 的 Fluent 密码与首次主机指纹确认、存活会话管理往返、原生字符输入的对端字节与展示回显，以及断开后返回目录。`-VerifyKeygenAbort` 单独验证首次主机密钥生成期间父进程退出后的 Job 清理，不计作 SSH 成功链。runner 不预写应用信任库，服务与宿主执行前纳入各自 Job，测试及清理错误均返回失败。
+
+这些 smoke 不覆盖生产启动时的双字体等待、profile 字体渲染、TERM、System SSH、实体 IME 或其他平台 GUI。
 
 其他平台的原生构建与实体设备适配仍由现有 CI 矩阵及对应平台验收负责。

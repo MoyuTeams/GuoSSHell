@@ -3,8 +3,22 @@ import 'package:flutter/material.dart' as material;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guosh_shell/src/desktop/desktop_shell.dart';
+import 'package:guosh_shell/src/desktop/catalog/desktop_catalog_gateway.dart';
+import 'package:guosh_shell/src/desktop/catalog/desktop_catalog_page.dart';
 import 'package:guosh_shell/src/desktop/desktop_status.dart';
 import 'package:guosh_shell/src/desktop/desktop_theme.dart';
+import 'package:guosh_shell/src/desktop/keys/desktop_keys_page.dart';
+import 'package:guosh_shell/src/bindings/bindings.dart';
+
+class _CatalogWithoutRust extends RustDesktopCatalogGateway {
+  const _CatalogWithoutRust();
+
+  @override
+  void query(String text) {}
+
+  @override
+  Stream<CatalogState> get catalogStates => const Stream.empty();
+}
 
 void main() {
   test('暗色正文与说明在实际字阶满足文字对比度', () {
@@ -29,32 +43,50 @@ void main() {
   });
 
   for (final width in [375.0, 768.0, 1280.0]) {
-    testWidgets('Fluent 工作台在 $width 宽度保留导航与兼容入口', (tester) async {
+    testWidgets('Fluent 工作台在 $width 宽度从概览进入目录', (tester) async {
       tester.view.physicalSize = material.Size(width, 900);
       tester.view.devicePixelRatio = 1;
       addTearDown(() {
         tester.view.resetPhysicalSize();
         tester.view.resetDevicePixelRatio();
       });
-      var opened = 0;
+      var settingsOpened = 0;
       await tester.pumpWidget(
         fluent.FluentApp(
           theme: desktopTheme(highContrast: false, reduceMotion: true),
-          home: DesktopShell(openLegacy: () => opened++),
+          home: DesktopShell(
+            catalogGateway: const _CatalogWithoutRust(),
+            openSettings: () => settingsOpened++,
+          ),
         ),
       );
       await tester.pumpAndSettle();
       expect(find.byType(fluent.NavigationView), findsOneWidget);
-      expect(find.text('桌面页面尚未迁移'), findsOneWidget);
+      expect(find.text('从连接目录开始'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await tester.pump();
       expect(material.FocusManager.instance.primaryFocus, isNotNull);
-      await tester.tap(find.text('打开原界面（尚未迁移）'));
-      expect(opened, 1);
+      final settingsButton = find.widgetWithText(fluent.Button, '打开字体设置（兼容）');
+      await tester.tap(settingsButton);
+      await tester.pump();
+      expect(settingsOpened, 1);
+      final focus = material.Focus.of(tester.element(find.text('打开字体设置（兼容）')));
+      focus.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(settingsOpened, 2);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('打开连接目录'));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.byType(DesktopCatalogPage), findsOneWidget);
+      expect(find.byType(material.MaterialApp), findsNothing);
+      expect(find.text('打开原界面（尚未迁移）'), findsNothing);
       final pane = tester
           .widget<fluent.NavigationView>(find.byType(fluent.NavigationView))
           .pane!;
+      expect((pane.items[3] as fluent.PaneItem).body, isA<DesktopKeysPage>());
       expect(
         pane.displayMode,
         width < DesktopMetrics.narrowWidth
