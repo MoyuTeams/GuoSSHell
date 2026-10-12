@@ -1,64 +1,142 @@
-# 桌面扩展进行中工作
+# 桌面扩展需求与进度
 
-桌面 Fluent 扩展的目标是在 Windows/macOS/Linux 完成完整工作区、输入、设置、本地 Shell 与隔离 System SSH，移动端行为与协议不变。当前处于阶段四中段：输入与资源安全的主体架构已落地并提交检查点，正常生产入口默认关闭，未完成范围见文末与[检查点验收跟进](followups/20261012_桌面检查点待完成验收.md)。
+桌面 Fluent 扩展的目标：在 Windows/macOS/Linux 用 Flutter `fluent_ui` 完成 GuoSSHell 全部页面与操作的桌面实现，新增本地 Shell 与隔离 System OpenSSH 两种 transport，接入 shellx 全部终端配置；iOS/iPadOS/Android 保持现有界面、行为、存储与认证安全边界不变。整体方案与验收口径以本文件为准；依赖 fork 与精确 pin 记录在根 `UPSTREAM.md`。
 
-依赖的团队 fork 与精确 pin 统一记录在根 `UPSTREAM.md`（rsHell、Alacritty、russh、crypto-bigint）。
+## 总体约束
 
-## 会话与传输（4A）
+- 技术栈维持 Flutter + Rust/rinf。Rust 是业务、配置、终端状态、输入编码与 viewport 的唯一权威；Dart 只维护表单草稿、焦点、布局与渲染投影，不引入第二套配置规则、SSH 业务或 ANSI 解析器。
+- 旧移动 `ConnectRequest`/`InputRequest` 与桌面 V1 `DesktopConnectRequest/Result` 的信号布局、必填字段、队列与语义不变；新能力以带版本的独立扩展入口并存，不提升版本号拒绝旧客户端。
+- 系统文件选择器与系统硬件认证提示继续使用系统界面；不降低 host key fail-closed 保证；密码、PIN、私钥、passphrase 不写入日志、数据库、命令行、环境或测试报告。
+- 每阶段完整验收后独立提交到 `feat-desktop`；不把局部交付当阶段完成，最终范围不缩水为 MVP。
+- Windows 为原生实跑收敛平台；macOS/Linux 以三平台 CI 的检查/测试/构建保证可移植性，GUI 与沙箱未实跑时明确标注未验证，不冒充通过。
 
-- 独立 V2 `Prepare/Prepared/Start/Cancel` 与有序事件已实现，DTO 位于 `native/hub/src/signals/desktop_session.rs`。旧移动 Connect/Input、桌面 V1 布局与 `DESKTOP_CONNECT_VERSION=1` 不变。
-- Prepare 无密码、不启动传输；Start 接收密码后立即进入 `SecretString`，核验同身份与真实首次几何。事件按 source + identity + generation + seq 过滤；Accepted 不等于已认证。
-- 新 V2 Prepare/Start 默认关闭：`Preparations::default()` 直接返回 `PolicyUnavailable`，仅测试构造器可开启（`native/hub/src/desktop_prepare.rs`）。在资源预算证明完成前不开放正常入口。
+## 配置全集（设置目标）
 
-## 终端输入（I-G / 4C）
+以 shellx 领域配置为基准，不扩大为 GTK 应用的其他产品功能（分组、tags、旧配置导入不在范围）。颜色选项：`Default`、`OneDark`、`SolarizedDark`、`SolarizedLight`、`Dracula`、`Monokai`、`Nord`、`GruvboxDark`、`TokyoNight`、`CampbellPowershell`，应用主题与 profile 终端颜色分别保存。
 
-- 独立输入策略已交付：`native/hub/src/desktop_input_policy.rs` 提供 raw chord 优先匹配 profile/应用合并绑定、16 项默认候选、消费锁存至物理 Up、Repeat 不重复壳动作；未知来源 typed 拒绝，不猜 US 布局。
-- 输入架构采用「单一原生输入 surface + Rust 先仲裁」：Flutter 公共按键事件没有原生事件 ID，不能与另一通道的元数据做同事件配对。键盘/文本/指针统一进入应用私有的 Windows 输入窗口（TSF 前门控、Translate 前仲裁），Rust 策略决定消费、拒绝或放行文本链，文本/IME 提交保持单一来源票据。
-- 原型代码由 `native-input-spike` feature 控制，默认关闭。已验证：同 SDK 隔离握手、合成按键的精确编码字节、TSF 生命周期与 COM 退休安全、测试宿主三项 ownership 修正。未完成：物理键盘、非 US 布局、真实 IME/文本/指针、ABI 3 与宿主联调。设计约束记录在[桌面键盘同源仲裁接缝](followups/20261008_桌面键盘同源仲裁接缝.md)。
+| 层级 | 字段 | 生效规则与验收要点 |
+|---|---|---|
+| 应用 | `default_terminal_profile`、`color_scheme`、`key_bindings` | 默认 profile 控制新会话；应用配色立即生效；应用绑定经 Rust 与 profile 绑定合并。 |
+| Profile 身份 | `id`、`name`，创建/复制/重命名/删除/切默认 | ID 稳定；默认与被引用 profile 由 Rust 拒绝删除；已有会话持有有效快照不产生悬空引用。 |
+| 终端基础 | `terminal_type`、`initial_cols`、`initial_rows`、`answerback` | 同一 resolved profile 同时进入引擎与 transport；远端 PTY TERM、本地 TERM、ENQ 回答实际符合配置；初始尺寸是期望网格，首个 PTY 以真实布局几何为准。 |
+| 显示 | `font_family`、`font_size`、`color_scheme`、`scrollback_lines` | profile 字体、真实度量与颜色贯通；缺失字体提示回退但保留配置；滚回与光标/前背景实际生效。 |
+| Profile 按键 | `key_bindings` | 同 chord 的 profile 绑定覆盖应用绑定；重复/非法 chord 或未知 action 拒绝；文本编辑焦点不触发终端动作。 |
+| Alt/Meta | `left_alt_as_meta`、`right_alt_as_meta` | 左右 Alt 分开配置与测试；AltGr/Option 组合字符及 IME 不重复编码；未知来源保持旧总 Alt 行为并明确标记。 |
+| 协议 | `enable_csi_u`、`enable_kitty_keyboard` | CSI-U 按 profile 固定开/关；Kitty 按配置门控与真实远端 flags 进退；Super 与 press/repeat/release 仅在配置允许且实际协商满足时编码。 |
+| 鼠标 | `mouse_reporting` | 与远端请求的鼠标模式双门控；关闭时本地选择/滚动可用。 |
+| 滚动 | `scroll_on_output`、`scroll_on_keypress` | 四种组合分别在历史区验证输出/按键/提交/粘贴；移动保留原强制滚底行为。 |
+| GuoSSHell 扩展 | 键位条显示、两排排布、自定义文本、空位、恢复默认 | 桌面默认不显示可开启完整编辑；移动默认显示且协议/存量排布不变。 |
 
-## selected 读取与资源预算（P1）
+校验范围沿用上游：行列 1–999、滚回 100–1,000,000、字号 6–72 有限数值、非空名称/字体/answerback；资源限制由 Rust 返回「配置值/有效值/限制原因」。action 集合为三个 `send:` 序列（VT220 Delete、DEL、BS）及 `clear_scrollback`、`new_tab`、`split_vertical`，全部必须真正生效，不得扩展为本机命令执行入口。
 
-目标：配置读取全部经过分配前硬预算，只有可证明的预算不足才 typed 拒绝，不按库规模、页大小、编码或扫描数拒绝正常小 selected。
+Profile 参数（终端参数/协议/绑定/滚回）在新会话或显式重启时取快照生效，UI 明示；应用配色、字体分槽、键位条、透明度保持即时行为。
 
-架构分三部分：
+## 字体绑定契约
 
-1. 只读 helper 子进程（rsHell `selected-read-helper`）：独立 SQLite 内存 arena 承担 C 侧硬界，请求级 fail-closed（首次实际配额不足永久失效该请求），同一只读事务返回 selected 原始字段与组存在性事实；构建期来源经 `BuildEvidence` 与实际产物绑定。
-2. 应用侧预算账本（`native/hub/src/selected_p1/`）：`resource`（ledger/owner/秘密）、`decode_shape`、`domain_decode`、`font_source`、`font_provider`、`session_owner`、`reply_port`、`control_runtime`、`helper_runtime`、`helper_artifact` 各单元分别交付，覆盖分配前 grant、no-Weak 最后持有者、秘密 exact backing 与 wipe→free→退额顺序。
-3. 构建与整合：`scripts/ci/build_selected_helper_artifact.ps1` 记录实际编译来源与产物哈希；`helper_artifact` 单元把候选产物接入应用读取链到完整 domain 快照。
+- 应用内部使用有版本判别类型：`InheritTerminalSlot`（继承终端槽）、`ExplicitFamily`（显式 family）、`ExplicitCachedTtf { hash }`（显式缓存 TTF）；无元数据旧记录投影为 legacy，运行走旧终端槽，不猜测历史意图。
+- 绑定保存在 `TerminalSettingsV1.extensions["guosshell.font"]`（有版本载荷），与 profile 创建/复制/删除同属一个 configuration 事务，使用整体 revision CAS；未知版本/不可解析载荷原样保留并返回不可编辑原因，拒绝会改变 family 或绑定的写请求。
+- 显式绑定（含继承）用不可变会话快照，不被槽更新覆盖；legacy 路径保留旧终端槽即时监听。缓存 blob 保守不删：profile 删除、槽替换/重置、导入失败回滚都不移除可能被引用的文件。
+- profile 选 TTF 不偷改全局槽：先持久化验证后的不可变 blob，再以 CAS 发布模式/hash；预览不持久化。
+- 移动渲染始终取终端槽，不受桌面模式影响。
 
-未完成：正常 Prepare/VM 注册、跨进程最后持有者（VM finalizer）、WAL/打包/三平台验收。整体 P1 停止线未解除。
+## 阶段划分与状态
 
-## 网络运行时（russh scoped 接缝）
+依赖顺序：接入融合 → 二 → 三 → 四；五依赖二/四；六依赖四；七依赖二/四；八汇合全部。
 
-rsHell 依赖的 russh 在库内分配与认证秘密上无法从应用侧闭合，因此使用团队 fork 增加显式 scoped 入口：应用自有 executor/poller/timer/stream 持有运行根，库内每处动态增长在分配前准入，密码/keyboard-interactive 从第一份 owned 副本起受保护并在释放前擦除。旧公开 constructors、SSH wire、认证模式与 host key 信任不变。
+### 已完成阶段
 
-当前进度：认证→PTY→数据→关闭的库内路径与内存对端测试通过（client 无 Tokio runtime）；剩余 flush 缓冲、server 发起 channel、公钥/证书/外部签名、crypto/RNG/TLS、压缩的完整源闭包。crypto-bigint fork 为共享 Montgomery 参数补最后持有者擦除。相关链接见根 `UPSTREAM.md`。
+| 阶段 | 内容 | 提交 |
+|---|---|---|
+| 二 | Rust 桌面契约：版本化设置/profile 协议、完整配置 CAS 存储、会话目标模型、能力信号、字体绑定接缝 | `100ba353` |
+| 三 | Fluent 目录、连接编辑、密钥管理、认证对话框接入常驻工作区；Windows 原生认证/管理往返验收；三平台 CI `37183281852` 通过 | `e2ae0a44` |
 
-## 本地 Shell（阶段六前体）
+### 阶段四（进行中）：工作区、终端外壳与完整输入策略
 
-应用侧自持 PTY owner 已验证：自然退出以原进程对象 signaled 为门、8 MiB 堵写真实取消（995）、跨读事件 UTF-8 累计、单次 unwind 主错误保持、资源根持有到全部 worker join。`native/hub/src/local_shell/` 当前为测试构造器；完整进程根、持久平台错误收敛、其他平台与 GUI 注册未验收。无合法 saved-Local 契约时非空 `connection_id` 在进入 SSH 分支前拒绝。
+范围：沿 `WindowsShell → Workspace → 常驻 TerminalPane` 扩展共用工作区，Native SSH 完整消费 profile；macOS/Linux 收敛到同一状态模型；补全连接选择器、终端工具栏、会话状态、选择菜单、关闭/重连等 Fluent 操作。Local/System 本阶段不可用。
 
-## 隔离 System SSH（阶段七前体）
+**会话与传输（4A）**——已实现：
 
-旧 System transport 继承用户配置与 agent、不等待认证，不能直接开放。设计为应用专属 config/known_hosts + 三角色短命 helper（KnownHostsCommand 绑定实际握手公钥、受保护 ASKPASS 管道、认证完成回调），每 attempt 校验双方进程身份；首次信任落盘、变更 fail-closed、写失败即断开。当前已验证封闭 `-G`/`-V` 环境与 ORDER 回调的真实调用；真实认证、IPC 身份、PTY 与三平台 hook 行为未验收。不读取用户 config/agent/known_hosts，不托管私钥导出。
+- 独立 V2 `Prepare/Prepared/Start/Cancel` 与有序事件。Prepare 无密码、不启动传输，固定目录目标并单次读取 configuration 捕获字体资源；Start 接收密码后立即进入 `SecretString`，核验同身份、字体投影与实测几何后一次性转交运行会话；`Accepted` 不等于已认证。
+- 准备态有界生命周期：有限有效期、每 session/generation 至多一个未消费态、全局数量与实际资源预算上限；取消/替换/过期/消费/退出均终结并释放，迟到结果不复活。
+- 事件按 source + identity + generation + seq 过滤，防迟到与重复。
+- **新 V2 Prepare/Start 默认关闭**（`Preparations::default()` 返回 `PolicyUnavailable`，仅测试构造器开启），待资源预算证明完成后开放。
 
-## 桌面设置（阶段五）
+**终端输入（4B-I / 4C）**——部分实现：
 
-- 控制器与草稿（`lib/src/desktop/settings/`）：App/Profile/生命周期/TTF 的未决写入隔离、冲突草稿保留、显式核对后解除，query 门槛按请求身份区分；已删除目标的生命周期与字体入口安全禁用。
-- 表单（`forms/`）：App 三字段、Profile 16 字段、结构化绑定编辑器（六类动作、F1–F24、Unicode、四修饰符）、数字原文保留。
-- 资源区（`resources/`）：双全局字体槽复用既有字体管线、Windows 外观单写者、关于/许可。
+- 独立输入策略（`native/hub/src/desktop_input_policy.rs`）：raw chord 优先匹配 profile/应用合并绑定、16 项默认候选、消费锁存至物理 Up、Repeat 不重复壳动作、未知来源 typed 拒绝。
+- 上游兼容键盘事件接缝（rsHell `TerminalKeyEvent` 双表示 + `encode_key_event`，Kitty flag 1/2 下 Super 与 press/repeat/release）已发布并 pin。
+- 输入架构采用「单一原生输入 surface + Rust 先仲裁」：Flutter 公共按键事件无原生事件 ID，不能与另一通道元数据配对；键盘/文本/指针统一进入应用私有 Windows 输入窗口（TSF 前门控、Translate 前仲裁），文本/IME 提交保持单一来源票据。原型由 `native-input-spike` feature 控制，默认关闭。
+- 已验证：同 SDK 隔离握手、合成按键精确编码字节、TSF/COM 生命周期与退休安全。未完成：物理键盘、非 US 布局、真实 IME/文本/指针、ABI 3 宿主联调。
+
+**selected 读取与资源预算（P1）**——进行中：
+
+目标：配置读取全部经过分配前硬预算，仅可证明的预算不足才 typed 拒绝，不按库规模/页大小/编码/扫描数拒绝正常小 selected。架构三部分：
+
+1. 只读 helper 子进程（rsHell `selected-read-helper`）：独立 SQLite 内存 arena 承担 C 侧硬界；请求级 fail-closed（首次实际配额不足永久失效该请求）；同一只读事务返回 selected 原始字段与组存在性事实；构建期来源经 `BuildEvidence` 与实际产物绑定。
+2. 应用侧预算账本（`native/hub/src/selected_p1/`）：`resource`（ledger/owner/秘密）、`decode_shape`、`domain_decode`、`font_source`、`font_provider`、`session_owner`、`reply_port`、`control_runtime`、`helper_runtime`、`helper_artifact` 各单元，覆盖分配前 grant、no-Weak 最后持有者、秘密 exact backing 与 wipe→free→退额。
+3. 构建与整合：`scripts/ci/build_selected_helper_artifact.ps1` 记录实际编译来源与产物哈希；`helper_artifact` 单元接入应用读取链到完整 domain 快照。
+
+未完成：正常 Prepare/VM 注册、跨进程最后持有者（VM finalizer）、WAL/打包/三平台验收。
+
+**网络运行时（scoped russh）**——进行中：
+
+rsHell 依赖的 russh 在库内分配与认证秘密上无法从应用侧闭合，因此团队 fork 增加显式 scoped 入口：应用自有 executor/poller/timer/stream 持有运行根，库内每处动态增长分配前准入，密码/keyboard-interactive 从第一份 owned 副本起受保护并在释放前擦除。旧公开 constructors、SSH wire、认证模式与 host key 信任不变。crypto-bigint fork 为共享 Montgomery 参数补最后持有者擦除。
+
+已验证：认证→PTY→数据→关闭的库内路径（client 无 Tokio runtime，内存 duplex 对端，GNU/MSVC 双 SDK）。剩余：flush 缓冲、server 发起 channel、公钥/证书/外部签名、crypto/RNG/TLS、压缩的完整源闭包。
+
+**验收矩阵要点**（阶段四完成条件）：真实目录/快速连接选择不同 profile 且不混快照；准备态边界 fake 证明；两个不同 profile 真实改变期望区域且首个 PTY 与快照一致；ENQ 精确 answerback；输入绑定矩阵（含覆盖 `desktopCommand`/`zoom.handleKey`/`TerminalView.shortcuts` 冲突）；四种滚动组合；多字体窗格与重开；生命周期导航往返；移动回归不退化。
+
+### 阶段五（组件已备，待接线）：完整 Fluent 设置
+
+- 控制器与草稿（`lib/src/desktop/settings/`）：未决写入隔离、冲突草稿保留、显式核对后解除、query 门槛按请求身份区分；已删除目标的生命周期与字体入口安全禁用。
+- 表单（`forms/`）：App 三字段、Profile 16 字段、结构化绑定编辑器。
+- 资源区（`resources/`）：双全局字体槽、Windows 外观单写者、关于/许可。
 - 键位条（`keybar/`）：完整双排编辑器、全应用单写者与跨关闭未决隔离。
 
 待接线：共享入口路由、字体 RID/slot 确认、外观无 RID 协议的全应用 writer、`KeyBarWriter.shared` 统一旧写入口、真实 Rinf/SQLite 往返与 NativeFocus。组件测试不替代这些验收。
 
-## 验证与 CI
+### 阶段六（前体已备，待生产化）：本地 Shell
 
-- 已验证（Windows 本机）：Guo all-targets check、Rust 库测试、Flutter 全套与分析、rsHell core/session/storage 回归、helper 各 target、scoped russh 双 SDK 库测试与 RSA 擦除审计、本地 Shell 43 项、System scope/helper、C++ 输入组件 415 项断言。
-- CI：检查点 push 触发的 `desktop-validation` 运行中，未计三平台通过。
-- 未覆盖：macOS/Linux GUI 与沙箱、实体键盘/IME/指针、真实网络认证链、三平台打包与签名。
+应用侧自持 PTY owner 已验证：自然退出以原进程对象 signaled 为门、8 MiB 堵写真实取消、跨读事件 UTF-8 累计、单次 unwind 主错误保持、资源根持有到全部 worker join（`native/hub/src/local_shell/`，当前测试构造器）。无合法 saved-Local 契约时非空 `connection_id` 在进入 SSH 分支前拒绝。
 
-## 边界
+剩余要求：通过 `LocalPtyTransport` 接入统一 transport；默认 shell 用上游平台选择，自定义启动项按结构化字段校验，不接受 UI 隐式 shell 拼接；本地不走网络权限/SSH 凭据；spawn 未完成时关闭的竞态立即接管清理；Windows Job/ConPTY 与 Unix PTY/进程组清理不只查直接子 PID；完整 process-root、持久平台错误收敛、其他平台与 GUI 注册。
 
-- Rust 是终端状态、输入编码与 viewport 权威；不引入第二套解析器，不从硬件事件制造文本。
-- 移动端与桌面 V1 协议、认证与信任策略不变；未验收能力保持默认关闭。
-- 每阶段完整验收后独立提交；本检查点不是阶段四完成。
+### 阶段七（设计已定，前体验证中）：隔离 System OpenSSH
+
+- 应用专属 config/known_hosts；不读取用户 SSH config/agent/known_hosts、默认 identity、全局配置；阻断环境回退绕过。
+- 三角色短命 helper：`KnownHostsCommand` 绑定实际握手公钥、受保护 `SSH_ASKPASS` 管道传递认证回答、`LocalCommand` 回调证明认证完成（不证明远端 PTY）；每 attempt 校验双方进程身份。
+- 首次主机信任显式确认；变更密钥 fail-closed；信任写失败立即断开。禁止 `StrictHostKeyChecking=no` 与自动接受。
+- 保存了远端命令的会话必须申请远端 PTY：实际测试远端 `tty`、`TERM`、resize 与受控 TUI。
+- 不自动导出应用私钥；System 与 Native 凭据体系区分。
+- 当前已验证封闭 `-G`/`-V` 环境与 ORDER 回调真实调用；真实认证、IPC 身份、PTY 与三平台 hook 行为未验收。
+
+### 阶段八：跨平台集成与交付门禁
+
+合并全部阶段证据：三 transport 协议/TUI/性能/退出矩阵、移动原 M6 关键集回归、完整点击/键盘验收矩阵（标准/窄窗口、缩放、分屏、焦点、屏幕阅读语义、高对比度、减少动画）、移除可见 Material 回退、文档更新为最终能力与限制。逐平台报告区分「原生运行通过/CI 构建通过/CI 测试通过/失败/未验证」。
+
+## 高风险关口
+
+| 关口 | 内容 | 状态 |
+|---|---|---|
+| B1 | macOS 沙箱与本地进程能力：现有 entitlements 不能证明 shell/PTY/系统 ssh 可用；关闭沙箱或加权限超出授权 | 未实跑，明确未验证 |
+| B2 | System OpenSSH 信任与配置边界：新 pin 隔离接口必须重新验证，不继承旧结论 | 设计已定，实现中 |
+| B3 | 依赖能力与公共接口缺口：左右 Alt/Super、TERM 传播、非阻塞 spawn/写入/关闭、进程树回收、隔离与远端 PTY 均需对精确 pin 验证；能应用侧就不改上游，必要时最小补丁入团队 fork | 已用四个 fork 承接 |
+
+## 验证命令（每阶段通用）
+
+```powershell
+cargo fmt --all -- --check
+cargo check --workspace --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+flutter analyze --no-pub
+flutter test --no-pub
+```
+
+Windows 原生验收入口：`scripts/ci/windows_auth_check.ps1`（隔离 Native SSH 认证/管理往返）、`scripts/ci/windows_input_check.py`（环回 SSH 键盘输入字节核对）、`integration_test/desktop_catalog_smoke_test.dart`。三平台 CI 由 `.github/workflows/desktop-validation.yml` 承载。
+
+## 当前检查点状态
+
+- 检查点提交（2026-10-12）：Guo `5743be9e`、rsHell `070b5d93`、russh `5594db64`、crypto-bigint `9a4f70ac`，均已推送并核验。
+- 已验证（Windows 本机）：Guo all-targets check、Rust 库测试、Flutter 全套 418 与 analyze、rsHell core/session/storage 回归、helper 各 target、scoped russh 双 SDK 测试与 RSA 擦除审计、本地 Shell 43 项、System scope/helper、C++ 输入组件 415 断言。
+- 正常新 V2、Local/System 生产入口、P1 整体均保持关闭；恢复条件与剩余义务见[桌面检查点待完成验收](followups/20261012_桌面检查点待完成验收.md)。
