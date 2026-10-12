@@ -2,14 +2,11 @@
 
 use std::path::Path;
 
-#[cfg(test)]
 use rshell_m0::rshell_core::TerminalProfileId;
 use rshell_m0::rshell_core::TerminalSettingsV1;
-#[cfg(test)]
 use rshell_m0::rshell_storage::ConfigurationSnapshot;
 use serde_json::json;
 
-#[cfg(test)]
 use crate::font_resources::FontResource;
 use crate::font_resources::{FontResourceError, load_by_hash};
 use crate::fonts::ImportedFont;
@@ -139,8 +136,7 @@ fn resource_failure(error: FontResourceError) -> ProfileFontFailure {
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedProfileFont {
     pub(crate) projection: ProfileFontSnapshot,
-    /// 阶段二仅测试构建保留持有契约；阶段四接入会话时启用生产字段及资源保存路径。
-    #[cfg(test)]
+    /// 准备态和运行态实际持有已验证字节，槽变更不会替换此资源。
     pub(crate) resource: Option<FontResource>,
     /// 原始槽身份只 capture 一次，legacy 更新时重新解析而不回写配置。
     #[cfg(test)]
@@ -149,7 +145,6 @@ pub(crate) struct ResolvedProfileFont {
 
 /// 调用方从 PreferenceFile capture 一次 terminal 槽，再传入本函数。
 /// 显式模式不读取槽，明确继承只捕获一次；legacy 随旧槽事件重新调用。
-#[cfg(test)] // 阶段四正式接入 connect/session 时启用生产入口及对应持有字段。
 pub(crate) fn resolve_profile_font(
     configuration: &ConfigurationSnapshot,
     profile_id: TerminalProfileId,
@@ -226,7 +221,6 @@ fn resolve_parts(
         actual_family: crate::settings::DEFAULT_TERMINAL_FONT.into(),
         fallback_reason: None,
     };
-    #[cfg(test)]
     let mut resource = None;
     if saved.mode == ProfileFontMode::Uneditable {
         projection.fallback_reason = Some(ProfileFontFailure::UneditableMetadata);
@@ -236,17 +230,13 @@ fn resolve_parts(
         match load_by_hash(root, hash) {
             Ok(loaded) => {
                 projection.actual_family = loaded.family();
-                #[cfg(test)]
-                {
-                    resource = Some(loaded);
-                }
+                resource = Some(loaded);
             }
             Err(error) => projection.fallback_reason = Some(resource_failure(error)),
         }
     }
     ResolvedProfileFont {
         projection,
-        #[cfg(test)]
         resource,
         #[cfg(test)]
         captured_terminal_slot,

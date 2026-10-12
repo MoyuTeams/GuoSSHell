@@ -2,7 +2,6 @@
 //! 用户的事（PIN），以及它在等用户（按卡、靠卡、碰安全密钥）的起止——等用户的时间不算进
 //! 连接时限。
 
-use rinf::RustSignal;
 use secrecy::SecretString;
 use tokio::sync::oneshot;
 
@@ -27,14 +26,30 @@ pub struct PinQuestion {
 }
 
 /// 连接中状态附带的提示（按卡上的按键、把卡靠近设备、使用安全密钥）。
-pub fn send_hint(session_id: u32, target: &str, hint: ConnectHint) {
-    SessionStatus {
-        session_id,
-        state: SessionState::Connecting,
-        failure: FailureKind::None,
-        detail: target.to_owned(),
-        local_network_settings_url: String::new(),
-        hint,
+#[derive(Clone)]
+pub(crate) struct HintSink {
+    session_id: u32,
+    target: String,
+    status: crate::status_sink::StatusSink,
+}
+
+impl HintSink {
+    pub(crate) fn capture(session_id: u32, target: String) -> Self {
+        Self {
+            session_id,
+            target,
+            status: crate::status_sink::StatusSink::capture(),
+        }
     }
-    .send_signal_to_dart();
+
+    pub(crate) fn send(&self, hint: ConnectHint) {
+        self.status.send(SessionStatus {
+            session_id: self.session_id,
+            state: SessionState::Connecting,
+            failure: FailureKind::None,
+            detail: self.target.clone(),
+            local_network_settings_url: String::new(),
+            hint,
+        });
+    }
 }

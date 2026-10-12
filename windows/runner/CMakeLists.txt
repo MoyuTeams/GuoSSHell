@@ -12,6 +12,12 @@ add_executable(${BINARY_NAME} WIN32
   "utils.cpp"
   "win32_window.cpp"
   "window_material.cpp"
+  "native_input_spike_sdk_channel.cpp"
+  "native_input_spike_sdk/bootstrap_host.cpp"
+  "native_input_spike_live_source/source_fixture_host.cpp"
+  "native_input_spike_bridge/native_input_spike_bridge.cpp"
+  "native_input_spike/window_source.cpp"
+  "native_input_spike/tsf_probe.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
   "Runner.rc"
   "runner.exe.manifest"
@@ -40,6 +46,8 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "psapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "ole32.lib" "uuid.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

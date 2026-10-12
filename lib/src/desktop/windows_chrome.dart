@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../bindings/bindings.dart';
+import 'desktop_theme.dart';
 
 bool get isWindowsDesktop =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
@@ -14,6 +15,21 @@ bool get isWindowsDesktop =>
 const desktopAccent = Color(0xff76c9ff);
 const desktopBackground = Color(0xff191d25);
 const desktopMuted = Color(0xffa7b1c2);
+
+/// dev 工作区的透明表面与分隔色，不改变既有 Windows 材质方向。
+abstract final class DesktopWorkspaceColors {
+  static final surface = const Color(0xff10141b).withValues(alpha: 0.3);
+  static const border = Colors.white10;
+  static const divider = Color(0xff323b4b);
+}
+
+/// 保留 dev 工具栏高度，窄工作区横向滚动而不压缩动作命中区。
+abstract final class DesktopWorkspaceMetrics {
+  static const toolbarHeight = 40.0;
+  static const toolbarMinWidth = 360.0;
+  static const terminalBackgroundOpacity = 0.12;
+}
+
 const desktopFontFallback = [
   'Microsoft YaHei UI',
   'Microsoft YaHei',
@@ -21,14 +37,37 @@ const desktopFontFallback = [
 ];
 
 /// Segoe UI 不包含中文字形，显式选择 Windows 的无衬线中文界面字体。
-f.FluentThemeData desktopFluentTheme({String? fontFamily}) {
+f.FluentThemeData desktopFluentTheme({
+  String? fontFamily,
+  bool highContrast = false,
+  bool reduceMotion = false,
+}) {
   final ramp = f.Typography.fromBrightness(brightness: Brightness.dark);
   TextStyle? cjk(TextStyle? style) =>
       style?.copyWith(fontFamilyFallback: desktopFontFallback);
+  final accessibility = desktopTheme(
+    highContrast: highContrast,
+    reduceMotion: reduceMotion,
+    fontFamily: fontFamily ?? DesktopType.family,
+  );
   return f.FluentThemeData(
     brightness: Brightness.dark,
-    accentColor: f.Colors.blue,
-    fontFamily: fontFamily ?? 'Segoe UI',
+    accentColor: highContrast ? accessibility.accentColor : f.Colors.blue,
+    resources: highContrast ? accessibility.resources : null,
+    focusTheme: highContrast
+        ? accessibility.focusTheme
+        : f.FocusThemeData(
+            primaryBorder: const BorderSide(
+              color: desktopAccent,
+              width: DesktopMetrics.focus,
+            ),
+            secondaryBorder: const BorderSide(color: desktopBackground),
+          ),
+    fasterAnimationDuration: accessibility.fasterAnimationDuration,
+    fastAnimationDuration: accessibility.fastAnimationDuration,
+    mediumAnimationDuration: accessibility.mediumAnimationDuration,
+    slowAnimationDuration: accessibility.slowAnimationDuration,
+    fontFamily: fontFamily ?? DesktopType.family,
     typography: f.Typography.raw(
       display: cjk(ramp.display),
       titleLarge: cjk(ramp.titleLarge),
@@ -39,6 +78,9 @@ f.FluentThemeData desktopFluentTheme({String? fontFamily}) {
       body: cjk(ramp.body),
       caption: cjk(ramp.caption)?.copyWith(fontWeight: FontWeight.normal),
     ),
+    scaffoldBackgroundColor: highContrast
+        ? DesktopColors.highContrastCanvas
+        : null,
   );
 }
 
@@ -108,10 +150,9 @@ class WindowsAppearance extends ChangeNotifier {
         await _material.invokeMethod<void>('setMaterial', {
           'acrylic': acrylicEnabled,
           // 原生层只提供模糊，色调透明度统一由 Flutter 背景遮罩控制。
-          'color': (acrylicEnabled
-                  ? const Color(0x01191d25)
-                  : desktopBackground)
-              .toARGB32(),
+          'color':
+              (acrylicEnabled ? const Color(0x01191d25) : desktopBackground)
+                  .toARGB32(),
         });
       } catch (_) {
         materialAvailable = false;
@@ -208,11 +249,14 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
                                 ),
                               ),
                               const SizedBox(width: 16),
-                              const Text(
-                                'SSH 工作区',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: desktopMuted,
+                              const Flexible(
+                                child: Text(
+                                  'SSH 工作区',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: desktopMuted,
+                                  ),
                                 ),
                               ),
                             ],

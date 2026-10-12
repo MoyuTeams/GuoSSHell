@@ -68,7 +68,7 @@ fn size() -> TerminalSize {
     }
 }
 
-fn reply(prompt_id: u32, accept: bool) -> InteractionReply {
+fn reply(prompt_id: u32, accept: bool) -> crate::protected_reply::ProtectedReply {
     InteractionReply {
         session_id: 1,
         prompt_id,
@@ -76,6 +76,7 @@ fn reply(prompt_id: u32, accept: bool) -> InteractionReply {
         answers: vec!["测试口令".into()],
         remember: false,
     }
+    .into()
 }
 
 fn desktop(target: DesktopTargetKind) -> DesktopConnectRequest {

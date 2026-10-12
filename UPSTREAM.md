@@ -7,22 +7,28 @@
 ## rsHell（Rust 内核，固定功能分支）
 
 GuoSSHell 直接使用官方 rsHell 仓库的内核，通过 git 依赖固定到精确提交。
-`native/hub` 经 `rshell-m0` 的再导出使用这些类型，依赖来源统一在
-`rust/Cargo.toml` 声明，解析结果记录在根 `Cargo.lock`。
+`native/hub` 经 `rshell-m0` 的再导出使用核心配置与会话类型，声明位于
+`rust/Cargo.toml`；桌面 PTY／进程平台的应用侧接缝在 `native/hub/Cargo.toml`
+直接声明同一提交的依赖。解析结果统一记录在根 `Cargo.lock`。
 
 | 项 | 值 |
 |---|---|
 | 上游仓库 | https://github.com/hugefiver/rsHell |
-| 固定提交 | `0e2b3514343794dcac5d2ba03b1ad6439b762a2e` |
-| 分支快照 | `feat/desktop-config-transactions`，2026-10-04 |
+| 固定提交 | `070b5d93f3f7baa4c6d46f5d5f1613dd688702aa` |
+| 分支快照 | `feat/desktop-config-transactions`，2026-10-12 |
 | 认证与终端接口合并提交 | `d71e81c5b7e786d3981e12d6a24a296ff74d3dae`（上游 PR #1） |
 | 许可证 | MIT，Copyright (c) 2026 hugefiver（副本见 `rust/LICENSES/rsHell-MIT.txt`） |
 
 ```toml
-rshell-core = { git = "https://github.com/hugefiver/rsHell", rev = "0e2b3514343794dcac5d2ba03b1ad6439b762a2e" }
-rshell-session = { git = "https://github.com/hugefiver/rsHell", rev = "0e2b3514343794dcac5d2ba03b1ad6439b762a2e" }
-rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "0e2b3514343794dcac5d2ba03b1ad6439b762a2e" }
+rshell-core = { git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
+rshell-session = { git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
+rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
 ```
+
+桌面宿主直接使用 `portable-pty-psmux =0.9.6`（依赖别名 `portable-pty`）和
+`rshell-platform =0.1.0` 的原生 PTY、进程句柄及进程树接口，两者也精确固定到
+`070b5d93f3f7baa4c6d46f5d5f1613dd688702aa`。这些接缝用于应用侧分离阻塞
+I/O 和取消所有权，不包含额外上游补丁、第三方源码副本或仓内 path 覆盖。
 
 固定提交同时包含短的顶部滚动区域中 `stable_row` 的修复，普通输出和同步输出
 共用稳定行号记账。上游后续提交不会自动进入构建；升级时需同时更新 manifest
@@ -43,6 +49,7 @@ rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "0e2b35143
 | 同步输出 | `TerminalEngine::sync_deadline()` / `end_sync()` 暴露 DEC 2026 截止时间与结束入口 | 会话循环在无新输出时也调度到期刷新 |
 | 配置事务 | `SqliteRepository::load_configuration()` / `commit_configuration()` 提供配置快照、持久版本、冲突检测和受引用保护的配置档删除 | 桌面设置只在原子提交成功后确认保存，旧移动设置继续保留局部更新语义 |
 | 应用元数据 | `TerminalSettingsV1.extensions` 与解析结果按命名空间透传 JSON 数据，旧配置缺省为空且序列化省略；存储沿用完整配置 CAS | 解释字体绑定版本、保护未知载荷，并将绑定与配置档一起原子保存 |
+| 阶段化按键 | 独立 `TerminalKeyEvent` 与 `TerminalEngine::encode_key_event` 按真实 Kitty flags 编码逻辑键、Repeat、Release 和 Super；旧输入与默认实现保持兼容 | 提供可靠的布局未移位键、旧适配码与事件阶段；文本和 IME 使用独立提交路径 |
 
 认证与终端接口已在上游合并提交中提供；配置事务与可选元数据接口固定到上游功能分支。
 该分支扩展 `rshell-storage`：生产配置快照、SQLite 持久版本、原子条件提交、
@@ -52,8 +59,15 @@ rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "0e2b35143
 `rshell-core` 的可选 `extensions` 仅保留应用元数据，不解释内容或版本，解析与绑定合并
 同样保留；沿用既有 `settings_json`，不新增数据库迁移。此扩展也属于理由③：原固定
 模型不能保留应用字段，应用侧独立文件无法让字体绑定参与配置档的同一配置事务。
+阶段化按键接口也属于理由③：旧接口只有适配后的键与修饰位，既不能保留未移位
+逻辑键和旧表示，也不能表达 Repeat／Release；应用只得到粗粒度显示状态，不能
+读取编码时的真实增强位并复用原编码器。新接口不修改旧 `TerminalInput` 或其 serde。
 `with_connect_timeout` 的上限包括用户交互时间，暂停用户等待计时仍由调用方完成。
 `sync_deadline` 只提供截止时刻，调用方必须主动调用 `end_sync`。
+
+该提交还包含桌面只读 selected helper、受限私有流协议和资源审计检查点。
+helper 不改变存储公开 API、schema、认证或 trust；完整应用 P1 准入、资源最后
+持有者及三平台验收尚未完成，正常 V2 Prepare/Start 保持默认关闭。
 主机密钥文件中命中的哈希或通配条目若无法安全隔离端点，上游会拒绝替换并保留原文件；
 GuoSSHell 自动保存的记录使用精确端点。
 
@@ -100,6 +114,69 @@ apple-native-keyring-store = { version = "1.0.1", features = ["protected"] }
 | `rust/LICENSES/portable-pty-psmux-PATCH-NOTES.md` | 上游 portable-pty-psmux 补丁来源说明副本 |
 
 MIT 许可声明需随软件或其重要部分一起分发；发布时应保留这些第三方许可。
+
+## Alacritty（终端状态机，团队 fork）
+
+`rshell-session` 使用该依赖处理真实终端状态；GuoSSHell 经固定的 rsHell 提交
+解析同一份包，不在应用内复制源码，也不维护第二套键盘协商栈。
+
+| 项 | 值 |
+|---|---|
+| 上游仓库 | https://github.com/alacritty/alacritty |
+| fork | https://github.com/MoyuTeams/alacritty ，分支 `feat/kitty-keyboard-state` |
+| 固定提交 | `78f36350907b9145a16a6f12e01bfec34ad5b3dd` |
+| 上游基线 | `94e7c8874e526b1e67b349d9ba30ddf81669119e`，`alacritty_terminal 0.26.0` |
+| 许可证 | Apache-2.0 |
+
+补丁仅限原生 `term/mod.rs` 的两处行为及其私有回归测试：
+
+- Kitty set 在当前原栈帧上应用 replace／union／difference，与实时 mode、query
+  和 pop 恢复保持一致；空栈零结果不造帧，已有零帧保留，主／备用屏相互隔离。
+- 满栈 push 只驱逐最老的 keyboard frame，保持 4096 容量，不删除 title frame。
+
+两项均属于理由①：上游状态缺陷阻断键盘事件恢复，容量缺陷可由终端输出触发
+panic。应用公开 Handler 不能原位更新私有栈帧，也无法在保全空栈、容量和标题
+语义的同时规避原生满栈错误。补丁不改 vte parser、public API 或增强位能力。
+
+## russh（显式 scoped 网络入口，团队 fork）
+
+| 项 | 值 |
+|---|---|
+| 上游仓库 | https://github.com/Eugeny/russh |
+| fork | https://github.com/MoyuTeams/russh ，分支 `feat/p1-scoped-native` |
+| 固定提交 | `5594db64985233946667d2622458a334c8ac0891` |
+| 上游基线 | `4882af71cf27ea5293636bf4985ef296dcf20896`，`russh 0.62.5` |
+| 许可证 | Apache-2.0 |
+
+新增显式 scoped 连接、资源 root、时钟／协作让出及受保护认证载荷检查点。
+分配前准入、取消与最后 backing 释放由该入口的资源所有者承担；旧构造、
+legacy Handler、认证接口及 SSH wire 保持。应用不复制库源码，不改 Tokio/util。
+
+属于理由③：普通回调发生在库内解码、排队和缓冲增长之后，应用无法覆盖
+这些分配的准入、秘密副本擦除及 task/IO 的实际最后持有者。该入口仍为实验
+检查点；完整网络活图、crypto/compression 与正常应用 Start 尚未验收。
+`rust/Cargo.toml` 与固定 rsHell 使用同一版本、提交和后端 features，避免双实例。
+
+## crypto-bigint（boxed 共享参数擦除，团队 fork）
+
+| 项 | 值 |
+|---|---|
+| 上游仓库 | https://github.com/RustCrypto/crypto-bigint |
+| fork | https://github.com/MoyuTeams/crypto-bigint ，分支 `feat/p1-secret-params` |
+| 固定提交 | `9a4f70ace040b57f5f5cffc0d4389d2676baee9d` |
+| 上游基线 | `2b54d248cce00457e3afb5650d9b14632ef4a116`，`crypto-bigint 0.7.5` |
+| 许可证 | Apache-2.0 OR MIT |
+
+根 Cargo patch 固定同一版本和提交，不复制源码。补丁仅为 boxed Montgomery
+参数的私有共享 owner 增加最后释放擦除：启用 `zeroize` 时，在原位置擦除辅助字段，
+清零原 modulus、one、r2 backing 后释放；共享值存活时保持不变。清理不分配，
+不改变公开构造、访问、比较和 clone 契约，也不改变固定精度参数的 Copy 语义。
+
+属于理由①：固定依赖的 RSA CRT 预计算参数原 backing 在释放前仍含秘密。
+RSA、ssh-key 和应用只能取得只读共享参数，无法在应用侧安全保证最后 owner
+擦除；对共享只读引用强转、只清独立副本或提前修改存活值均不满足原契约。
+本补丁不改变算法、SSH wire、认证或 trust；boxed 参数的擦除证据不代表完整
+网络资源和认证秘密持有图已经闭合。
 
 ## terminal_view（终端渲染，团队 fork）
 

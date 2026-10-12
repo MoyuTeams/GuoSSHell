@@ -13,6 +13,9 @@ publish = false
 # `staticlib` is for iOS and macOS.
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+native-input-spike = []
+
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
@@ -50,11 +53,16 @@ ttf-parser = "=0.25.1"
 sha2 = "0.11"
 
 # 业务内核唯一入口：`rshell-m0`（根 workspace 成员，path 依赖）。
-# 它再导出 rshell-core / rshell-session，并把上游 git 依赖的 rev pin 在
-# rust/Cargo.toml **这一处**（workspace 合并后不再有第二处要同步升级）。
+# 它再导出 rshell-core / rshell-session；核心配置依赖固定在 rust/Cargo.toml。
+# 桌面 PTY／平台接缝的直接依赖须与它使用同一上游提交。
 # iOS 的 keyring `protected` feature 也由它那边的 target 依赖经
 # feature unification 打开，这里不需要重复声明。
 rshell-m0 = { path = "../../rust" }
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+allo-isolate = "=0.1.27"
+portable-pty = { package = "portable-pty-psmux", version = "=0.9.6", git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
+rshell-platform = { version = "=0.1.0", git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
 
 # 私钥存在 Apple 的 protected data 钥匙串（本机与 iCloud 两个存储，keys.rs）；
 # 版本与 keyring 4.1.5 用的一致（rust/Cargo.toml）。

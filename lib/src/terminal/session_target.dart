@@ -18,13 +18,19 @@ class SessionTarget {
   final String password;
   final String command;
 
-  const SessionTarget.saved({required this.connectionId, required String title})
-      : _name = title,
-        host = '',
-        port = 0,
-        username = '',
-        password = '',
-        command = '';
+  /// 桌面准备路径的显式选择；空值保留连接引用、应用默认的解析顺序。
+  final String profileId;
+
+  const SessionTarget.saved({
+    required this.connectionId,
+    required String title,
+    this.profileId = '',
+  }) : _name = title,
+       host = '',
+       port = 0,
+       username = '',
+       password = '',
+       command = '';
 
   const SessionTarget.quick({
     required this.host,
@@ -32,8 +38,9 @@ class SessionTarget {
     required this.username,
     this.password = '',
     this.command = '',
-  })  : connectionId = '',
-        _name = '';
+    this.profileId = '',
+  }) : connectionId = '',
+       _name = '';
 
   /// 页面与提示里显示的名字。
   String get title => connectionId.isEmpty ? '$username@$host' : _name;

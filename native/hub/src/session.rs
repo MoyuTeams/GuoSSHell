@@ -10,10 +10,12 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::protected_reply::ProtectedReply;
 use rinf::{DartSignal, RustSignal, RustSignalBinary, debug_print};
 use secrecy::SecretString;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::time::{Instant, sleep_until};
+use zeroize::Zeroize;
 
 use rshell_m0::rshell_core::{
     CellPosition, KeyCode, KeyModifiers, MouseButton, MouseEventKind, RenderFrame,
@@ -21,15 +23,22 @@ use rshell_m0::rshell_core::{
     TerminalSize, Viewport,
 };
 use rshell_m0::rshell_session::{
-    DefaultTerminalEngine, EngineDelta, EngineError, NativeSshTransport, SessionTransport,
-    TerminalEngine, TransportEvent, ViewportBounds,
+    DefaultTerminalEngine, EngineDelta, EngineError, SessionTransport, TerminalEngine,
+    TransportEvent, ViewportBounds,
 };
 
 use crate::app::AppContext;
 use crate::connect::{self, Abort, Channels, Connected, PromptIds, RemoteTerminal};
+use crate::desktop_prepare::{self, Preparations};
+use crate::desktop_runtime::{self, Protocol};
 use crate::frame_codec::pack_runs;
 use crate::local_network;
 use crate::settings;
+use crate::signals::desktop_session::{
+    DesktopCancel, DesktopClipboard, DesktopEvent, DesktopEventResult, DesktopFailure,
+    DesktopFrame, DesktopOrdered, DesktopPreparationState, DesktopPrepare, DesktopReply,
+    DesktopSelection, DesktopStart, DesktopViewportState,
+};
 use crate::signals::interaction::InteractionReply;
 use crate::signals::{
     ClipboardText, ConnectHint, ConnectRequest, CopyRequest, DesktopCapabilitiesQuery,
@@ -48,6 +57,8 @@ const MIN_COLS: u16 = 2;
 const MIN_ROWS: u16 = 2;
 
 pub enum SessionCommand {
+    /// 租约随命令穿过连接 backlog，直到本次写入完成或取消才释放。
+    Ordered(Box<SessionCommand>, desktop_runtime::InputLease),
     Resize(TerminalSize),
     Viewport(Window),
     Disconnect,
@@ -95,7 +106,9 @@ struct SessionHandle {
     /// 区分同一 `session_id` 先后的两个任务（结束通知只清自己的登记）。
     generation: u64,
     commands: UnboundedSender<SessionCommand>,
-    replies: UnboundedSender<InteractionReply>,
+    replies: UnboundedSender<ProtectedReply>,
+    close: tokio::sync::watch::Sender<bool>,
+    protocol: Option<Protocol>,
 }
 
 /// 会话的结局。
@@ -124,9 +137,21 @@ impl SessionEnd {
 }
 
 /// 常驻任务：接住 Dart 的会话类请求，按 `session_id` 转给对应的会话任务。
-pub async fn supervisor(context: Arc<AppContext>) {
+pub async fn supervisor(
+    context: Arc<AppContext>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), crate::shutdown::ShutdownError> {
     let connect_rx = ConnectRequest::get_dart_signal_receiver();
     let desktop_rx = DesktopConnectRequest::get_dart_signal_receiver();
+    let prepare_rx = DesktopPrepare::get_dart_signal_receiver();
+    let start_rx = DesktopStart::get_dart_signal_receiver();
+    let cancel_rx = DesktopCancel::get_dart_signal_receiver();
+    let ordered_rx = DesktopOrdered::get_dart_signal_receiver();
+    let desktop_reply_rx = DesktopReply::get_dart_signal_receiver();
+    let mut preparations = Preparations::default();
+    let mut loading = tokio::task::JoinSet::new();
+    let mut running = tokio::task::JoinSet::new();
+    let mut task_failures = 0;
     let capabilities_rx = DesktopCapabilitiesQuery::get_dart_signal_receiver();
     let resize_rx = ResizeRequest::get_dart_signal_receiver();
     let disconnect_rx = DisconnectRequest::get_dart_signal_receiver();
@@ -146,57 +171,190 @@ pub async fn supervisor(context: Arc<AppContext>) {
     let send =
         |sessions: &HashMap<u32, SessionHandle>, session_id: u32, command: SessionCommand| {
             if let Some(handle) = sessions.get(&session_id) {
-                let _ = handle.commands.send(command);
+                if let Some(protocol) = &handle.protocol {
+                    DesktopEventResult {
+                        source: protocol.source.source.clone(),
+                        identity: protocol.source.identity.clone(),
+                        seq: 0,
+                        failure: DesktopFailure::MixedMode,
+                        action: None,
+                    }
+                    .send_signal_to_dart();
+                } else {
+                    let _ = handle.commands.send(command);
+                }
             }
         };
 
     loop {
+        let deadline = preparations.deadline();
         tokio::select! {
-            pack = connect_rx.recv() => {
+            () = crate::shutdown::requested(&mut shutdown) => break,
+            result = running.join_next(), if !running.is_empty() => {
+                task_failures += match result { Some(Ok(count)) => count, Some(Err(_)) => 1, None => 0 };
+            }
+            pack = desktop_reply_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let mut request = pack.message;
+                let answer = ProtectedReply::from(InteractionReply { session_id: request.source.session_id,
+                    prompt_id: request.prompt_id, accept: request.accept,
+                    answers: std::mem::take(&mut request.answers), remember: request.remember });
+                if request.version == crate::signals::desktop_session::VERSION
+                    && let Some(handle) = sessions.get(&request.source.session_id)
+                    && let Some(protocol) = &handle.protocol
+                    && protocol.source.source == request.source && protocol.source.identity == request.identity {
+                    let _ = handle.replies.send(answer);
+                }
+            }
+            () = sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+                for result in preparations.expire(Instant::now()) { desktop_prepare::publish(result); }
+            }
+            pack = prepare_rx.recv() => {
                 let Some(pack) = pack else { break };
                 let request = pack.message;
+                let rejected = sessions.get(&request.source.session_id).map(|h| match &h.protocol {
+                    Some(p) if request.source.generation <= p.source.source.generation => DesktopFailure::StaleGeneration,
+                    Some(_) => DesktopFailure::AlreadyStarted,
+                    None => DesktopFailure::MixedMode,
+                });
+                let response = if let Some(failure) = rejected { Err(failure) } else { preparations.begin(request.clone(), Instant::now()) };
+                match response {
+                    Ok((identity, lease, replaced)) => {
+                        if let Some(reply) = replaced { desktop_prepare::publish(reply); }
+                        let mut reply = desktop_prepare::result(request.source.clone(), request.request_id, request.request_id,
+                            identity.clone(), DesktopPreparationState::Preparing, DesktopFailure::None);
+                        reply.remaining_ms = desktop_prepare::TTL.as_millis() as u32;
+                        desktop_prepare::publish(reply);
+                        let context = context.clone();
+                        loading.spawn(async move {
+                            let (result, lease) = connect::resolve_prepared(&context, request.native_request(), lease).await;
+                            desktop_prepare::Loaded { identity, result, lease }
+                        });
+                    }
+                    Err(failure) => desktop_prepare::publish(desktop_prepare::result(request.source, request.request_id, request.request_id,
+                        String::new(), DesktopPreparationState::Failed, failure)),
+                }
+            }
+            loaded = loading.join_next(), if !loading.is_empty() => {
+                match loaded {
+                    Some(Ok(loaded)) => if let Some((reply, bytes)) = preparations.complete(loaded, Instant::now()) {
+                        reply.send_signal_to_dart(bytes);
+                    },
+                    Some(Err(_)) => task_failures += 1,
+                    None => {}
+                }
+            }
+            pack = cancel_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let request = pack.message;
+                let reply = preparations.cancel(&request, Instant::now()).unwrap_or_else(|failure|
+                    desktop_prepare::result(request.source, request.request_id, request.prepare_request_id, request.identity,
+                        DesktopPreparationState::Failed, failure));
+                desktop_prepare::publish(reply);
+            }
+            pack = start_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let mut request = pack.message;
+                // 解码后的第一步接管秘密，任何版本/来源/状态拒绝之前都不保留普通 String。
+                let password = SecretString::from(std::mem::take(&mut request.password));
+                let launch = preparations.start(&request, password, Instant::now());
+                match launch {
+                    Err(failure) => desktop_prepare::publish(desktop_prepare::result(request.source, request.request_id,
+                        request.prepare_request_id, request.identity, DesktopPreparationState::Failed, failure)),
+                    Ok(launch) => {
+                        let session_id = launch.source.session_id;
+                        let protocol = Protocol::new(launch.source.clone(), launch.identity.clone());
+                        let source = protocol.source.clone();
+                        let (commands_tx, commands) = unbounded_channel();
+                        let (replies_tx, replies) = unbounded_channel();
+                        let (close, closing) = tokio::sync::watch::channel(false);
+                        generations += 1;
+                        let generation = generations;
+                        sessions.insert(session_id, SessionHandle { generation, commands: commands_tx, replies: replies_tx, close, protocol: Some(protocol) });
+                        desktop_prepare::publish(desktop_prepare::result(request.source, request.request_id, request.prepare_request_id,
+                            request.identity, DesktopPreparationState::Accepted, DesktopFailure::None));
+                        let context = context.clone();
+                        let finished = finished_tx.clone();
+                        running.spawn(async move {
+                            let failures = desktop_runtime::SOURCE.scope(source, crate::transport_lifecycle::owner(closing,
+                                run_prepared_session(context, launch.target, commands, replies))).await;
+                            let _ = finished.send((session_id, generation));
+                            failures
+                        });
+                    }
+                }
+            }
+            pack = ordered_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let request = pack.message;
+                let mut result = DesktopEventResult { source: request.source.clone(), identity: request.identity.clone(), seq: request.seq, failure: DesktopFailure::None, action: None };
+                result.failure = route_ordered(&mut sessions, request);
+                result.send_signal_to_dart();
+            }
+            pack = connect_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let mut request = pack.message;
                 let session_id = request.session_id;
+                if preparations.contains(session_id) || sessions.get(&session_id).is_some_and(|h| h.protocol.is_some()) {
+                    request.password.zeroize();
+                    continue;
+                }
                 debug_print!("[session {session_id}] connect ({}x{})", request.cols, request.rows);
                 if let Some(old) = sessions.remove(&session_id) {
+                    old.close.send_replace(true);
                     let _ = old.commands.send(SessionCommand::Disconnect);
                 }
                 generations += 1;
                 let generation = generations;
                 let (commands_tx, commands) = unbounded_channel();
                 let (replies_tx, replies) = unbounded_channel();
+                let (close, closing) = tokio::sync::watch::channel(false);
                 sessions.insert(session_id, SessionHandle {
                     generation,
                     commands: commands_tx,
                     replies: replies_tx,
+                    close,
+                    protocol: None,
                 });
                 let context = context.clone();
                 let finished = finished_tx.clone();
-                tokio::spawn(async move {
-                    run_session(context, request, commands, replies).await;
+                running.spawn(async move {
+                    let failures = crate::transport_lifecycle::owner(closing, run_session(context, request, commands, replies)).await;
                     let _ = finished.send((session_id, generation));
+                    failures
                 });
             }
             pack = desktop_rx.recv() => {
                 let Some(pack) = pack else { break };
-                let request = pack.message;
+                let mut request = pack.message;
                 let session_id = request.session_id;
+                if preparations.contains(session_id) || sessions.get(&session_id).is_some_and(|h| h.protocol.is_some()) {
+                    request.password.zeroize();
+                    DesktopConnectResult { request_id: request.request_id, session_id, error: DesktopConnectError::InvalidField, detail: "mixed_mode".into() }.send_signal_to_dart();
+                    continue;
+                }
                 if let Some(old) = sessions.remove(&session_id) {
+                    old.close.send_replace(true);
                     let _ = old.commands.send(SessionCommand::Disconnect);
                 }
                 generations += 1;
                 let generation = generations;
                 let (commands_tx, commands) = unbounded_channel();
                 let (replies_tx, replies) = unbounded_channel();
+                let (close, closing) = tokio::sync::watch::channel(false);
                 sessions.insert(session_id, SessionHandle {
                     generation,
                     commands: commands_tx,
                     replies: replies_tx,
+                    close,
+                    protocol: None,
                 });
                 let context = context.clone();
                 let finished = finished_tx.clone();
-                tokio::spawn(async move {
-                    run_desktop_session(context, request, commands, replies).await;
+                running.spawn(async move {
+                    let failures = crate::transport_lifecycle::owner(closing, run_desktop_session(context, request, commands, replies)).await;
                     let _ = finished.send((session_id, generation));
+                    failures
                 });
             }
             pack = capabilities_rx.recv() => {
@@ -229,6 +387,7 @@ pub async fn supervisor(context: Arc<AppContext>) {
             }
             pack = disconnect_rx.recv() => {
                 let Some(pack) = pack else { break };
+                if let Some(handle) = sessions.get(&pack.message.session_id) && handle.protocol.is_none() { handle.close.send_replace(true); }
                 send(&sessions, pack.message.session_id, SessionCommand::Disconnect);
             }
             pack = reconnect_rx.recv() => {
@@ -277,19 +436,162 @@ pub async fn supervisor(context: Arc<AppContext>) {
             }
             pack = reply_rx.recv() => {
                 let Some(pack) = pack else { break };
-                if let Some(handle) = sessions.get(&pack.message.session_id) {
-                    let _ = handle.replies.send(pack.message);
-                }
+                route_legacy_reply(&sessions, pack.message);
             }
         }
     }
+    stop_supervisor(
+        &mut sessions,
+        &mut preparations,
+        &mut loading,
+        &mut running,
+        task_failures,
+    )
+    .await
+}
+
+async fn stop_supervisor(
+    sessions: &mut HashMap<u32, SessionHandle>,
+    preparations: &mut Preparations,
+    loading: &mut tokio::task::JoinSet<desktop_prepare::Loaded>,
+    running: &mut tokio::task::JoinSet<u32>,
+    task_failures: u32,
+) -> Result<(), crate::shutdown::ShutdownError> {
+    for handle in sessions.values() {
+        handle.close.send_replace(true);
+    }
+    preparations.clear();
+    sessions.clear();
+    crate::shutdown::drain(loading, running, task_failures).await
+}
+
+fn route_legacy_reply(sessions: &HashMap<u32, SessionHandle>, reply: InteractionReply) {
+    let reply = ProtectedReply::from(reply);
+    if let Some(handle) = sessions.get(&reply.session_id)
+        && handle.protocol.is_none()
+    {
+        let _ = handle.replies.send(reply);
+    }
+}
+
+fn route_ordered(sessions: &mut HashMap<u32, SessionHandle>, r: DesktopOrdered) -> DesktopFailure {
+    let Some(handle) = sessions.get_mut(&r.source.session_id) else {
+        return DesktopFailure::IdentityMismatch;
+    };
+    let Some(protocol) = &mut handle.protocol else {
+        return DesktopFailure::MixedMode;
+    };
+    let lease = match protocol.admit(&r) {
+        Ok(lease) => lease,
+        Err(failure) => return failure,
+    };
+    let command = match r.event {
+        DesktopEvent::Disconnect => {
+            handle.close.send_replace(true);
+            return DesktopFailure::None;
+        }
+        DesktopEvent::Reconnect => SessionCommand::Reconnect,
+        DesktopEvent::Text { text } if text.is_empty() => return DesktopFailure::InvalidEvent,
+        DesktopEvent::Text { text } => SessionCommand::Input(TerminalInput::CommittedText(text)),
+        DesktopEvent::Paste { text } => SessionCommand::Paste(text),
+        DesktopEvent::Resize { geometry } => match desktop_prepare::geometry(geometry) {
+            Ok(size) => SessionCommand::Resize(size),
+            Err(failure) => return failure,
+        },
+        DesktopEvent::Viewport {
+            follow_bottom,
+            top_stable_row,
+            rows,
+        } => SessionCommand::Viewport(if follow_bottom {
+            Window::Bottom
+        } else {
+            Window::At {
+                top: top_stable_row,
+                rows,
+            }
+        }),
+        DesktopEvent::FrameAck { frame_seq } => SessionCommand::FrameAck(frame_seq),
+        DesktopEvent::Mouse {
+            kind,
+            button,
+            col,
+            row,
+            shift,
+            control,
+            alt,
+        } => {
+            let request = MouseRequest {
+                session_id: r.source.session_id,
+                kind,
+                button,
+                col,
+                row,
+                shift,
+                control,
+                alt,
+            };
+            match mouse_event_from_request(request) {
+                Some(event) => SessionCommand::Mouse(event),
+                None => return DesktopFailure::InvalidEvent,
+            }
+        }
+        DesktopEvent::Selection {
+            clear,
+            anchor_row,
+            anchor_col,
+            focus_row,
+            focus_col,
+            rectangular,
+        } => SessionCommand::Selection(SelectionRequest {
+            session_id: r.source.session_id,
+            clear,
+            anchor_row,
+            anchor_col,
+            focus_row,
+            focus_col,
+            rectangular,
+        }),
+        DesktopEvent::Copy => SessionCommand::Copy,
+        // 4B-I 拥有完整绑定/Alt/默认候选决策；不能临时把 Super 或 release 错编成远端输入。
+        DesktopEvent::Key { .. } => return DesktopFailure::PolicyUnavailable,
+    };
+    if handle
+        .commands
+        .send(SessionCommand::Ordered(Box::new(command), lease))
+        .is_err()
+    {
+        DesktopFailure::IdentityMismatch
+    } else {
+        DesktopFailure::None
+    }
+}
+
+async fn run_prepared_session(
+    context: Arc<AppContext>,
+    prepared: connect::DesktopTarget,
+    commands: UnboundedReceiver<SessionCommand>,
+    replies: UnboundedReceiver<ProtectedReply>,
+) {
+    // 字体引用横跨认证、运行与离线重连；仅任务结束时释放。
+    let font = prepared.font;
+    run_session_inner(
+        context,
+        prepared.request,
+        Some(prepared.target),
+        Some(prepared.settings),
+        Some(prepared.quick_password),
+        commands,
+        replies,
+    )
+    .await;
+    drop(font);
 }
 
 async fn run_desktop_session(
     context: Arc<AppContext>,
     request: DesktopConnectRequest,
     commands: UnboundedReceiver<SessionCommand>,
-    replies: UnboundedReceiver<InteractionReply>,
+    replies: UnboundedReceiver<ProtectedReply>,
 ) {
     let (request_id, session_id) = (request.request_id, request.session_id);
     match connect::resolve_desktop(&context, request).await {
@@ -441,7 +743,15 @@ impl Screen {
                     Some(range) => self.engine.selected_text(range).unwrap_or_default(),
                     None => String::new(),
                 };
-                ClipboardText { session_id, text }.send_signal_to_dart();
+                match desktop_runtime::SOURCE.try_with(Clone::clone) {
+                    Ok(source) => DesktopClipboard {
+                        source: source.source,
+                        identity: source.identity,
+                        text,
+                    }
+                    .send_signal_to_dart(),
+                    Err(_) => ClipboardText { session_id, text }.send_signal_to_dart(),
+                }
             }
             SessionCommand::FrameAck(seq) => {
                 // 上一帧 Dart 已处理完：攒着的变化现在可以画了（节拍允许的话）。
@@ -476,7 +786,7 @@ async fn run_session(
     context: Arc<AppContext>,
     request: ConnectRequest,
     commands: UnboundedReceiver<SessionCommand>,
-    replies: UnboundedReceiver<InteractionReply>,
+    replies: UnboundedReceiver<ProtectedReply>,
 ) {
     run_session_inner(context, request, None, None, None, commands, replies).await;
 }
@@ -488,7 +798,7 @@ async fn run_session_inner(
     desktop_settings: Option<ResolvedTerminalProfile>,
     desktop_password: Option<SecretString>,
     mut commands: UnboundedReceiver<SessionCommand>,
-    mut replies: UnboundedReceiver<InteractionReply>,
+    mut replies: UnboundedReceiver<ProtectedReply>,
 ) {
     let session_id = request.session_id;
     // 快速连接的密码：所有权直接移进 SecretString（drop 时清零），请求里不留明文副本
@@ -511,6 +821,11 @@ async fn run_session_inner(
     let mut backlog = VecDeque::new();
     // 回答通道跨重连复用，提示编号也必须跨重连唯一，旧回答不能命中新提示。
     let mut prompts = PromptIds::default();
+    let frozen_target = if desktop_runtime::SOURCE.try_with(|_| ()).is_ok() {
+        prepared_target.clone()
+    } else {
+        None
+    };
 
     loop {
         let first_attempt = quick_password.is_some();
@@ -518,7 +833,7 @@ async fn run_session_inner(
             .take()
             .unwrap_or_else(|| SecretString::from(String::new()));
         let attempt = async {
-            let target = match prepared_target.take() {
+            let target = match frozen_target.clone().or_else(|| prepared_target.take()) {
                 Some(target) => target,
                 None => connect::resolve_target(&context, &request)
                     .await
@@ -614,7 +929,14 @@ async fn run_session_inner(
                             session_id,
                             SessionEnd::failed(FailureKind::Other, format!("engine: {error:?}")),
                         );
-                        let _ = transport.shutdown().await;
+                        if let Err(detail) =
+                            crate::transport_lifecycle::shutdown(transport.as_mut()).await
+                        {
+                            report_end(
+                                session_id,
+                                SessionEnd::failed(detail.kind(), detail.detail()),
+                            );
+                        }
                         return;
                     }
                 }
@@ -623,15 +945,16 @@ async fn run_session_inner(
         let (end, quit) = run_connected(
             session_id,
             screen,
-            &mut transport,
+            transport.as_mut(),
             &mut size,
             &mut commands,
             &mut backlog,
         )
         .await;
         // 最后一屏的待发变化仍由离线循环按 ACK / 节拍发送；窗格关闭时直接释放。
-        report_end(session_id, end);
-        let _ = transport.shutdown().await;
+        finish_transport(session_id, transport.as_mut(), end).await;
+        // 离线只保留 screen/profile/font，不把已终止或关闭超时的 transport 留到重连。
+        drop(transport);
         if quit {
             return;
         }
@@ -655,7 +978,29 @@ async fn run_session_inner(
 async fn run_connected(
     session_id: u32,
     screen: &mut Screen,
-    transport: &mut NativeSshTransport,
+    transport: &mut dyn SessionTransport,
+    size: &mut TerminalSize,
+    commands: &mut UnboundedReceiver<SessionCommand>,
+    backlog: &mut VecDeque<SessionCommand>,
+) -> (SessionEnd, bool) {
+    tokio::select! {
+        biased;
+        () = crate::transport_lifecycle::closing() => (SessionEnd::closed("disconnect_inflight_not_replayed"), true),
+        result = run_connected_loop(session_id, screen, transport, size, commands, backlog) => result,
+    }
+}
+
+async fn finish_transport(session_id: u32, transport: &mut dyn SessionTransport, end: SessionEnd) {
+    match crate::transport_lifecycle::shutdown(transport).await {
+        Ok(()) => report_end(session_id, end),
+        Err(error) => report_end(session_id, SessionEnd::failed(error.kind(), error.detail())),
+    }
+}
+
+async fn run_connected_loop(
+    session_id: u32,
+    screen: &mut Screen,
+    transport: &mut dyn SessionTransport,
     size: &mut TerminalSize,
     commands: &mut UnboundedReceiver<SessionCommand>,
     backlog: &mut VecDeque<SessionCommand>,
@@ -675,8 +1020,9 @@ async fn run_connected(
                     Ok(delta) => {
                         // 引擎对远端查询的应答（DA / 光标位置报告…）必须回写，
                         // 否则对端会一直等。
-                        if !delta.outbound.is_empty() {
-                            let _ = transport.write(&delta.outbound).await;
+                        if !delta.outbound.is_empty()
+                            && let Err(error) = transport.write(&delta.outbound).await {
+                            return (SessionEnd::failed(lost(error.failure()), format!("engine write: {error:?}")), false);
                         }
                         if delta.dirty
                             && let Err(detail) = screen.changed(session_id)
@@ -712,7 +1058,9 @@ async fn run_connected(
             () = sleep_until(sync_deadline.unwrap_or_else(Instant::now)), if sync_deadline.is_some() => {
                 match screen.end_sync(session_id) {
                     Ok(outbound) if !outbound.is_empty() => {
-                        let _ = transport.write(&outbound).await;
+                        if let Err(error) = transport.write(&outbound).await {
+                            return (SessionEnd::failed(lost(error.failure()), format!("sync write: {error:?}")), false);
+                        }
                     }
                     Ok(_) => {}
                     Err(detail) => return (SessionEnd::failed(FailureKind::Other, detail), false),
@@ -722,6 +1070,10 @@ async fn run_connected(
                 let command = match command {
                     Some(command) => command,
                     None => return (SessionEnd::closed("disconnect"), true),
+                };
+                let (command, _lease) = match command {
+                    SessionCommand::Ordered(command, lease) => (*command, Some(lease)),
+                    command => (command, None),
                 };
                 let command = match screen.handle_local(session_id, command) {
                     Ok(Some(command)) => command,
@@ -779,6 +1131,7 @@ async fn run_connected(
                     // 连着的时候重连无意义。
                     SessionCommand::Reconnect => {}
                     SessionCommand::Viewport(_)
+                    | SessionCommand::Ordered(_, _)
                     | SessionCommand::Selection(_)
                     | SessionCommand::Copy
                     | SessionCommand::FrameAck(_)
@@ -799,6 +1152,10 @@ async fn wait_offline(
     backlog: &mut VecDeque<SessionCommand>,
 ) -> Next {
     for command in backlog.drain(..) {
+        let command = match command {
+            SessionCommand::Ordered(command, _) => *command,
+            command => command,
+        };
         if let SessionCommand::Resize(new_size) = command {
             *size = new_size;
         }
@@ -822,7 +1179,8 @@ async fn wait_offline(
                     debug_print!("[session {session_id}] offline sync: {detail}");
                 }
             }
-            command = commands.recv() => match command {
+            () = crate::transport_lifecycle::closing() => return Next::Quit,
+            command = commands.recv() => match command.map(|command| match command { SessionCommand::Ordered(command, _) => *command, command => command }) {
                 Some(SessionCommand::Reconnect) => return Next::Reconnect,
                 Some(SessionCommand::Disconnect) | None => return Next::Quit,
                 Some(SessionCommand::Resize(new_size)) => {
@@ -876,27 +1234,29 @@ async fn next_command(
 }
 
 fn report(session_id: u32, state: SessionState, detail: String) {
-    SessionStatus {
+    send_status(SessionStatus {
         session_id,
         state,
         failure: FailureKind::None,
         detail,
         local_network_settings_url: String::new(),
         hint: ConnectHint::None,
-    }
-    .send_signal_to_dart();
+    });
 }
 
 fn report_end(session_id: u32, end: SessionEnd) {
-    SessionStatus {
+    send_status(SessionStatus {
         session_id,
         state: end.state,
         failure: end.failure,
         detail: end.detail,
         local_network_settings_url: String::new(),
         hint: ConnectHint::None,
-    }
-    .send_signal_to_dart();
+    });
+}
+
+fn send_status(status: SessionStatus) {
+    crate::status_sink::StatusSink::capture().send(status);
 }
 
 /// 连接没建成：取消报 Closed；失败时顺带判断是否可能是本地网络权限。
@@ -904,15 +1264,14 @@ async fn report_abort(session_id: u32, abort: Abort, host: &str, port: u16) {
     match abort {
         Abort::Closed => report(session_id, SessionState::Closed, "disconnect".into()),
         Abort::Cancelled => report(session_id, SessionState::Cancelled, String::new()),
-        Abort::Failed { failure, detail } => SessionStatus {
+        Abort::Failed { failure, detail } => send_status(SessionStatus {
             session_id,
             state: SessionState::Failed,
             failure,
             detail,
             local_network_settings_url: local_network::settings_url(host, port, failure).await,
             hint: ConnectHint::None,
-        }
-        .send_signal_to_dart(),
+        }),
     }
 }
 
@@ -1149,7 +1508,15 @@ fn send_selection_state(session_id: u32, selection: Option<SelectionRange>) {
             focus_col: 0,
         },
     };
-    state.send_signal_to_dart();
+    match desktop_runtime::SOURCE.try_with(Clone::clone) {
+        Ok(source) => DesktopSelection {
+            source: source.source,
+            identity: source.identity,
+            selection: state,
+        }
+        .send_signal_to_dart(),
+        Err(_) => state.send_signal_to_dart(),
+    }
 }
 
 /// 边界上的选区请求 → 上游 `SelectionRange`。`clear` 或端点相同都归为「无选区」。
@@ -1428,7 +1795,7 @@ fn send_frame(
     let binary = pack_runs(frame);
     let pack_us = micros_since(pack_start);
     let seq = stats.record(render_us, pack_us, binary.len());
-    FrameUpdate {
+    let update = FrameUpdate {
         session_id,
         cols: frame.size.cols,
         rows: frame.size.rows,
@@ -1441,8 +1808,29 @@ fn send_frame(
         title: remote_title(&frame.title),
         mouse_reporting: frame.mouse_reporting,
         alternate_screen: frame.alternate_screen,
+    };
+    match desktop_runtime::SOURCE.try_with(Clone::clone) {
+        Ok(source) => {
+            DesktopViewportState {
+                source: source.source.clone(),
+                identity: source.identity.clone(),
+                frame_seq: seq,
+                oldest_row: bounds.first_stable_row,
+                screen_top,
+                follow_bottom: frame.viewport_top == screen_top,
+                mouse_reporting: frame.mouse_reporting,
+                invalidate_selection: false,
+            }
+            .send_signal_to_dart();
+            DesktopFrame {
+                source: source.source,
+                identity: source.identity,
+                frame: update,
+            }
+            .send_signal_to_dart(binary);
+        }
+        Err(_) => update.send_signal_to_dart(binary),
     }
-    .send_signal_to_dart(binary);
     seq
 }
 
@@ -1973,3 +2361,7 @@ mod tests {
 #[cfg(test)]
 #[path = "session_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "transport_lifecycle_tests.rs"]
+mod transport_tests;

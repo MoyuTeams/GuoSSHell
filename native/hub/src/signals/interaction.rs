@@ -27,7 +27,7 @@ pub struct PromptField {
 }
 
 /// 发给 Dart 的问题。按 `kind` 读对应字段，其余为空。
-#[derive(Serialize, RustSignal)]
+#[derive(Serialize, RustSignal, SignalPiece)]
 pub struct InteractionPrompt {
     pub session_id: u32,
     pub prompt_id: u32,

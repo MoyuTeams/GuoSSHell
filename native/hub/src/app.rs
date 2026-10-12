@@ -114,13 +114,25 @@ fn debug_auto_connect() -> AppReady {
     }
 }
 
-pub async fn run() {
+pub async fn run(
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), crate::shutdown::ShutdownError> {
     let start = AppStart::get_dart_signal_receiver();
-    let Some(pack) = start.recv().await else {
-        return;
+    let pack = tokio::select! {
+        biased;
+        () = crate::shutdown::requested(&mut shutdown) => return Ok(()),
+        pack = start.recv() => pack,
+    };
+    let Some(pack) = pack else {
+        return Ok(());
     };
     let support_dir = PathBuf::from(pack.message.support_dir);
-    let context = match spawn_blocking(move || AppContext::open(&support_dir)).await {
+    let opened = tokio::select! {
+        biased;
+        () = crate::shutdown::requested(&mut shutdown) => return Err(crate::shutdown::ShutdownError::StartupWorkMayRemain),
+        result = spawn_blocking(move || AppContext::open(&support_dir)) => result,
+    };
+    let context = match opened {
         Ok(Ok(context)) => Arc::new(context),
         Ok(Err(detail)) => {
             AppReady {
@@ -129,7 +141,7 @@ pub async fn run() {
                 ..AppReady::default()
             }
             .send_signal_to_dart();
-            return;
+            return Ok(());
         }
         Err(error) => {
             AppReady {
@@ -138,7 +150,7 @@ pub async fn run() {
                 ..AppReady::default()
             }
             .send_signal_to_dart();
-            return;
+            return Err(crate::shutdown::ShutdownError::TaskFailures(1));
         }
     };
     AppReady {
@@ -147,8 +159,26 @@ pub async fn run() {
     }
     .send_signal_to_dart();
 
-    tokio::spawn(catalog::run(context.clone()));
-    tokio::spawn(settings::run(context.clone()));
-    tokio::spawn(keys::run(context.clone()));
-    session::supervisor(context).await;
+    let mut services = tokio::task::JoinSet::new();
+    services.spawn(catalog::run(context.clone()));
+    services.spawn(settings::run(context.clone()));
+    services.spawn(keys::run(context.clone()));
+    let result = session::supervisor(context, shutdown).await;
+    services.abort_all();
+    let drained = tokio::time::timeout(crate::shutdown::SERVICE_LIMIT, async {
+        let mut failed = false;
+        while let Some(task) = services.join_next().await {
+            if let Err(error) = task
+                && !error.is_cancelled()
+            {
+                failed = true;
+            }
+        }
+        failed
+    })
+    .await;
+    if result.is_ok() && !matches!(drained, Ok(false)) {
+        return Err(crate::shutdown::ShutdownError::TaskFailures(1));
+    }
+    result
 }

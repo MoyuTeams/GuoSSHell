@@ -14,6 +14,7 @@ import 'package:guosh_shell/src/desktop/keys/desktop_key_actions.dart';
 import 'package:guosh_shell/src/desktop/keys/desktop_keys_page.dart';
 import 'package:guosh_shell/src/desktop/windows_chrome.dart';
 import 'package:guosh_shell/src/desktop/windows_shell.dart';
+import 'package:guosh_shell/src/desktop/workspace/desktop_target_options.dart';
 import 'package:guosh_shell/src/terminal/session_target.dart';
 import 'package:guosh_shell/src/workspace/workspace.dart';
 
@@ -74,6 +75,7 @@ class _Harness {
             title: '已有标签',
           ),
           gateway: gateway,
+          targetOptions: _TargetOptions(),
           keyActions: actions ?? DesktopKeyActions(query: () {}),
           paneBuilder: (pane) =>
               _PaneProbe(pane, mountedPanes.add, () => disposals++),
@@ -83,7 +85,15 @@ class _Harness {
     gateway.emit('', [saved]);
     gateway.keys.add(emptyKeyState);
     await tester.pumpAndSettle();
+    mountedPanes.single.controller.focusNode.requestFocus();
+    await tester.pump();
   }
+}
+
+class _TargetOptions implements DesktopTargetOptionsGateway {
+  @override
+  Future<DesktopTargetOptions> query() async =>
+      const DesktopTargetOptions(profiles: [], nativeAvailable: true);
 }
 
 Future<void> _icon(WidgetTester tester, String label) async {

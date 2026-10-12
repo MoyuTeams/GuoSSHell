@@ -9,16 +9,16 @@ import 'package:path_provider/path_provider.dart';
 import 'bindings/bindings.dart';
 import 'catalog/connection_list_page.dart';
 import 'desktop/catalog/desktop_catalog_gateway.dart';
-import 'desktop/desktop_shell.dart';
 import 'desktop/desktop_status.dart';
 import 'desktop/desktop_theme.dart';
-import 'desktop/legacy_material_surface.dart';
 import 'desktop/windows_chrome.dart';
 import 'desktop/windows_shell.dart';
+import 'desktop/workspace/desktop_target_options.dart';
 import 'platform_target.dart';
 import 'settings/interface_font.dart';
 import 'terminal/session_target.dart';
 import 'workspace/workspace_page.dart';
+import 'workspace/workspace.dart';
 
 /// 调试用的自动连接（debug 构建，见 README）：启动后直接以快速连接打开终端。取值先看
 /// --dart-define，没有就用 Rust 随 AppReady 转交的进程环境变量（XCUITest、simctl 传入）。
@@ -33,6 +33,8 @@ class GuoSSHellApp extends StatelessWidget {
   final StartupPort? startupOverride;
   final Widget? legacyHomeOverride;
   final DesktopCatalogGateway? desktopCatalogGatewayOverride;
+  final DesktopTargetOptionsGateway? desktopTargetOptionsOverride;
+  final Widget Function(WorkspacePane)? desktopPaneBuilderOverride;
 
   const GuoSSHellApp({
     super.key,
@@ -40,6 +42,8 @@ class GuoSSHellApp extends StatelessWidget {
     this.startupOverride,
     @visibleForTesting this.legacyHomeOverride,
     @visibleForTesting this.desktopCatalogGatewayOverride,
+    @visibleForTesting this.desktopTargetOptionsOverride,
+    @visibleForTesting this.desktopPaneBuilderOverride,
   });
 
   @override
@@ -57,32 +61,57 @@ class GuoSSHellApp extends StatelessWidget {
           fluent.FluentLocalizations.delegate,
         ],
         supportedLocales: const [Locale('zh'), Locale('en')],
-        builder: (context, child) => fluent.FluentTheme(
-          data: desktopFluentTheme(fontFamily: fontFamily),
-          child: WindowsFrame(child: child!),
-        ),
+        builder: (context, child) {
+          final media = MediaQuery.of(context);
+          return fluent.FluentTheme(
+            data: desktopFluentTheme(
+              fontFamily: fontFamily,
+              highContrast: media.highContrast,
+              reduceMotion:
+                  media.disableAnimations || media.accessibleNavigation,
+            ),
+            child: WindowsFrame(child: child!),
+          );
+        },
         theme: desktopMaterialTheme(fontFamily: fontFamily),
         home: _StartupGate(
           desktop: true,
           windows: true,
           startup: startupOverride,
           catalogGateway: desktopCatalogGatewayOverride,
+          targetOptions: desktopTargetOptionsOverride,
+          paneBuilder: desktopPaneBuilderOverride,
         ),
       );
     }
     if (target == AppTarget.desktop) {
       return fluent.FluentApp(
         title: 'GuoSSHell',
+        localizationsDelegates: const [
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+          fluent.FluentLocalizations.delegate,
+        ],
+        supportedLocales: const [Locale('zh'), Locale('en')],
         builder: (context, child) {
           final media = MediaQuery.of(context);
           return fluent.FluentTheme(
-            data: desktopTheme(
+            data: desktopFluentTheme(
               fontFamily: fontFamily,
               highContrast: media.highContrast,
               reduceMotion:
                   media.disableAnimations || media.accessibleNavigation,
             ),
-            child: child!,
+            child: Theme(
+              data: desktopMaterialTheme(fontFamily: fontFamily),
+              child: ColoredBox(
+                color: media.highContrast
+                    ? DesktopColors.highContrastCanvas
+                    : desktopBackground,
+                child: child!,
+              ),
+            ),
           );
         },
         home: _StartupGate(
@@ -90,6 +119,8 @@ class GuoSSHellApp extends StatelessWidget {
           startup: startupOverride,
           legacyHome: legacyHomeOverride,
           catalogGateway: desktopCatalogGatewayOverride,
+          targetOptions: desktopTargetOptionsOverride,
+          paneBuilder: desktopPaneBuilderOverride,
         ),
       );
     }
@@ -103,7 +134,10 @@ class GuoSSHellApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: _StartupGate(startup: startupOverride),
+      home: _StartupGate(
+        startup: startupOverride,
+        legacyHome: legacyHomeOverride,
+      ),
     );
   }
 }
@@ -164,6 +198,8 @@ class _StartupGate extends StatefulWidget {
   final StartupPort? startup;
   final Widget? legacyHome;
   final DesktopCatalogGateway? catalogGateway;
+  final DesktopTargetOptionsGateway? targetOptions;
+  final Widget Function(WorkspacePane)? paneBuilder;
 
   const _StartupGate({
     this.desktop = false,
@@ -171,6 +207,8 @@ class _StartupGate extends StatefulWidget {
     this.startup,
     this.legacyHome,
     this.catalogGateway,
+    this.targetOptions,
+    this.paneBuilder,
   });
 
   @override
@@ -264,48 +302,15 @@ class _StartupGateState extends State<_StartupGate> {
   }
 
   void _autoConnect() {
-    if (widget.windows) return;
+    if (widget.desktop) return;
     final target = _autoTarget;
     if (target == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      if (widget.desktop) {
-        _openLegacy(target);
-      } else {
-        Navigator.of(context).push(
-          MaterialPageRoute<void>(
-            builder: (_) => WorkspacePage(initial: target),
-          ),
-        );
-      }
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => WorkspacePage(initial: target)),
+      );
     });
-  }
-
-  void _openLegacy(SessionTarget target) {
-    final reduceMotion =
-        MediaQuery.disableAnimationsOf(context) ||
-        MediaQuery.accessibleNavigationOf(context);
-    Navigator.of(context).push(
-      _DesktopLegacyRoute(
-        reduceMotion: reduceMotion,
-        builder: (_) => LegacyMaterialSurface(
-          initialTarget: target,
-          homeOverride: widget.legacyHome,
-        ),
-      ),
-    );
-  }
-
-  void _openLegacySettings() {
-    final reduceMotion =
-        MediaQuery.disableAnimationsOf(context) ||
-        MediaQuery.accessibleNavigationOf(context);
-    Navigator.of(context).push(
-      _DesktopLegacyRoute(
-        reduceMotion: reduceMotion,
-        builder: (_) => const LegacyMaterialSurface.settings(),
-      ),
-    );
   }
 
   @override
@@ -334,14 +339,12 @@ class _StartupGateState extends State<_StartupGate> {
           detail: '等待 Rust 就绪与首份设置。',
         );
       }
-      return widget.windows
-          ? WindowsShell(initial: _autoTarget, gateway: widget.catalogGateway)
-          : DesktopShell(
-              openTarget: _openLegacy,
-              openSettings: _openLegacySettings,
-              catalogGateway:
-                  widget.catalogGateway ?? const RustDesktopCatalogGateway(),
-            );
+      return WindowsShell(
+        initial: _autoTarget,
+        gateway: widget.catalogGateway,
+        targetOptions: widget.targetOptions,
+        paneBuilder: widget.paneBuilder,
+      );
     }
     if (error != null) {
       return Scaffold(
@@ -356,20 +359,6 @@ class _StartupGateState extends State<_StartupGate> {
     if (!_ready) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-    return const ConnectionListPage();
+    return widget.legacyHome ?? const ConnectionListPage();
   }
-}
-
-class _DesktopLegacyRoute extends fluent.FluentPageRoute<void> {
-  final bool reduceMotion;
-
-  _DesktopLegacyRoute({required super.builder, required this.reduceMotion});
-
-  @override
-  Duration get transitionDuration =>
-      reduceMotion ? Duration.zero : super.transitionDuration;
-
-  @override
-  Duration get reverseTransitionDuration =>
-      reduceMotion ? Duration.zero : super.reverseTransitionDuration;
 }

@@ -36,9 +36,10 @@ use crate::card::{CardFailure, CardSigner};
 use crate::catalog;
 use crate::external_signer::{PinQuestion, SignerRequest};
 use crate::keys::{self, StoredKey};
+use crate::protected_reply::ProtectedReply;
 use crate::security_key::{SecurityKeySigner, SkFailure};
 use crate::session::SessionCommand;
-use crate::signals::interaction::{InteractionPrompt, InteractionReply, PromptField, PromptKind};
+use crate::signals::interaction::{InteractionPrompt, PromptField, PromptKind};
 use crate::signals::keys::KeyError;
 use crate::signals::{
     ConnectRequest, DESKTOP_CONNECT_VERSION, DesktopConnectError, DesktopConnectRequest,
@@ -58,7 +59,7 @@ const KEEPALIVE_MAX: usize = 3;
 type PendingPins = HashMap<u32, oneshot::Sender<Option<(SecretString, bool)>>>;
 
 pub struct Connected {
-    pub transport: NativeSshTransport,
+    pub transport: Box<dyn SessionTransport>,
     pub profile: ConnectionProfile,
 }
 
@@ -106,7 +107,7 @@ impl Abort {
 /// 连接过程中会话收到的东西。
 pub struct Channels<'a> {
     pub commands: &'a mut UnboundedReceiver<SessionCommand>,
-    pub replies: &'a mut UnboundedReceiver<InteractionReply>,
+    pub replies: &'a mut UnboundedReceiver<ProtectedReply>,
     /// 连接期间收到的非 Disconnect 命令，连上后按顺序处理。
     pub backlog: &'a mut VecDeque<SessionCommand>,
 }
@@ -131,6 +132,7 @@ impl Channels<'_> {
 }
 
 /// 连接目标的配置，以及它是否在目录里（只有目录里的连接能存密码）。
+#[derive(Clone)]
 pub struct Target {
     pub profile: ConnectionProfile,
     pub saved: bool,
@@ -141,6 +143,14 @@ pub struct DesktopTarget {
     pub target: Target,
     pub settings: ResolvedTerminalProfile,
     pub quick_password: SecretString,
+    pub font: Option<crate::profile_fonts::ResolvedProfileFont>,
+}
+
+/// 准备持有只包含非秘密目标和配置；不保存带 password 字段的旧连接 DTO。
+pub(crate) struct PreparedTarget {
+    pub target: Target,
+    pub settings: ResolvedTerminalProfile,
+    pub font: crate::profile_fonts::ResolvedProfileFont,
 }
 
 /// 新协议只在桌面编译目标开放；即使移动端伪造信号，也无法进入目标解析或传输层。
@@ -221,7 +231,50 @@ fn validate_desktop_for<const DESKTOP: bool>(
 /// 解析目录与终端配置，非 Native 分支只返回不可用，不构造传输层或启动程序。
 pub async fn resolve_desktop(
     context: &Arc<AppContext>,
+    request: DesktopConnectRequest,
+) -> Result<DesktopTarget, (DesktopConnectError, String)> {
+    resolve_desktop_inner(context, request, false, None).await
+}
+
+pub(crate) async fn resolve_prepared(
+    context: &Arc<AppContext>,
+    request: DesktopConnectRequest,
+    lease: crate::desktop_prepare::Lease,
+) -> (
+    Result<PreparedTarget, (DesktopConnectError, String)>,
+    crate::desktop_prepare::Lease,
+) {
+    let result = resolve_desktop_inner(context, request, true, Some(lease.clone()))
+        .await
+        .and_then(|resolved| {
+            Ok(PreparedTarget {
+                target: resolved.target,
+                settings: resolved.settings,
+                font: resolved
+                    .font
+                    .ok_or((DesktopConnectError::Storage, "font_snapshot".into()))?,
+            })
+        });
+    (result, lease)
+}
+
+/// 不可取消的 I/O 连同结果持有预约；外层 future 销毁也不能提前释放。
+pub(crate) async fn load_desktop_io<T: Send + 'static>(
+    lease: Option<crate::desktop_prepare::Lease>,
+    load: impl FnOnce() -> T + Send + 'static,
+) -> Result<(T, Option<crate::desktop_prepare::Lease>), tokio::task::JoinError> {
+    spawn_blocking(move || {
+        let result = load();
+        (result, lease)
+    })
+    .await
+}
+
+async fn resolve_desktop_inner(
+    context: &Arc<AppContext>,
     mut request: DesktopConnectRequest,
+    capture_font: bool,
+    lease: Option<crate::desktop_prepare::Lease>,
 ) -> Result<DesktopTarget, (DesktopConnectError, String)> {
     if let Err((error, field)) = validate_desktop(&request) {
         request.password.zeroize();
@@ -232,7 +285,8 @@ pub async fn resolve_desktop(
     let task_context = context.clone();
     let profile_id = request.profile_id.clone();
     let connection_id = request.connection_id.clone();
-    let (settings, app_bindings, saved) = spawn_blocking(move || {
+    // 接回的租约与结果同寿命，解析结果期间也继续计账。
+    let (loaded, _io_lease) = load_desktop_io(lease, move || {
         let saved = if connection_id.is_empty() {
             None
         } else {
@@ -266,18 +320,40 @@ pub async fn resolve_desktop(
         };
         let profile = snapshot
             .profiles
-            .into_iter()
+            .iter()
             .find(|profile| profile.id.0.to_string() == wanted)
             .ok_or((DesktopConnectError::ProfileNotFound, "profile_id"))?;
+        let font = if capture_font {
+            // 元数据与字体分别有界，通用 family override 不改变字体绑定意图。
+            let metadata = serde_json::to_vec(&(&snapshot.settings, &snapshot.profiles, &saved))
+                .map_err(|_| (DesktopConnectError::Storage, "configuration"))?;
+            if metadata.len() > crate::desktop_prepare::METADATA_LIMIT {
+                return Err((DesktopConnectError::InvalidField, "snapshot_budget"));
+            }
+            let root = task_context
+                .known_hosts
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(""));
+            crate::profile_fonts::resolve_profile_font(
+                &snapshot,
+                profile.id,
+                task_context.preferences.get().terminal_font_file,
+                root,
+            )
+        } else {
+            None
+        };
         Ok::<_, (DesktopConnectError, &'static str)>((
-            profile.settings,
+            profile.settings.clone(),
             snapshot.settings.key_bindings,
             saved,
+            font,
         ))
     })
     .await
-    .map_err(|_| (DesktopConnectError::Storage, "storage task".to_owned()))?
-    .map_err(|(error, field)| (error, field.to_owned()))?;
+    .map_err(|_| (DesktopConnectError::Storage, "storage task".to_owned()))?;
+    let (settings, app_bindings, saved, font) =
+        loaded.map_err(|(error, field)| (error, field.to_owned()))?;
 
     let expected = match request.target {
         DesktopTargetKind::NativeSsh => TransportKind::NativeSsh,
@@ -339,6 +415,7 @@ pub async fn resolve_desktop(
         target,
         settings,
         quick_password,
+        font,
     })
 }
 
@@ -418,66 +495,74 @@ pub async fn establish(
     // 密码：目录里存了就从钥匙串读（每次连接读，不缓存——PLAN §9.2.2）；
     // 没存、读不到、或快速连接没带，就问用户。
     let mut remember = None;
-    let auth = match profile.authentication {
-        AuthenticationKind::Password => {
-            let password = match saved_password(context, &profile).await {
-                Some(password) => password,
-                None if !quick_password.expose_secret().is_empty() => quick_password,
-                None => {
-                    let question = Question {
-                        kind: PromptKind::Password,
-                        name: String::new(),
-                        can_remember: saved,
-                        retry: false,
-                    };
-                    let (password, keep) = ask_secret(
-                        session_id,
-                        prompts.next()?,
-                        &profile,
-                        question,
-                        &mut channels,
-                    )
-                    .await?;
-                    if keep && saved {
-                        remember = Some(SecretString::from(password.expose_secret().to_owned()));
+    let auth = async {
+        match profile.authentication {
+            AuthenticationKind::Password => {
+                let password = match saved_password(context, &profile).await {
+                    Some(password) => password,
+                    None if !quick_password.expose_secret().is_empty() => quick_password,
+                    None => {
+                        let question = Question {
+                            kind: PromptKind::Password,
+                            name: String::new(),
+                            can_remember: saved,
+                            retry: false,
+                        };
+                        let (password, keep) = ask_secret(
+                            session_id,
+                            prompts.next()?,
+                            &profile,
+                            question,
+                            &mut channels,
+                        )
+                        .await?;
+                        if keep && saved {
+                            remember =
+                                Some(SecretString::from(password.expose_secret().to_owned()));
+                        }
+                        password
                     }
-                    password
-                }
-            };
-            AuthPlan::from_secret(&profile, Some(password))
-        }
-        AuthenticationKind::PublicKey => {
-            let (id, stored) = load_key(context, &profile).await?;
-            match external_signer(context, session_id, described, &id, &stored)? {
-                Some((signer, receiver, public_key)) => {
-                    let plan = AuthPlan::from_signer(&profile, public_key, signer.external());
-                    external = Some((signer, receiver));
-                    plan
-                }
-                None => {
-                    let key = unlock_key(
-                        context,
-                        session_id,
-                        prompts,
-                        &profile,
-                        id,
-                        stored,
-                        &mut channels,
-                    )
-                    .await?;
-                    AuthPlan::from_private_key(&profile, Arc::new(key))
+                };
+                AuthPlan::from_secret(&profile, Some(password))
+            }
+            AuthenticationKind::PublicKey => {
+                let (id, stored) = load_key(context, &profile).await?;
+                match external_signer(context, session_id, described, &id, &stored)? {
+                    Some((signer, receiver, public_key)) => {
+                        let plan = AuthPlan::from_signer(&profile, public_key, signer.external());
+                        external = Some((signer, receiver));
+                        plan
+                    }
+                    None => {
+                        let key = unlock_key(
+                            context,
+                            session_id,
+                            prompts,
+                            &profile,
+                            id,
+                            stored,
+                            &mut channels,
+                        )
+                        .await?;
+                        AuthPlan::from_private_key(&profile, Arc::new(key))
+                    }
                 }
             }
+            _ => AuthPlan::from_secret(&profile, None),
         }
-        _ => AuthPlan::from_secret(&profile, None),
-    }
-    .map_err(|error| Abort::failed(FailureKind::Other, format!("auth plan: {error:?}")))?;
+        .map_err(|error| Abort::failed(FailureKind::Other, format!("auth plan: {error:?}")))
+    };
+    let auth = tokio::select! {
+        biased;
+        () = crate::transport_lifecycle::closing() => return Err(Abort::Closed),
+        result = auth => result?,
+    };
 
     // 主机密钥：新主机与变更的密钥都问用户（变更时带 changed，Dart 给出醒目警告）。
     let verifier = KnownHostsVerifier::new(&context.known_hosts)
         .with_changed_key_prompt()
         .with_timeout(CONNECT_LIMIT);
-    let mut transport = NativeSshTransport::new(profile.clone(), auth, verifier)
+    let transport = NativeSshTransport::new(profile.clone(), auth, verifier)
         .and_then(|transport| transport.with_connect_timeout(CONNECT_LIMIT))
         .and_then(|transport| transport.with_keepalive(KEEPALIVE_INTERVAL, KEEPALIVE_MAX))
         .map_err(|error| {
@@ -487,10 +572,56 @@ pub async fn establish(
             )
         })?;
 
+    let mut transport: Box<dyn SessionTransport> = Box::new(transport);
+    let (signer, signer_requests) = external.unzip();
+    let result = handshake(
+        transport.as_mut(),
+        session_id,
+        &profile,
+        &transport_request,
+        channels,
+        prompts,
+        signer_requests,
+    )
+    .await;
+    if let Err(error) = result {
+        // shutdown 超时不能被认证表象覆盖。
+        if matches!(&error, Abort::Failed { detail, .. } if detail.starts_with("transport_shutdown_"))
+        {
+            return Err(error);
+        }
+        if let Some(abort) = signer.as_ref().and_then(Signer::abort) {
+            return Err(abort);
+        }
+        return Err(error);
+    }
+    if let Some(password) = remember {
+        tokio::select! {
+            biased;
+            () = crate::transport_lifecycle::closing() => {
+                if let Err(detail) = crate::transport_lifecycle::shutdown(transport.as_mut()).await {
+                    return Err(Abort::failed(detail.kind(), detail.detail().into()));
+                }
+                return Err(Abort::Closed);
+            }
+            () = store_password(context, profile.id, password) => {}
+        }
+    }
+    Ok(Connected { transport, profile })
+}
+
+pub(crate) async fn handshake(
+    transport: &mut dyn SessionTransport,
+    session_id: u32,
+    profile: &ConnectionProfile,
+    transport_request: &TransportRequest,
+    mut channels: Channels<'_>,
+    prompts: &mut PromptIds,
+    mut signer_requests: Option<UnboundedReceiver<SignerRequest>>,
+) -> Result<(), Abort> {
     let (broker, mut requests) = interaction_channel();
-    let (signer, mut signer_requests) = external.unzip();
-    let result = {
-        let connect = transport.connect(&transport_request, broker.clone());
+    let result = async {
+        let connect = transport.connect(transport_request, broker.clone());
         tokio::pin!(connect);
         let mut pending = HashMap::new();
         let mut pending_pins = PendingPins::new();
@@ -499,20 +630,21 @@ pub async fn establish(
         loop {
             budget.pause(!pending.is_empty() || !pending_pins.is_empty() || signer_waiting);
             tokio::select! {
-                result = &mut connect => break result,
+                biased;
+                () = crate::transport_lifecycle::closing() => return Err(Abort::Closed),
+                result = &mut connect => break result.map_err(|error| Abort::failed(failure_kind(error.failure()), format!("connect: {error:?}"))),
                 () = budget.expired() => {
                     return Err(Abort::failed(FailureKind::Timeout, "connect: timed out".to_owned()));
                 }
                 request = requests.recv() => {
                     if let Some((id, request)) = request {
-                        forward_prompt(session_id, &profile, &broker, prompts, &mut pending, id, request)?;
+                        forward_prompt(session_id, profile, &broker, prompts, &mut pending, id, request)?;
                     }
                 }
                 request = next_signer_request(&mut signer_requests) => match request {
                     Some(SignerRequest::Pin { question, reply }) => {
                         let prompt_id = prompts.next()?;
-                        card_pin_prompt(session_id, prompt_id, &profile, question)
-                            .send_signal_to_dart();
+                        send_prompt(card_pin_prompt(session_id, prompt_id, profile, question));
                         pending_pins.insert(prompt_id, reply);
                     }
                     Some(SignerRequest::Waiting(waiting)) => signer_waiting = waiting,
@@ -525,23 +657,14 @@ pub async fn establish(
                 command = channels.commands.recv() => channels.defer(command)?,
             }
         }
-    };
+    }.await;
     if let Err(error) = result {
-        debug_print!("[connect] {error:?}");
-        // 外部签名失败时认证失败只是表象，原因在签名器里。
-        if let Some(abort) = signer.as_ref().and_then(Signer::abort) {
-            return Err(abort);
+        if let Err(detail) = crate::transport_lifecycle::shutdown(transport).await {
+            return Err(Abort::failed(detail.kind(), detail.detail().into()));
         }
-        return Err(Abort::failed(
-            failure_kind(error.failure()),
-            format!("connect: {error:?}"),
-        ));
+        return Err(error);
     }
-
-    if let Some(password) = remember {
-        store_password(context, profile.id, password).await;
-    }
-    Ok(Connected { transport, profile })
+    Ok(())
 }
 
 /// 旧会话维持上游默认 TERM；桌面会话由不可变的有效配置指定远端 PTY 的 TERM。
@@ -643,25 +766,26 @@ async fn ask_secret(
     question: Question,
     channels: &mut Channels<'_>,
 ) -> Result<(SecretString, bool), Abort> {
-    InteractionPrompt {
+    send_prompt(InteractionPrompt {
         name: question.name,
         can_remember: question.can_remember,
         retry: question.retry,
         ..empty_prompt(session_id, prompt_id, question.kind, profile)
-    }
-    .send_signal_to_dart();
+    });
     loop {
         tokio::select! {
+            biased;
+            () = crate::transport_lifecycle::closing() => return Err(Abort::Closed),
             reply = channels.replies.recv() => {
-                let Some(reply) = reply else { return Err(Abort::Closed) };
+                let Some(mut reply) = reply else { return Err(Abort::Closed) };
                 if reply.prompt_id != prompt_id {
                     continue;
                 }
                 if !reply.accept {
                     return Err(Abort::Cancelled);
                 }
-                let password = reply.answers.into_iter().next().unwrap_or_default();
-                return Ok((SecretString::from(password), reply.remember));
+                let password = reply.first_secret().unwrap_or_else(|| SecretString::from(String::new()));
+                return Ok((password, reply.remember));
             }
             command = channels.commands.recv() => channels.defer(command)?,
         }
@@ -828,12 +952,12 @@ fn card_pin_prompt(
 }
 
 /// PIN 框的回答：PIN 与「记住到退出 App」；取消为 `None`。
-fn pin_answer(reply: InteractionReply) -> Option<(SecretString, bool)> {
+fn pin_answer(mut reply: ProtectedReply) -> Option<(SecretString, bool)> {
     if !reply.accept {
         return None;
     }
-    let pin = reply.answers.into_iter().next()?;
-    Some((SecretString::from(pin), reply.remember))
+    let pin = reply.first_secret()?;
+    Some((pin, reply.remember))
 }
 
 /// 卡签名失败的原因 → 连接失败的分类。
@@ -895,7 +1019,7 @@ fn forward_prompt(
         }
     };
     pending.insert(prompt_id, (id, prompt.kind));
-    prompt.send_signal_to_dart();
+    send_prompt(prompt);
     Ok(())
 }
 
@@ -910,7 +1034,7 @@ fn forward_reply(
     broker: &InteractionBroker,
     pending: &mut HashMap<u32, (InteractionId, PromptKind)>,
     pending_pins: &mut PendingPins,
-    reply: InteractionReply,
+    reply: ProtectedReply,
 ) {
     if let Some((id, kind)) = pending.remove(&reply.prompt_id) {
         let _ = broker.respond(id, broker_response(kind, reply));
@@ -942,6 +1066,18 @@ fn empty_prompt(
         can_remember: false,
         retry: false,
         tries_left: -1,
+    }
+}
+
+fn send_prompt(prompt: InteractionPrompt) {
+    match crate::desktop_runtime::SOURCE.try_with(Clone::clone) {
+        Ok(source) => crate::signals::desktop_session::DesktopPrompt {
+            source: source.source,
+            identity: source.identity,
+            prompt,
+        }
+        .send_signal_to_dart(),
+        Err(_) => prompt.send_signal_to_dart(),
     }
 }
 
@@ -988,15 +1124,15 @@ fn keyboard_interactive_prompt(
 
 /// Dart 的回答 → 上游 broker 的回答。拒绝主机密钥是 Reject（连接以
 /// HostKeyRejected / HostKeyChanged 失败），其余的「不答」是 Cancel。
-fn broker_response(kind: PromptKind, reply: InteractionReply) -> InteractionResponse {
+fn broker_response(kind: PromptKind, mut reply: ProtectedReply) -> InteractionResponse {
     match (kind, reply.accept) {
         (PromptKind::HostKey, true) => {
             InteractionResponse::HostKey(HostKeyDecision::AcceptAndStore)
         }
         (PromptKind::HostKey, false) => InteractionResponse::HostKey(HostKeyDecision::Reject),
-        (PromptKind::KeyboardInteractive, true) => InteractionResponse::Answers(
-            reply.answers.into_iter().map(SecretString::from).collect(),
-        ),
+        (PromptKind::KeyboardInteractive, true) => {
+            InteractionResponse::Answers(reply.all_secrets())
+        }
         (
             PromptKind::KeyboardInteractive
             | PromptKind::Password
@@ -1145,7 +1281,7 @@ mod tests {
         assert!(!is_empty_round(&round("", "Your password expires soon", 0)));
     }
 
-    fn reply(accept: bool, answers: &[&str]) -> InteractionReply {
+    fn reply(accept: bool, answers: &[&str]) -> crate::protected_reply::ProtectedReply {
         InteractionReply {
             session_id: 1,
             prompt_id: 1,
@@ -1153,6 +1289,7 @@ mod tests {
             answers: answers.iter().map(|answer| (*answer).to_owned()).collect(),
             remember: false,
         }
+        .into()
     }
 
     #[test]
@@ -1270,5 +1407,91 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn protected_answers_survive_queue_ownership_and_are_cleared_on_every_rejection() {
+        use crate::protected_reply::ProtectedReply;
+        use std::sync::{Arc, Mutex};
+        use tokio::sync::mpsc::unbounded_channel;
+        let audit = Arc::new(Mutex::new(Vec::new()));
+        let answer = |prompt_id, accept| {
+            ProtectedReply::audited(
+                InteractionReply {
+                    session_id: 1,
+                    prompt_id,
+                    accept,
+                    answers: vec!["秘密一".into(), "多余二".into(), "多余三".into()],
+                    remember: false,
+                },
+                audit.clone(),
+            )
+        };
+
+        let (sender, receiver) = unbounded_channel();
+        drop(receiver);
+        let rejected = sender.send(answer(1, true));
+        assert!(
+            audit.lock().expect("审计").is_empty(),
+            "发送错误仍拥有 guard"
+        );
+        drop(rejected);
+        assert_eq!(*audit.lock().expect("审计"), vec![3]);
+
+        let (sender, receiver) = unbounded_channel();
+        assert!(sender.send(answer(1, true)).is_ok());
+        drop(receiver);
+        assert_eq!(*audit.lock().expect("审计"), vec![3, 3], "排队后关闭清零");
+
+        let (broker, _requests) = interaction_channel();
+        let mut pending = HashMap::new();
+        let mut pins = PendingPins::new();
+        forward_reply(&broker, &mut pending, &mut pins, answer(99, true));
+        assert_eq!(
+            *audit.lock().expect("审计"),
+            vec![3, 3, 3],
+            "陈旧 prompt 清零"
+        );
+        assert!(matches!(
+            broker_response(PromptKind::KeyboardInteractive, answer(1, false)),
+            InteractionResponse::Cancel
+        ));
+        assert!(super::pin_answer(answer(1, false)).is_none());
+
+        let (commands_tx, mut commands) = unbounded_channel();
+        let (replies_tx, mut replies) = unbounded_channel();
+        assert!(replies_tx.send(answer(1, true)).is_ok());
+        assert!(replies_tx.send(answer(2, true)).is_ok());
+        let mut backlog = std::collections::VecDeque::new();
+        let profile = ConnectionProfile::new("认证回答消费测试", "example.test");
+        let result = super::ask_secret(
+            1,
+            2,
+            &profile,
+            super::Question {
+                kind: PromptKind::Password,
+                name: String::new(),
+                can_remember: false,
+                retry: false,
+            },
+            &mut super::Channels {
+                commands: &mut commands,
+                replies: &mut replies,
+                backlog: &mut backlog,
+            },
+        )
+        .await;
+        let (secret, _) = result.ok().expect("真实密码消费入口");
+        assert_eq!(secret.expose_secret(), "秘密一");
+        drop(secret);
+        assert_eq!(
+            *audit.lock().expect("审计"),
+            vec![3, 3, 3, 3, 3, 3, 2],
+            "旧回答和多余答案都经清零析构"
+        );
+        let (pin, _) = super::pin_answer(answer(3, true)).expect("真实 PIN 消费");
+        assert_eq!(pin.expose_secret(), "秘密一");
+        assert_eq!(audit.lock().expect("审计").last(), Some(&2));
+        drop(commands_tx);
     }
 }
