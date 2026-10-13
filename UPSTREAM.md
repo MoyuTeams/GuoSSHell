@@ -157,17 +157,18 @@ legacy Handler、认证接口及 SSH wire 保持。应用不复制库源码，�
 检查点；完整网络活图、crypto/compression 与正常应用 Start 尚未验收。
 `rust/Cargo.toml` 与固定 rsHell 使用同一版本、提交和后端 features，避免双实例。
 
-## crypto-bigint（boxed 共享参数擦除，团队 fork）
+## crypto-bigint（共享参数擦除与借用工作区，团队 fork）
 
 | 项 | 值 |
 |---|---|
 | 上游仓库 | https://github.com/RustCrypto/crypto-bigint |
 | fork | https://github.com/MoyuTeams/crypto-bigint ，分支 `feat/p1-secret-params` |
-| 固定提交 | `9a4f70ace040b57f5f5cffc0d4389d2676baee9d` |
+| 应用固定提交 | `9a4f70ace040b57f5f5cffc0d4389d2676baee9d` |
+| 借用工作区库候选 | `14296e9491e6b28cc70d5d2fb5818f2e40ae5161` |
 | 上游基线 | `2b54d248cce00457e3afb5650d9b14632ef4a116`，`crypto-bigint 0.7.5` |
 | 许可证 | Apache-2.0 OR MIT |
 
-根 Cargo patch 固定同一版本和提交，不复制源码。补丁仅为 boxed Montgomery
+根 Cargo patch 固定同一版本和提交，不复制源码。应用固定提交的补丁为 boxed Montgomery
 参数的私有共享 owner 增加最后释放擦除：启用 `zeroize` 时，在原位置擦除辅助字段，
 清零原 modulus、one、r2 backing 后释放；共享值存活时保持不变。清理不分配，
 不改变公开构造、访问、比较和 clone 契约，也不改变固定精度参数的 Copy 语义。
@@ -177,6 +178,35 @@ RSA、ssh-key 和应用只能取得只读共享参数，无法在应用侧安全
 擦除；对共享只读引用强转、只清独立副本或提前修改存活值均不满足原契约。
 本补丁不改变算法、SSH wire、认证或 trust；boxed 参数的擦除证据不代表完整
 网络资源和认证秘密持有图已经闭合。
+
+库候选额外提供 `WorkspaceLayout`、`PowOperation` 和 `RandomBelowOperation`：
+调用方提供对齐的 `21*n` Limb 工作区，以显式预算推进模幂与无偏采样；库不拥有
+内部 heap backing。库清理 scratch 与显式秘密 continuation，调用方负责指数、
+最终输出及完整 allocation 的擦除、释放和最后退款。旧 API 与默认行为保持。
+
+借用工作区属于理由③：原 boxed 运算在库内创建私有临时 backing，应用无法在
+各分配点之前准入，也无法擦除不可访问的内部秘密副本。候选已发布不等于应用
+已接线；真实 SDK owner、初始连接／重键、其他目标及完整资源图仍须验收，应用
+固定提交不因该库候选的发布而变化。
+
+## miniz_oxide（scoped 压缩工作区，团队 fork）
+
+| 项 | 值 |
+|---|---|
+| 上游仓库 | https://github.com/Frommi/miniz_oxide |
+| fork | https://github.com/MoyuTeams/miniz_oxide |
+| 工作区接缝源码基线 | `44e43c7786e379b2b1a7fde4aa0e63be719e583d`，包目录 `miniz_oxide`，版本 `0.8.9` |
+| 应用当前来源 | crates.io `miniz_oxide 0.9.1`，由 `flate2 1.1.10` 消费 |
+| 许可证 | MIT OR Zlib OR Apache-2.0 |
+
+属于理由③：该源码基线的压缩字典、编码表和 scratch 由库内私有 Box 持有，公开
+接口无法提供分配前准入、内部暂停点及释放前擦除。接缝限定为调用方持有的
+workspace 与源级有界推进，不复制库源码到应用，也不增加 flate2 fork。
+
+该 fork 接缝尚未验收或接入应用。旧 flate2 构造、默认行为及正常压缩保持；
+scoped 路径不得靠过滤协商或永久拒绝压缩替代交付。独立 borrowed codec 只能在
+真实 owner、正常双向压缩、重键及三目标证据完成后进入应用正式精确依赖；`0.8.9` 候选源图
+不能代替应用当前 `0.9.1` 的源图证据。
 
 ## terminal_view（终端渲染，团队 fork）
 
