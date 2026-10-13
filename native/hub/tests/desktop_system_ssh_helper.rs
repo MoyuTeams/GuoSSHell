@@ -622,8 +622,8 @@ struct OwnedFixture {
 
 impl OwnedFixture {
     fn new() -> Self {
-        let parent = std::env::temp_dir().join("opencode");
-        assert!(parent.is_dir(), "预批准临时父目录不存在");
+        let parent = std::env::temp_dir();
+        assert!(parent.is_dir(), "标准临时父目录不存在");
         let directory = parent.join(format!("system-helper-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap_or_else(|e| panic!("创建 fixture: {e}"));
         Self {
