@@ -40,16 +40,47 @@ pub mod profile_fonts;
 static ALLOCATOR: audit::Allocator = audit::Allocator;
 
 use std::alloc::Layout;
-use std::path::{Path, PathBuf};
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use font_source::closure::FontInspectionProof;
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 use font_source::{
-    BorrowedCapture, FontAvailability, FontBuildProof, FontMode, FontReject, GNU_FONT_BUILD,
-    ResourceFailure, SourceLayout, SourceOwner, TrustedRoot, capture_bytes, capture_file, inspect,
+    BorrowedCapture, FontAvailability, FontMode, ResourceFailure, SourceOwner, TrustedRoot,
+    capture_bytes, capture_file,
 };
+use font_source::{FontBuildProof, FontReject, GNU_FONT_BUILD, SourceLayout, inspect};
 use layout::NumericReject;
-use ledger::{Admission, Amount, BYTE_LIMIT, CLASS_COUNT, ProcessLedger, ResourceClass};
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
+use ledger::{Admission, Amount, ResourceClass};
+use ledger::{BYTE_LIMIT, CLASS_COUNT, ProcessLedger};
 use rshell_m0::rshell_core::TerminalSettingsV1;
 
 const REGULAR: &[u8] = include_bytes!("../../../assets/fonts/MesloLGS-NF-Regular.ttf");
@@ -62,18 +93,39 @@ pub fn succeeds<T, E: std::fmt::Debug>(value: Result<T, E>) -> T {
     }
 }
 
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn certificate() -> FontBuildProof {
     succeeds(FontBuildProof::verify(GNU_FONT_BUILD))
 }
 fn root(limit: usize) -> ProcessLedger {
     ProcessLedger::new(limit, [u32::MAX; CLASS_COUNT])
 }
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn admission() -> Admission {
     Admission {
         epoch: 1,
         source: None,
     }
 }
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn input<'a>(
     settings: &'a TerminalSettingsV1,
     slot: Option<&'a fonts::ImportedFont>,
@@ -100,8 +152,25 @@ fn heapless<T>(call: impl FnOnce() -> T) -> T {
 
 fn differential(bytes: &[u8], name: &str) {
     let old = fonts::inspect(bytes, name);
-    let proof = succeeds(FontInspectionProof::verify(GNU_FONT_BUILD));
-    let new = heapless(|| proof.inspect(bytes, name));
+    #[cfg(all(
+        target_os = "windows",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        target_endian = "little",
+        panic = "unwind"
+    ))]
+    let new = {
+        let proof = succeeds(FontInspectionProof::verify(GNU_FONT_BUILD));
+        heapless(|| proof.inspect(bytes, name))
+    };
+    #[cfg(not(all(
+        target_os = "windows",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        target_endian = "little",
+        panic = "unwind"
+    )))]
+    let new = heapless(|| inspect(bytes, name));
     match (old, new) {
         (Ok(old), Ok(new)) => {
             assert_eq!(old.hash, new.hash());
@@ -190,6 +259,13 @@ fn whole_hash(bytes: &[u8]) -> String {
         .collect()
 }
 
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn assert_source_bytes_and_metadata(bytes: &[u8], font: &fonts::ImportedFont) {
     let fixture = Fixture::new();
     let settings = TerminalSettingsV1::default();
@@ -248,12 +324,13 @@ fn assert_source_bytes_and_metadata(bytes: &[u8], font: &fonts::ImportedFont) {
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let path = std::env::temp_dir()
-            .join("opencode")
-            .join(format!("font-source-{}", uuid::Uuid::new_v4()));
+        let parent = std::env::temp_dir();
+        assert!(parent.is_dir(), "测试只使用预先存在的标准临时根");
+        let path = parent.join(format!("font-source-{}", uuid::Uuid::new_v4()));
         succeeds(std::fs::create_dir(&path));
-        succeeds(std::fs::create_dir(path.join("fonts")));
-        Self(path)
+        let fixture = Self(path);
+        succeeds(std::fs::create_dir(fixture.0.join("fonts")));
+        fixture
     }
     fn publish(&self, bytes: &[u8]) -> fonts::ImportedFont {
         let font = succeeds(fonts::inspect(bytes, "cached.ttf"));
@@ -303,6 +380,13 @@ fn font_source_optional_bytes_preserve_business_values_and_variable_defaults() {
         face.outline_glyph(ttf_parser::GlyphId(1), &mut Outline::default())
             .is_some()
     );
+    #[cfg(all(
+        target_os = "windows",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        target_endian = "little",
+        panic = "unwind"
+    ))]
     assert_source_bytes_and_metadata(&bytes, &succeeds(fonts::inspect(&bytes, "complete.ttf")));
 }
 
@@ -522,6 +606,13 @@ fn font_source_full_u16_directory_preserves_font_hash_label_and_metadata() {
     let checked = heapless(|| succeeds(inspect(&bytes, "actual.ttf")));
     assert_eq!(checked.hash(), expected.hash);
     assert_eq!(checked.label(), expected.label);
+    #[cfg(all(
+        target_os = "windows",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        target_endian = "little",
+        panic = "unwind"
+    ))]
     assert_source_bytes_and_metadata(&bytes, &expected);
     differential(
         &bytes[..12 + usize::from(u16::MAX) * 16 - 1],
@@ -556,6 +647,13 @@ fn font_source_ignored_optional_counts_keep_full_font_bytes_hash_and_metadata() 
         assert_eq!(checked.hash(), expected.hash);
         assert_eq!(checked.label(), expected.label);
         assert_ne!(checked.hash(), original.hash);
+        #[cfg(all(
+            target_os = "windows",
+            target_env = "gnu",
+            target_pointer_width = "64",
+            target_endian = "little",
+            panic = "unwind"
+        ))]
         assert_source_bytes_and_metadata(&bytes, &expected);
         let face = succeeds(font_source::inspect::face_for_qa(&bytes));
         assert_eq!(face.glyph_index('A'), Some(ttf_parser::GlyphId(1)));
@@ -777,13 +875,24 @@ fn font_source_required_parser_rules_and_numeric_error_order_match_old() {
 }
 
 #[test]
-fn font_source_inspection_proof_checks_build_before_the_narrow_real_route() {
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
+fn font_source_certified_inspection_matches_the_narrow_real_route() {
     let bytes = fixture::named(&fixture::utf16("检查证明"));
     let proof = heapless(|| succeeds(FontInspectionProof::verify(GNU_FONT_BUILD)));
     let checked = heapless(|| succeeds(proof.inspect(&bytes, "proof.ttf")));
     let old = succeeds(fonts::inspect(&bytes, "proof.ttf"));
     assert_eq!(checked.hash(), old.hash);
     assert_eq!(checked.label(), old.label);
+}
+
+#[test]
+fn font_source_inspection_proof_checks_build_before_the_narrow_real_route() {
     let mut build = GNU_FONT_BUILD;
     build.ttf_features |= 64;
     assert_eq!(
@@ -796,9 +905,27 @@ fn font_source_inspection_proof_checks_build_before_the_narrow_real_route() {
         heapless(|| FontInspectionProof::verify(build)).err(),
         Some(NumericReject::UnsupportedEnvelope)
     );
+    #[cfg(not(all(
+        target_os = "windows",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        target_endian = "little",
+        panic = "unwind"
+    )))]
+    assert_eq!(
+        heapless(|| FontInspectionProof::verify(GNU_FONT_BUILD)).err(),
+        Some(NumericReject::UnsupportedEnvelope)
+    );
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn font_source_actual_layout_and_every_release_order_return_after_dealloc() {
     let fixture = Fixture::new();
     let slot = fixture.publish(REGULAR);
@@ -846,6 +973,11 @@ fn font_source_actual_layout_and_every_release_order_return_after_dealloc() {
         assert_eq!(ledger.snapshot().rust_bytes, 0);
         audit.finish().assert_balanced_and_pregranted();
     }
+}
+
+#[test]
+fn font_source_actual_layout_matches_current_target() {
+    let slot = succeeds(fonts::inspect(REGULAR, "cached.ttf"));
     let model = succeeds(SourceLayout::actual(REGULAR.len(), 64, slot.label.len(), 0));
     assert_eq!(model.body, Layout::new::<font_source::SourceBody>());
     assert_eq!(model.imported_font, Layout::new::<fonts::ImportedFont>());
@@ -863,6 +995,13 @@ fn font_source_actual_layout_and_every_release_order_return_after_dealloc() {
     );
 }
 
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn assert_projection(source: &SourceOwner<'_>, old: &settings_signals::ProfileFontSnapshot) {
     use settings_signals::{
         ProfileFontFailure as Failure, ProfileFontMetadataError as Metadata,
@@ -925,6 +1064,46 @@ fn assert_projection(source: &SourceOwner<'_>, old: &settings_signals::ProfileFo
     }
 }
 
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
+fn assert_source_projection(input: BorrowedCapture<'_>, old: &profile_fonts::ResolvedProfileFont) {
+    let certificate = certificate();
+    let ledger = root(BYTE_LIMIT);
+    let cancel = AtomicBool::new(false);
+    let audit = audit::AuditScope::start(&ledger);
+    let source = succeeds(capture_bytes(
+        &certificate,
+        &ledger,
+        admission(),
+        input,
+        FontAvailability::Bytes(REGULAR),
+        &cancel,
+    ));
+    let report = audit.finish();
+    assert_projection(&source, &old.projection);
+    assert_eq!(
+        source.bytes(),
+        old.resource.as_ref().map(|r| r.bytes().as_ref())
+    );
+    if let (Some(font), Some(resource)) = (&source.body().imported_font, &old.resource) {
+        assert_eq!(font.hash, resource.hash());
+        assert_eq!(font.label, resource.label());
+    }
+    assert!(
+        report
+            .events()
+            .iter()
+            .all(|e| e.held_rust >= e.size && e.source_bytes > 0)
+    );
+    drop(source);
+    assert_eq!(ledger.snapshot().rust_bytes, 0);
+}
+
 #[test]
 fn font_source_metadata_and_resources_match_actual_old_profile_resolution() {
     use serde_json::json;
@@ -940,7 +1119,6 @@ fn font_source_metadata_and_resources_match_actual_old_profile_resolution() {
     succeeds(repository.migrate());
     let mut snapshot = succeeds(repository.load_configuration());
     let id = snapshot.profiles[0].id;
-    let certificate = certificate();
     let cases = [
         None,
         Some(json!({"version":1,"mode":"inherit_terminal_slot"})),
@@ -1006,45 +1184,33 @@ fn font_source_metadata_and_resources_match_actual_old_profile_resolution() {
                 &fixture.0,
             );
             assert_eq!(old.projection, projection);
-            let ledger = root(BYTE_LIMIT);
-            let cancel = AtomicBool::new(false);
-            let input = BorrowedCapture {
-                profile_id: *id.0.as_bytes(),
-                revision: snapshot.revision,
-                ..input(&settings, captured, &fixture.0)
-            };
-            let audit = audit::AuditScope::start(&ledger);
-            let source = succeeds(capture_bytes(
-                &certificate,
-                &ledger,
-                admission(),
-                input,
-                FontAvailability::Bytes(REGULAR),
-                &cancel,
-            ));
-            let report = audit.finish();
-            assert_projection(&source, &old.projection);
-            assert_eq!(
-                source.bytes(),
-                old.resource.as_ref().map(|r| r.bytes().as_ref())
+            #[cfg(all(
+                target_os = "windows",
+                target_env = "gnu",
+                target_pointer_width = "64",
+                target_endian = "little",
+                panic = "unwind"
+            ))]
+            assert_source_projection(
+                BorrowedCapture {
+                    profile_id: *id.0.as_bytes(),
+                    revision: snapshot.revision,
+                    ..input(&settings, captured, &fixture.0)
+                },
+                &old,
             );
-            if let (Some(font), Some(resource)) = (&source.body().imported_font, &old.resource) {
-                assert_eq!(font.hash, resource.hash());
-                assert_eq!(font.label, resource.label());
-            }
-            assert!(
-                report
-                    .events()
-                    .iter()
-                    .all(|e| e.held_rust >= e.size && e.source_bytes > 0)
-            );
-            drop(source);
-            assert_eq!(ledger.snapshot().rust_bytes, 0);
         }
     }
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn font_source_budget_and_cancel_precede_owned_copy_and_file_read() {
     let fixture = Fixture::new();
     let slot = fixture.publish(REGULAR);
@@ -1118,6 +1284,13 @@ fn font_source_budget_and_cancel_precede_owned_copy_and_file_read() {
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn font_source_one_granted_buffer_read_exact_hash_and_failure_paths() {
     let fixture = Fixture::new();
     let slot = fixture.publish(REGULAR);
@@ -1180,10 +1353,6 @@ fn font_source_one_granted_buffer_read_exact_hash_and_failure_paths() {
     let mut grown = REGULAR.to_vec();
     grown.push(1);
     succeeds(std::fs::write(&path, grown));
-    assert_eq!(
-        font_resources::load_by_hash(&fixture.0, &slot.hash).err(),
-        Some(font_resources::FontResourceError::Corrupt)
-    );
     let mut file = succeeds(std::fs::File::open(&path));
     let audit = audit::AuditScope::start(&ledger);
     let source = succeeds(capture_file(
@@ -1222,6 +1391,27 @@ fn font_source_one_granted_buffer_read_exact_hash_and_failure_paths() {
 }
 
 #[test]
+fn font_source_real_cache_rejects_growth_beyond_saved_hash() {
+    let fixture = Fixture::new();
+    let slot = fixture.publish(REGULAR);
+    let path = fixture.0.join("fonts").join(format!("{}.ttf", slot.hash));
+    let mut grown = REGULAR.to_vec();
+    grown.push(1);
+    succeeds(std::fs::write(&path, grown));
+    assert_eq!(
+        font_resources::load_by_hash(&fixture.0, &slot.hash).err(),
+        Some(font_resources::FontResourceError::Corrupt)
+    );
+}
+
+#[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn font_source_real_shortfall_does_not_reject_other_normal_selected_or_release_old_epoch() {
     let fixture = Fixture::new();
     let slot = fixture.publish(REGULAR);
@@ -1282,7 +1472,14 @@ fn font_source_real_shortfall_does_not_reject_other_normal_selected_or_release_o
 }
 
 #[test]
-fn font_source_null_allocator_and_legacy_vec_arc_shape_are_explicit() {
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
+fn font_source_null_allocator_does_not_publish_or_retain_quota() {
     let fixture = Fixture::new();
     let slot = fixture.publish(REGULAR);
     let settings = TerminalSettingsV1::default();
@@ -1315,6 +1512,11 @@ fn font_source_null_allocator_and_legacy_vec_arc_shape_are_explicit() {
     );
     audit.finish().assert_balanced_and_pregranted();
     assert_eq!(ledger.snapshot().rust_bytes, 0);
+}
+
+#[test]
+fn font_source_legacy_vec_arc_shape_is_explicit() {
+    let slot = succeeds(fonts::inspect(REGULAR, "cached.ttf"));
     let vec = REGULAR.to_vec();
     let capacity = vec.capacity();
     let arc: std::sync::Arc<[u8]> = vec.into();
@@ -1353,4 +1555,29 @@ fn font_source_build_mismatch_and_overflow_fail_before_allocation() {
         SourceLayout::actual(0, usize::MAX, 1, 0).err(),
         Some(NumericReject::Overflow)
     );
+}
+
+#[test]
+#[cfg(not(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+)))]
+fn font_source_uncertified_target_rejects_before_quota_and_allocation() {
+    for bytes in [0, BYTE_LIMIT] {
+        let ledger = root(bytes);
+        let audit = audit::AuditScope::start(&ledger);
+        assert_eq!(
+            FontBuildProof::verify(GNU_FONT_BUILD).err(),
+            Some(NumericReject::UnsupportedEnvelope)
+        );
+        assert_eq!(
+            FontInspectionProof::verify(GNU_FONT_BUILD).err(),
+            Some(NumericReject::UnsupportedEnvelope)
+        );
+        assert!(audit.finish().events().is_empty());
+        assert_eq!(ledger.snapshot().rust_bytes, 0);
+    }
 }
