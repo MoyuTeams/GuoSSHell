@@ -988,6 +988,8 @@ static CLEANUP_BEGIN_BARRIER: std::sync::Barrier = std::sync::Barrier::new(2);
 static SECRET_FREE_BARRIER: std::sync::Barrier = std::sync::Barrier::new(2);
 static CLEANUP_UNWIND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+struct CleanupUnwind;
+
 fn pause_completed_copy_and_cleanup(point: u32) {
     let barrier = if point == 1 {
         &INSTALLED_COPY_BARRIER
@@ -997,7 +999,8 @@ fn pause_completed_copy_and_cleanup(point: u32) {
     barrier.wait();
     barrier.wait();
     if point == 2 && CLEANUP_UNWIND.load(std::sync::atomic::Ordering::Acquire) {
-        panic!("测试 copy owner 的 unwind 清理");
+        // 注入真实栈展开，但不让测试 panic hook 的输出与回溯分配污染产品审计。
+        std::panic::resume_unwind(Box::new(CleanupUnwind));
     }
 }
 
@@ -1101,7 +1104,7 @@ fn ingress_cancelled_completed_copy_holds_slot_until_owned_cleanup_finishes() {
         assert_eq!(held, password.len());
         assert_eq!(secret_after, 0);
         if unwind {
-            assert!(result.is_err());
+            assert!(result.is_err_and(|payload| payload.is::<CleanupUnwind>()));
         } else {
             assert_eq!(
                 result.unwrap_or_else(|_| panic!("非 unwind 分支异常")),
