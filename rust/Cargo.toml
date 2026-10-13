@@ -40,11 +40,11 @@ keyring-core = "1.0.0"
 # 源为官方 hugefiver/rsHell，所需认证、连接控制与终端接口均已包含在上游。
 # 升级时同时更新这里的 rev 与根 Cargo.lock，再跑上游及 GuoSSHell 的回归。
 # 代价：全新环境首次构建需要网络。
-rshell-core = { git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
-rshell-session = { git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
-rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
+rshell-core = { git = "https://github.com/hugefiver/rsHell", rev = "08d8df5ab975c75b5a9772a4e52fd79695ca9d11" }
+rshell-session = { git = "https://github.com/hugefiver/rsHell", rev = "08d8df5ab975c75b5a9772a4e52fd79695ca9d11" }
+rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "08d8df5ab975c75b5a9772a4e52fd79695ca9d11" }
 # 与 rshell-session 保持完全相同的版本与 feature，避免同一个 crate 出现两份不同类型。
-russh = { version = "=0.62.5", git = "https://github.com/MoyuTeams/russh", rev = "5594db64985233946667d2622458a334c8ac0891", default-features = false, features = ["flate2", "ring", "rsa"] }
+russh = { version = "=0.62.5", git = "https://github.com/MoyuTeams/russh", rev = "392265d2b622fdce3fd57f836db134773c475950", default-features = false, features = ["flate2", "ring", "rsa"] }
 secrecy = "0.10.3"
 # RenderFrame 的 rows/cells 是 Arc<[..]>，serde 必须显式打开 rc 才能序列化。
 serde = { version = "1", features = ["derive", "rc"] }

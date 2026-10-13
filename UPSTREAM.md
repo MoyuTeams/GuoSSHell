@@ -14,20 +14,20 @@ GuoSSHell 直接使用官方 rsHell 仓库的内核，通过 git 依赖固定到
 | 项 | 值 |
 |---|---|
 | 上游仓库 | https://github.com/hugefiver/rsHell |
-| 固定提交 | `070b5d93f3f7baa4c6d46f5d5f1613dd688702aa` |
-| 分支快照 | `feat/desktop-config-transactions`，2026-10-12 |
+| 固定提交 | `08d8df5ab975c75b5a9772a4e52fd79695ca9d11` |
+| 分支快照 | `feat/desktop-config-transactions`，2026-10-14 |
 | 认证与终端接口合并提交 | `d71e81c5b7e786d3981e12d6a24a296ff74d3dae`（上游 PR #1） |
 | 许可证 | MIT，Copyright (c) 2026 hugefiver（副本见 `rust/LICENSES/rsHell-MIT.txt`） |
 
 ```toml
-rshell-core = { git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
-rshell-session = { git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
-rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "070b5d93f3f7baa4c6d46f5d5f1613dd688702aa" }
+rshell-core = { git = "https://github.com/hugefiver/rsHell", rev = "08d8df5ab975c75b5a9772a4e52fd79695ca9d11" }
+rshell-session = { git = "https://github.com/hugefiver/rsHell", rev = "08d8df5ab975c75b5a9772a4e52fd79695ca9d11" }
+rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "08d8df5ab975c75b5a9772a4e52fd79695ca9d11" }
 ```
 
 桌面宿主直接使用 `portable-pty-psmux =0.9.6`（依赖别名 `portable-pty`）和
 `rshell-platform =0.1.0` 的原生 PTY、进程句柄及进程树接口，两者也精确固定到
-`070b5d93f3f7baa4c6d46f5d5f1613dd688702aa`。这些接缝用于应用侧分离阻塞
+`08d8df5ab975c75b5a9772a4e52fd79695ca9d11`。这些接缝用于应用侧分离阻塞
 I/O 和取消所有权，不包含额外上游补丁、第三方源码副本或仓内 path 覆盖。
 
 固定提交同时包含短的顶部滚动区域中 `stable_row` 的修复，普通输出和同步输出
@@ -66,6 +66,8 @@ I/O 和取消所有权，不包含额外上游补丁、第三方源码副本或�
 `sync_deadline` 只提供截止时刻，调用方必须主动调用 `end_sync`。
 
 该提交还包含桌面只读 selected helper、受限私有流协议和资源审计检查点。
+正常 Native 依赖固定到连续压缩包完整解压的 russh 修正；既有异步签名和传输接口
+提供语义化结果使用提示，公开签名与执行行为不变。
 helper 不改变存储公开 API、schema、认证或 trust；正常 V2 Prepare/Start 的生产
 接线及应用生命周期验收尚未完成，仍保持默认关闭。全量 P1 证书延后，
 不作为本分支正常功能交付前件。
@@ -139,19 +141,24 @@ MIT 许可声明需随软件或其重要部分一起分发；发布时应保留�
 panic。应用公开 Handler 不能原位更新私有栈帧，也无法在保全空栈、容量和标题
 语义的同时规避原生满栈错误。补丁不改 vte parser、public API 或增强位能力。
 
-## russh（显式 scoped 网络入口，团队 fork）
+## russh（原生 SSH 与实验 scoped 入口，团队 fork）
 
 | 项 | 值 |
 |---|---|
 | 上游仓库 | https://github.com/Eugeny/russh |
 | fork | https://github.com/MoyuTeams/russh ，分支 `feat/p1-scoped-native` |
-| 固定提交 | `5594db64985233946667d2622458a334c8ac0891` |
+| 固定提交 | `392265d2b622fdce3fd57f836db134773c475950` |
 | 上游基线 | `4882af71cf27ea5293636bf4985ef296dcf20896`，`russh 0.62.5` |
 | 许可证 | Apache-2.0 |
 
 新增显式 scoped 连接、资源 root、时钟／协作让出及受保护认证载荷检查点。
 分配前准入、取消与最后 backing 释放由该入口的资源所有者承担；旧构造、
 legacy Handler、认证接口及 SSH wire 保持。应用不复制库源码，不改 Tokio/util。
+
+正常压缩解码按每次调用后的输入和输出计数判断完成，输出缓冲恰好填满时继续
+扩容读取，保持原最大解压大小限制。连续 CHANNEL_DATA 与复用字典均逐包完整
+交付，覆盖 `zlib` 和 `zlib@openssh.com`。此修正属于理由①：库内解压器保留未读
+输出会截断 SSH string 并使后继包串入；应用无法通过公开 API 正确接管其内部状态。
 
 属于理由③：普通回调发生在库内解码、排队和缓冲增长之后，应用无法覆盖
 这些分配的准入、秘密副本擦除及 task/IO 的实际最后持有者。该入口仍为实验
