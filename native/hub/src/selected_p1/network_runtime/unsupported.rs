@@ -21,9 +21,6 @@ impl Socket {
     pub fn connect(_: SocketAddr) -> Result<(Self, bool), RuntimeFault> {
         Err(unavailable())
     }
-    pub fn raw(&self) -> usize {
-        match *self {}
-    }
     pub fn finish_connect(&self) -> Result<super::super::stream::SocketPeer, RuntimeFault> {
         match *self {}
     }

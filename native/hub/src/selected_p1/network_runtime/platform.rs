@@ -15,7 +15,9 @@ pub(crate) const IO_CHUNK: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct PollEntry {
+    #[cfg(windows)]
     pub raw: usize,
+    #[cfg(windows)]
     pub interest: u8,
     pub ready: u8,
 }

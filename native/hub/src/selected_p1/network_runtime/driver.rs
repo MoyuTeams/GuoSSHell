@@ -184,7 +184,9 @@ impl<R: Send + Sync + 'static, const IO: usize, const TIMERS: usize> NetworkRunt
                         continue;
                     }
                     fds[io_count] = PollEntry {
+                        #[cfg(windows)]
                         raw: state.socket.raw(),
+                        #[cfg(windows)]
                         interest,
                         ready: 0,
                     };
