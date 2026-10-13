@@ -1141,7 +1141,7 @@ fn main() {
 
     impl Fixture {
         fn create() -> Self {
-            let parent = std::env::temp_dir().join("opencode");
+            let parent = std::env::temp_dir();
             assert!(parent.is_dir());
             let directory = parent.join(format!(
                 "guo-system-scope-{}-{}",
