@@ -575,54 +575,133 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 fn main() {
+    if std::env::args().skip(1).eq(["fixture-toolchain"]) {
+        if cfg!(all(target_arch = "x86_64", target_os = "windows", target_env = "gnu")) {
+            println!("x86_64-pc-windows-gnu");
+        } else if cfg!(all(target_arch = "x86_64", target_os = "windows", target_env = "msvc")) {
+            println!("x86_64-pc-windows-msvc");
+        } else {
+            std::process::exit(72);
+        }
+        return;
+    }
     if run().is_err() { std::process::exit(71); }
 }
 "#;
 
-    /// SDK 仅用于合成 fixture，不是 ssh 的发现/环境旁路。调用者给出已安装工具的精确路径。
+    /// SDK 仅编译独立 fixture EXE，不提供生产 ABI／源证书，也不改变 ssh 的定位权限。
     fn compile_order_helper(fixture: &Fixture, os: &OsSource) {
         let rustc = std::env::var_os("GUO_SCOPE_FIXTURE_RUSTC")
-            .unwrap_or_else(|| panic!("UNVERIFIED：需既有 GNU 1.98 rustc 的精确 fixture 工具路径"));
-        let linker = std::env::var_os("GUO_SCOPE_FIXTURE_LINKER")
-            .unwrap_or_else(|| panic!("UNVERIFIED：需既有 GNU linker 的精确 fixture 工具路径"));
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO")).with_file_name("rustc.exe"));
         assert!(Path::new(&rustc).is_absolute() && Path::new(&rustc).is_file());
-        assert!(Path::new(&linker).is_absolute() && Path::new(&linker).is_file());
-        let tool_bin = Path::new(&linker)
-            .parent()
-            .unwrap_or_else(|| panic!("linker 必须有绝对父目录"));
-        let source = fixture.directory.join("order-helper.rs");
-        succeeds(fs::write(&source, ORDER_HELPER_SOURCE));
-        let status = succeeds(
-            std::process::Command::new(rustc)
+        let tool_command = |program: &Path| {
+            let mut command = std::process::Command::new(program);
+            command
                 .env_clear()
                 .env("RUSTUP_AUTO_INSTALL", "0")
                 .env("SystemRoot", &os.windows)
-                .env("PATH", tool_bin)
+                .env("PATH", "")
                 .env("HOME", &fixture.home)
                 .env("USERPROFILE", &fixture.home)
                 .env("TEMP", &fixture.directory)
                 .env("TMP", &fixture.directory)
-                .current_dir(&fixture.directory)
-                .arg("--edition=2024")
-                .args([
-                    "--crate-name",
-                    "owned_order_helper",
-                    "--target",
-                    "x86_64-pc-windows-gnu",
-                ])
+                .current_dir(&fixture.directory);
+            command
+        };
+        let version = succeeds(tool_command(&rustc).arg("-vV").output());
+        assert!(version.status.success());
+        let version = succeeds(String::from_utf8(version.stdout));
+        let host = if cfg!(target_env = "gnu") {
+            "x86_64-pc-windows-gnu"
+        } else if cfg!(target_env = "msvc") {
+            "x86_64-pc-windows-msvc"
+        } else {
+            panic!("UNVERIFIED：fixture 需既有 Windows GNU 或 MSVC 工具链")
+        };
+        assert!(version.lines().any(|line| line == "binary: rustc"));
+        assert!(version.lines().any(|line| line == format!("host: {host}")));
+        let sysroot = succeeds(tool_command(&rustc).args(["--print", "sysroot"]).output());
+        assert!(sysroot.status.success());
+        let sysroot = PathBuf::from(succeeds(String::from_utf8(sysroot.stdout)).trim());
+        assert!(sysroot.is_absolute() && sysroot.is_dir());
+        assert_eq!(
+            succeeds(fs::canonicalize(&rustc)),
+            succeeds(fs::canonicalize(sysroot.join("bin/rustc.exe"))),
+            "fixture 必须使用实际工具链 rustc，不接受 PATH shim"
+        );
+        let linker = std::env::var_os("GUO_SCOPE_FIXTURE_LINKER")
+            .map(PathBuf::from)
+            .or_else(|| {
+                (host == "x86_64-pc-windows-gnu").then(|| {
+                    sysroot.join(format!(
+                        "lib/rustlib/{host}/bin/self-contained/x86_64-w64-mingw32-gcc.exe"
+                    ))
+                })
+            });
+        let mut compiler = tool_command(&rustc);
+        if let Some(linker) = &linker {
+            assert!(linker.is_absolute() && linker.is_file());
+            compiler
+                .env("PATH", succeeds(linker.parent().ok_or("linker 父目录")))
                 .arg("-C")
-                .arg(format!("linker={}", linker.to_string_lossy()))
-                .args(["-C", "link-self-contained=yes"])
+                .arg(format!(
+                    "linker={}",
+                    succeeds(linker.to_str().ok_or("linker Unicode 路径"))
+                ));
+        }
+        if host == "x86_64-pc-windows-gnu" {
+            compiler.args(["-C", "link-self-contained=yes"]);
+        } else {
+            // 只向 rustc 提供已安装 SDK 的定位根，不继承 PATH、LIB 或开发者 shell。
+            for key in ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+                let sdk_root = PathBuf::from(succeeds(std::env::var_os(key).ok_or("SDK 定位根")));
+                assert!(sdk_root.is_absolute() && sdk_root.is_dir());
+                compiler.env(key, sdk_root);
+            }
+        }
+        let source = fixture.directory.join("order-helper.rs");
+        succeeds(fs::write(&source, ORDER_HELPER_SOURCE));
+        let compiled = succeeds(
+            compiler
+                .arg("--edition=2024")
+                .args(["--crate-name", "owned_order_helper", "--target", host])
+                .args(["--print", "link-args"])
                 .arg(&source)
                 .arg("-o")
                 .arg(&fixture.helper)
-                .status(),
+                .output(),
         );
         assert!(
-            status.success(),
-            "本轮 synthetic helper 编译失败：{:?}",
-            status.code()
+            compiled.status.success(),
+            "本轮 synthetic helper 编译失败：{:?}；{}",
+            compiled.status.code(),
+            String::from_utf8_lossy(&compiled.stderr)
         );
+        let link_args = succeeds(std::str::from_utf8(&compiled.stdout));
+        let (quoted_linker, _) = succeeds(link_args.split_once("\" ").ok_or("linker 精确路径"));
+        let actual_linker: String = succeeds(serde_json::from_str(&format!("{quoted_linker}\"")));
+        let actual_linker = PathBuf::from(actual_linker);
+        assert!(actual_linker.is_absolute() && actual_linker.is_file());
+        if let Some(linker) = linker {
+            assert_eq!(
+                succeeds(fs::canonicalize(actual_linker)),
+                succeeds(fs::canonicalize(linker))
+            );
+        } else {
+            assert_eq!(
+                actual_linker.file_name().and_then(|name| name.to_str()),
+                Some("link.exe")
+            );
+        }
+        let binary = succeeds(
+            tool_command(Path::new(&fixture.helper))
+                .arg("fixture-toolchain")
+                .output(),
+        );
+        assert!(binary.status.success());
+        assert_eq!(succeeds(std::str::from_utf8(&binary.stdout)).trim(), host);
+        eprintln!("FIXTURE_TOOLCHAIN {version}LINK {quoted_linker}\"；实际 helper host/ABI={host}");
     }
 
     const SERVER_IO_LIMIT: Duration = Duration::from_secs(3);
