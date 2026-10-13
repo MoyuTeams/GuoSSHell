@@ -1055,7 +1055,8 @@ mod windows_probe {
                 owner.root.value().io.inject(ProbeFault::ChildWait);
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                     let _owner = owner;
-                    std::panic::panic_any(173_u32);
+                    // 只注入 owner 析构的展开，不把默认 panic hook 的诊断分配纳入资源审计。
+                    std::panic::resume_unwind(Box::new(173_u32));
                 }));
                 assert!(
                     matches!(result, Err(payload) if payload.downcast_ref::<u32>() == Some(&173))
