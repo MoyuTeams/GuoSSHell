@@ -3,9 +3,9 @@
 mod owner;
 
 #[cfg(windows)]
-pub(crate) use owner::{LocalProcessOwner, pty_owner};
+pub(crate) use owner::{Fixture, LocalProcessOwner, ProbeRoot, pty_owner};
 
 pub(crate) use owner::{
-    DispatchGate, Fixture, INPUT_LIMIT, LocalReject, OUTPUT_LIMIT, ProbeBoundary, ProbeRoot,
-    app_root_shape, reserve_probe_root, validate_local_fields,
+    DispatchGate, INPUT_LIMIT, LocalReject, OUTPUT_LIMIT, ProbeBoundary, app_root_shape,
+    reserve_probe_root, validate_local_fields,
 };

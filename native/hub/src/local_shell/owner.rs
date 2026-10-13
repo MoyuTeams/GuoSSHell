@@ -1,12 +1,17 @@
 //! 固定 fixture 的独立非 UI 所有权；原进程对象完成与 I/O/析构分别观测。
 
+#[cfg(windows)]
 use std::collections::BTreeMap;
+#[cfg(windows)]
 use std::ffi::OsString;
+#[cfg(windows)]
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[cfg(windows)]
 use rshell_m0::rshell_core::TerminalSize;
+#[cfg(windows)]
 use rshell_m0::rshell_session::LocalLaunch;
 
 use crate::selected_p1::model::layout::NumericReject;
@@ -22,11 +27,14 @@ pub(crate) const OUTPUT_LIMIT: usize = 8 * 1024;
 pub(crate) enum LocalReject {
     SavedLocalContractMissing,
     RemoteFields,
+    #[cfg(windows)]
     InvalidGeometry,
     Cancelled,
     InputCapacity,
     OutputCapacity,
+    #[cfg(windows)]
     Transport,
+    #[cfg(windows)]
     CleanupIncomplete,
     Resource(NumericReject),
 }
@@ -84,35 +92,62 @@ impl DispatchGate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub(crate) enum ProbeBoundary {
+    #[cfg(windows)]
     SpawnReturned,
+    #[cfg(windows)]
     TransportWriteEntered,
+    #[cfg(windows)]
     TransportWriteReturned,
     DispatchCancelRequested,
+    #[cfg(windows)]
     TransportShutdownReturned,
+    #[cfg(windows)]
     TransportDropReturned,
+    #[cfg(windows)]
     TransportExitReceived,
+    #[cfg(windows)]
     OwnerFinished,
     LateHolderReleased,
+    #[cfg(windows)]
     SystemWriteEntered,
+    #[cfg(windows)]
     SystemWriteReturned,
+    #[cfg(windows)]
     CancelConfirmed,
+    #[cfg(windows)]
     WriterDropReturned,
+    #[cfg(windows)]
     ReaderDrainStarted,
+    #[cfg(windows)]
     ReaderDropReturned,
+    #[cfg(windows)]
     MasterNonLastDropReturned,
+    #[cfg(windows)]
     PtyLastHolderReturned,
+    #[cfg(windows)]
     ChildReaped,
+    #[cfg(windows)]
     WriterJoined,
+    #[cfg(windows)]
     ReaderJoined,
+    #[cfg(windows)]
     AllWorkersDone,
+    #[cfg(windows)]
     ProcessObjectSignaled,
+    #[cfg(windows)]
     FinalExitCodeRead,
+    #[cfg(windows)]
     CompletionJoined,
+    #[cfg(windows)]
     JobDropReturned,
+    #[cfg(windows)]
     OperationErrorRecorded,
 }
 
+#[cfg(windows)]
 const BOUNDARIES: usize = ProbeBoundary::OperationErrorRecorded as usize + 1;
+#[cfg(not(windows))]
+const BOUNDARIES: usize = ProbeBoundary::LateHolderReleased as usize + 1;
 
 struct OutputSlot {
     bytes: [u8; OUTPUT_LIMIT],
@@ -136,6 +171,7 @@ impl AppRoot {
         self.boundaries[boundary as usize].store(sequence, Ordering::Release);
     }
 
+    #[cfg(windows)]
     pub(crate) fn observed(&self, boundary: ProbeBoundary) -> usize {
         self.boundaries[boundary as usize].load(Ordering::Acquire)
     }
@@ -171,6 +207,7 @@ impl AppRoot {
         count
     }
 
+    #[cfg(windows)]
     pub(crate) fn output_is_full(&self) -> bool {
         self.output
             .lock()
@@ -226,18 +263,21 @@ pub(crate) fn reserve_probe_root(
 }
 
 /// 当前可准确报告的接线前件，不是 Local 平台不可用结论。
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProcessClosureGap {
     OpaqueRuntimeAllocationGraph,
     PartialInitializationDrain,
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Fixture {
     EchoGeometryExit,
     NoReadFlood,
 }
 
+#[cfg(windows)]
 impl Fixture {
     fn launch(self) -> LocalLaunch {
         let script = match self {
@@ -499,6 +539,7 @@ impl Drop for LocalProcessOwner<'_, '_, '_> {
     }
 }
 
+#[cfg(windows)]
 fn check_geometry(size: TerminalSize) -> Result<(), LocalReject> {
     if size.cols == 0
         || size.rows == 0
