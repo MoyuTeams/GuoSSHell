@@ -51,7 +51,23 @@ fn fingerprint_mismatch_is_not_a_quota_or_a_ready_product() -> Result<(), Numeri
             target.private_bounds(),
             Err(NumericReject::UnsupportedEnvelope)
         );
+        assert_eq!(
+            target.product_state(&UninstantiatedProduct, ProofGate::ReplyVm),
+            CertificateState::Pending(ProofGate::BuildFingerprint)
+        );
     }
+    Ok(())
+}
+
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
+#[test]
+fn certified_gnu_private_layouts_do_not_authorize_product_closure() -> Result<(), NumericReject> {
     let target = TargetLayouts::foundation(GNU_1981)?;
     assert_eq!(target.state(), CertificateState::FoundationReady);
     let private = target.private_bounds()?;
@@ -83,6 +99,34 @@ fn fingerprint_mismatch_is_not_a_quota_or_a_ready_product() -> Result<(), Numeri
     Ok(())
 }
 
+#[cfg(not(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+)))]
+#[test]
+fn uncertified_target_cannot_use_gnu_private_bounds() -> Result<(), NumericReject> {
+    let target = TargetLayouts::foundation(GNU_1981)?;
+    let pending = CertificateState::Pending(ProofGate::ActualPublicLayouts);
+    assert_eq!(target.state(), pending);
+    assert_eq!(
+        target.private_bounds(),
+        Err(NumericReject::UnsupportedEnvelope)
+    );
+    for gate in [
+        ProofGate::DecodeClosure,
+        ProofGate::SourceClosure,
+        ProofGate::ControlClosure,
+        ProofGate::AuthOperationRoot,
+        ProofGate::ReplyVm,
+    ] {
+        assert_eq!(target.product_state(&UninstantiatedProduct, gate), pending);
+    }
+    Ok(())
+}
+
 #[test]
 fn actual_target_numeric_layouts() -> Result<(), NumericReject> {
     let target = TargetLayouts::foundation(GNU_1981)?;
@@ -101,6 +145,13 @@ fn actual_target_numeric_layouts() -> Result<(), NumericReject> {
     Ok(())
 }
 
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 #[test]
 fn real_syntax_and_io_error_boxes_use_verified_private_layout() -> Result<(), NumericReject> {
     use crate::audit::AuditScope;

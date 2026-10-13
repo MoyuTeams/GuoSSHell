@@ -278,11 +278,6 @@ fn actual_small_resource_survives_runtime_epoch_and_returns_after_header_free()
 -> Result<(), layout::NumericReject> {
     use ledger::{Admission, Amount, BYTE_LIMIT, CLASS_COUNT, ProcessLedger, ResourceClass};
     let root = ProcessLedger::new(BYTE_LIMIT, [u32::MAX; CLASS_COUNT]);
-    let target = certificate::TargetLayouts::foundation(certificate::GNU_1981)?;
-    assert_eq!(
-        target.state(),
-        certificate::CertificateState::FoundationReady
-    );
     let model = owner::OwnerLayout::actual::<u64>(17)?;
     let audit = audit::AuditScope::start(&root);
     let grant = root.try_reserve(
