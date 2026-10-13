@@ -16,19 +16,29 @@ pub mod selected_p1 {
 use domain_decode::{
     ExecutionCounts, Failure,
     raw::{
-        FieldValue, GroupPresence, ProfileSource, QuickTarget, RawField, RawFields, RawIdentity,
+        FieldValue, GroupPresence, ProfileSource, RawField, RawFields, RawIdentity,
         SelectedReferenceToken, SelectedReferences, Selection,
     },
 };
 use ledger::{Admission, BYTE_LIMIT, CLASS_COUNT, ProcessLedger};
 use rshell_m0::rshell_core::{
-    AppSettings, AuthenticationKind, CatalogMutation, ColorScheme, ConnectionGroup, ConnectionId,
-    ConnectionProfile, GroupId, KeyBinding, KeyCode, KeyModifiers, TerminalOverrides,
-    TerminalProfile, TerminalProfileId, TerminalSettingsV1, TransportKind,
+    AppSettings, AuthenticationKind, CatalogMutation, ColorScheme, ConnectionId, ConnectionProfile,
+    GroupId, KeyBinding, KeyCode, KeyModifiers, TerminalOverrides, TerminalProfile,
+    TerminalProfileId, TerminalSettingsV1, TransportKind,
 };
 use rshell_m0::rshell_storage::SqliteRepository;
 use std::alloc::Layout;
 use uuid::Uuid;
+
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
+use domain_decode::raw::QuickTarget;
+use rshell_m0::rshell_core::ConnectionGroup;
 
 const ADMISSION: Admission = Admission {
     epoch: 1,
@@ -255,10 +265,24 @@ fn no_reference(identity: RawIdentity, selection: Selection<'_>) -> SelectedRefe
 
 /// 逐笔重放 alloc/realloc/dealloc，realloc 检查旧+新共存而非 delta 或高水位。
 /// classes 来自可达源路径：byte/String/scratch/error message、真实 BTree node、typed/Content Vec、owner。
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn verify_audit(report: &audit::Report, snapshot_layout: Layout) {
     assert_eq!(verify_audit_window(report, snapshot_layout, 0), 0);
 }
 
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn verify_audit_window(report: &audit::Report, snapshot_layout: Layout, mut live: usize) -> usize {
     assert!(!report.overflow);
     let public = layout::PublicLayouts::actual();
@@ -302,6 +326,13 @@ fn verify_audit_window(report: &audit::Report, snapshot_layout: Layout, mut live
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn complete_snapshot_matches_real_storage_and_core_and_last_owner() {
     let fixture = Fixture::ordinary();
     let repository = SqliteRepository::open_in_memory().unwrap_or_else(|error| panic!("{error:?}"));
@@ -408,6 +439,13 @@ fn complete_snapshot_matches_real_storage_and_core_and_last_owner() {
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn shortage_has_no_schema_or_core_execution_and_no_ungranted_allocation() {
     let fixture = Fixture::ordinary();
     let fields = fixture.fields(true);
@@ -544,6 +582,13 @@ fn validators_match_real_core_codes_order_and_do_not_allocate() {
     }
 }
 
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn decode_case(fixture: &Fixture) -> Result<ExecutionCounts, Failure> {
     let fields = fixture.fields(true);
     let raw = raw(fixture, &fields);
@@ -565,6 +610,13 @@ fn decode_case(fixture: &Fixture) -> Result<ExecutionCounts, Failure> {
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn typed_schema_errors_flatten_duplicates_arrays_and_prefixes_are_admitted_and_audited() {
     for (tag, texts) in [
         (
@@ -644,6 +696,13 @@ fn typed_schema_errors_flatten_duplicates_arrays_and_prefixes_are_admitted_and_a
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn ignored_deep_tree_unpaired_surrogate_and_full_extension_duplicates_keep_acceptance() {
     let mut fixture = Fixture::ordinary();
     let tail = format!(
@@ -667,6 +726,13 @@ fn ignored_deep_tree_unpaired_surrogate_and_full_extension_duplicates_keep_accep
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn scalar_error_order_nullable_and_profile_priority_are_preserved() {
     let mut fixture = Fixture::ordinary();
     fixture.text[0] = "bad".into();
@@ -737,6 +803,13 @@ fn scalar_error_order_nullable_and_profile_priority_are_preserved() {
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn quick_target_and_resolution_defaults_clamps_use_complete_owned_snapshot() {
     let mut fixture = Fixture::ordinary();
     let mut settings = fixture.profile.settings.clone();
@@ -795,12 +868,23 @@ fn quick_target_and_resolution_defaults_clamps_use_complete_owned_snapshot() {
 }
 
 #[test]
-fn actual_snapshot_layout_and_error_formula_are_target_specific() {
-    let target = target();
+fn actual_snapshot_layout_matches_current_target() {
     assert_eq!(
         domain_decode::SnapshotBody::actual_layout(),
         Layout::new::<domain_decode::SnapshotBody>()
     );
+}
+
+#[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
+fn certified_private_error_formula_covers_small_and_long_inputs() {
+    let target = target();
     let private = target
         .private_bounds()
         .unwrap_or_else(|error| panic!("{error:?}"));
@@ -828,6 +912,10 @@ fn actual_snapshot_layout_and_error_formula_are_target_specific() {
         .unwrap_or_else(|error| panic!("{error:?}"));
     assert!(large.message_bytes > 4000);
     assert!(large.total > small.total);
+}
+
+#[test]
+fn mismatched_target_rejects_before_schema_core_and_allocation() {
     let mut mismatch = certificate::GNU_1981;
     mismatch.json_feature_bits |= 4;
     let mismatch = certificate::TargetLayouts::foundation(mismatch)
@@ -837,6 +925,7 @@ fn actual_snapshot_layout_and_error_formula_are_target_specific() {
     let raw = raw(&fixture, &fields);
     let root = root();
     let mut calls = ExecutionCounts::default();
+    let audit = audit::AuditScope::start(&root);
     assert!(matches!(
         domain_decode::decode_resolve(&raw, &mismatch, &root, ADMISSION, &mut calls),
         Err(Failure::Resource(
@@ -844,6 +933,52 @@ fn actual_snapshot_layout_and_error_formula_are_target_specific() {
         ))
     ));
     assert_eq!(calls, ExecutionCounts::default());
+    assert!(audit.finish().events().is_empty());
+    let mut changed = target();
+    changed.public.key_binding = Layout::new::<u8>();
+    let audit = audit::AuditScope::start(&root);
+    assert!(matches!(
+        domain_decode::decode_resolve(&raw, &changed, &root, ADMISSION, &mut calls),
+        Err(Failure::Resource(
+            layout::NumericReject::UnsupportedEnvelope
+        ))
+    ));
+    assert_eq!(calls, ExecutionCounts::default());
+    assert!(audit.finish().events().is_empty());
+    assert_eq!(root.snapshot().rust_bytes, 0);
+}
+
+#[test]
+#[cfg(not(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+)))]
+fn uncertified_target_rejects_before_quota_schema_core_and_allocation() {
+    let fixture = Fixture::ordinary();
+    let fields = fixture.fields(true);
+    let raw = raw(&fixture, &fields);
+    let target = target();
+    assert_eq!(
+        target.private_bounds(),
+        Err(layout::NumericReject::UnsupportedEnvelope)
+    );
+    for bytes in [0, BYTE_LIMIT] {
+        let root = ProcessLedger::new(bytes, [u32::MAX; CLASS_COUNT]);
+        let mut calls = ExecutionCounts::default();
+        let audit = audit::AuditScope::start(&root);
+        assert!(matches!(
+            domain_decode::decode_resolve(&raw, &target, &root, ADMISSION, &mut calls),
+            Err(Failure::Resource(
+                layout::NumericReject::UnsupportedEnvelope
+            ))
+        ));
+        assert_eq!(calls, ExecutionCounts::default());
+        assert!(audit.finish().events().is_empty());
+        assert_eq!(root.snapshot().rust_bytes, 0);
+    }
 }
 
 /// 仅测试链接现有 bundled SQLite 的公开 C ABI；不新增依赖，不进入产品读路径。
@@ -889,8 +1024,8 @@ mod storage_oracle {
 
     impl Oracle {
         pub fn new(fixture: &Fixture) -> Self {
-            let parent = std::env::temp_dir().join("opencode");
-            assert!(parent.is_dir(), "测试只使用预先存在的获准临时根");
+            let parent = std::env::temp_dir();
+            assert!(parent.is_dir(), "测试只使用预先存在的标准临时根");
             let directory = parent.join(format!("selected-domain-{}", Uuid::new_v4()));
             std::fs::create_dir(&directory)
                 .unwrap_or_else(|error| panic!("创建合成 fixture 失败: {:?}", error.kind()));
@@ -1090,7 +1225,12 @@ fn actual_private_storage_codec_acceptance_matches_wrappers_and_complete_typed_v
             format!("{}{}{}", &fixture.text[21][..fixture.text[21].len()-1], ",\"ignored\":", format_args!("{}\"\\uD800\"{}}}", "[".repeat(180), "]".repeat(180))),
             fixture.text[21].replace("\"extensions\":{", "\"extensions\":{\"same\":[],\"same\":{\"v\":\"🦀\"},")]),
     ] {
-        for text in cases {
+        for (index, text) in cases.into_iter().enumerate() {
+            let accepted = match tag {
+                16 => matches!(index, 5 | 6),
+                19 => matches!(index, 1 | 3 | 4 | 5),
+                _ => matches!(index, 0 | 3 | 4),
+            };
             let mut fixture = Fixture::from_values(fixture.connection.clone(), fixture.profile.clone(), fixture.app.clone());
             fixture.text[usize::from(tag-1)] = text.clone();
             oracle.replace(16, &Fixture::ordinary().text[15]);
@@ -1099,27 +1239,56 @@ fn actual_private_storage_codec_acceptance_matches_wrappers_and_complete_typed_v
             oracle.replace(tag, &text);
             let fields = fixture.fields(true); let raw = raw(&fixture, &fields); let root = root(); let target = target();
             let mut calls = ExecutionCounts::default();
-            let new = domain_decode::decode_resolve(&raw, &target, &root, ADMISSION, &mut calls);
+            // 旧 codec 行为在所有平台核验；新完整图的预算比较仅使用获证 GNU 布局。
+            let new = cfg!(all(target_os = "windows", target_env = "gnu", target_pointer_width = "64", target_endian = "little", panic = "unwind"))
+                .then(|| domain_decode::decode_resolve(&raw, &target, &root, ADMISSION, &mut calls));
             match tag {
                 16 => match oracle.repository.load_catalog() {
                     Ok(old) => {
-                        let new = new.unwrap_or_else(|error| panic!("{error:?}"));
-                        assert_eq!(&new.snapshot.value().target, old.connections.get(&fixture.connection.id).unwrap_or_else(|| panic!("oracle connection")));
+                        assert!(accepted);
+                        let old = old.connections.get(&fixture.connection.id).unwrap_or_else(|| panic!("oracle connection"));
+                        if let Some(new) = new {
+                            let new = new.unwrap_or_else(|error| panic!("{error:?}"));
+                            assert_eq!(&new.snapshot.value().target, old);
+                        }
                     }
-                    Err(StorageError::Corrupt) => assert!(matches!(new, Err(Failure::Corrupt { .. } | Failure::Connection(_) | Failure::Settings(_)))),
+                    Err(StorageError::Corrupt) => {
+                        assert!(!accepted);
+                        if let Some(new) = new {
+                            assert!(matches!(new, Err(Failure::Corrupt { .. } | Failure::Connection(_) | Failure::Settings(_))));
+                        }
+                    }
                     Err(error) => panic!("{error:?}"),
                 },
                 19 => match oracle.repository.load_settings() {
-                    Ok(old) => assert_eq!(new.unwrap_or_else(|error| panic!("{error:?}")).snapshot.value().app, old),
-                    Err(StorageError::Corrupt) => assert!(matches!(new, Err(Failure::Corrupt { tag: 19, .. }))),
+                    Ok(old) => {
+                        assert!(accepted);
+                        if let Some(new) = new {
+                            assert_eq!(new.unwrap_or_else(|error| panic!("{error:?}")).snapshot.value().app, old);
+                        }
+                    }
+                    Err(StorageError::Corrupt) => {
+                        assert!(!accepted);
+                        if let Some(new) = new {
+                            assert!(matches!(new, Err(Failure::Corrupt { tag: 19, .. })));
+                        }
+                    }
                     Err(error) => panic!("{error:?}"),
                 },
                 _ => match oracle.repository.load_terminal_profiles() {
                     Ok(old) => {
+                        assert!(accepted);
                         let old = old.iter().find(|profile| profile.id == fixture.profile.id).unwrap_or_else(|| panic!("oracle profile"));
-                        assert_eq!(&new.unwrap_or_else(|error| panic!("{error:?}")).snapshot.value().profile, old);
+                        if let Some(new) = new {
+                            assert_eq!(&new.unwrap_or_else(|error| panic!("{error:?}")).snapshot.value().profile, old);
+                        }
                     }
-                    Err(StorageError::Corrupt) => assert!(matches!(new, Err(Failure::Corrupt { tag: 22, .. }))),
+                    Err(StorageError::Corrupt) => {
+                        assert!(!accepted);
+                        if let Some(new) = new {
+                            assert!(matches!(new, Err(Failure::Corrupt { tag: 22, .. })));
+                        }
+                    }
                     Err(error) => panic!("{error:?}"),
                 },
             }
@@ -1128,6 +1297,52 @@ fn actual_private_storage_codec_acceptance_matches_wrappers_and_complete_typed_v
 }
 
 #[test]
+fn storage_group_presence_uses_binary_uuid_identity() {
+    let fixture = Fixture::ordinary();
+    let oracle = storage_oracle::Oracle::new(&fixture);
+    let group = GroupId(Uuid::from_u128(0xabcdef));
+    assert_eq!(oracle.group_presence(group), GroupPresence::Absent(group));
+    oracle
+        .repository
+        .apply(CatalogMutation::CreateGroup(ConnectionGroup {
+            id: group,
+            parent_id: None,
+            name: "合成组".into(),
+            position: 0,
+        }))
+        .unwrap_or_else(|error| panic!("{error:?}"));
+    assert_eq!(oracle.group_presence(group), GroupPresence::Exists(group));
+    for alias in [
+        group.0.to_string(),
+        group.0.simple().to_string(),
+        group.0.to_string().to_uppercase(),
+        format!("{{{}}}", group.0),
+        group.0.urn().to_string(),
+    ] {
+        oracle.replace(2, &alias);
+        let catalog = oracle
+            .repository
+            .load_catalog()
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(
+            catalog
+                .connections
+                .get(&fixture.connection.id)
+                .unwrap_or_else(|| panic!("oracle connection"))
+                .group_id,
+            Some(group)
+        );
+    }
+}
+
+#[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn long_error_templates_numeric_boundaries_and_allocation_failure_are_audited() {
     let mut texts = Vec::new();
     for value in [
@@ -1201,6 +1416,13 @@ fn long_error_templates_numeric_boundaries_and_allocation_failure_are_audited() 
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn real_raw_owner_and_decode_grants_coexist_until_actual_backing_drop() {
     #[repr(C)]
     struct RawMetadata {
@@ -1362,29 +1584,39 @@ fn raw_schema_nullable_order_and_explicit_selection_are_checked_without_decode()
     )
     .unwrap_or_else(|error| panic!("{error:?}"));
     let root = root();
-    let mut calls = ExecutionCounts::default();
-    let build = domain_decode::decode_resolve(&raw, &target(), &root, ADMISSION, &mut calls)
+    assert_eq!(raw.source, ProfileSource::Explicit);
+    assert_eq!(raw.selection.explicit_profile, Some(fixture.profile.id));
+    if cfg!(all(
+        target_os = "windows",
+        target_env = "gnu",
+        target_pointer_width = "64",
+        target_endian = "little",
+        panic = "unwind"
+    )) {
+        let mut calls = ExecutionCounts::default();
+        let build = domain_decode::decode_resolve(&raw, &target(), &root, ADMISSION, &mut calls)
+            .unwrap_or_else(|error| panic!("{error:?}"));
+        assert_eq!(build.snapshot.value().profile.id, fixture.profile.id);
+        assert_eq!(
+            build.snapshot.value().target.terminal_profile_id,
+            fixture.connection.terminal_profile_id
+        );
+        assert!(build.snapshot.value().target.identity_file.is_none());
+        drop(build);
+        selection.explicit_profile = Some(TerminalProfileId(Uuid::from_u128(100)));
+        let raw = RawFields::checked(
+            &fields,
+            identity,
+            ProfileSource::Explicit,
+            selection,
+            no_reference(identity, selection),
+        )
         .unwrap_or_else(|error| panic!("{error:?}"));
-    assert_eq!(build.snapshot.value().profile.id, fixture.profile.id);
-    assert_eq!(
-        build.snapshot.value().target.terminal_profile_id,
-        fixture.connection.terminal_profile_id
-    );
-    assert!(build.snapshot.value().target.identity_file.is_none());
-    drop(build);
-    selection.explicit_profile = Some(TerminalProfileId(Uuid::from_u128(100)));
-    let raw = RawFields::checked(
-        &fields,
-        identity,
-        ProfileSource::Explicit,
-        selection,
-        no_reference(identity, selection),
-    )
-    .unwrap_or_else(|error| panic!("{error:?}"));
-    assert!(matches!(
-        domain_decode::decode_resolve(&raw, &target(), &root, ADMISSION, &mut calls),
-        Err(Failure::MissingProfile)
-    ));
+        assert!(matches!(
+            domain_decode::decode_resolve(&raw, &target(), &root, ADMISSION, &mut calls),
+            Err(Failure::MissingProfile)
+        ));
+    }
     for mutation in 0..6 {
         let mut fields = fixture.fields(true);
         match mutation {
@@ -1408,19 +1640,16 @@ fn raw_schema_nullable_order_and_explicit_selection_are_checked_without_decode()
         ));
         assert!(audit.finish().events().is_empty());
     }
-    let mut changed = target();
-    changed.public.key_binding = Layout::new::<u8>();
-    let calls_before = calls;
-    assert!(matches!(
-        domain_decode::decode_resolve(&raw, &changed, &root, ADMISSION, &mut calls),
-        Err(Failure::Resource(
-            layout::NumericReject::UnsupportedEnvelope
-        ))
-    ));
-    assert_eq!(calls, calls_before);
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn complete_resolution_preserves_profile_shadowing_app_order_and_typed_depth_errors() {
     let fixture = Fixture::ordinary();
     let mut connection = fixture.connection;
@@ -1473,6 +1702,13 @@ fn complete_resolution_preserves_profile_shadowing_app_order_and_typed_depth_err
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn explicit_group_facts_match_real_storage_core_and_binary_uuid_aliases() {
     use rshell_m0::rshell_core::DomainError;
     use rshell_m0::rshell_storage::StorageError;
@@ -1640,6 +1876,13 @@ fn explicit_group_facts_match_real_storage_core_and_binary_uuid_aliases() {
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn unproven_or_inconsistent_group_facts_reject_at_validation_and_quota_still_precedes_codec() {
     let mut fixture = Fixture::ordinary();
     let group = GroupId(Uuid::from_u128(20));
@@ -1767,6 +2010,13 @@ fn unproven_or_inconsistent_group_facts_reject_at_validation_and_quota_still_pre
 }
 
 #[test]
+#[cfg(all(
+    target_os = "windows",
+    target_env = "gnu",
+    target_pointer_width = "64",
+    target_endian = "little",
+    panic = "unwind"
+))]
 fn split_boundaries_and_long_nested_arrays_survive_tighten_clone_and_last_drop_audit() {
     use serde_json::Value;
     for count in [11, 12, 13] {
