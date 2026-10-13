@@ -1,5 +1,7 @@
 //! 独立 provider executable；真实缓存 I/O 与 allocator 审计，不注册正常 Prepare。
 
+#![cfg(windows)]
+
 #[path = "../src/selected_p1/font_provider/mod.rs"]
 pub mod font_provider;
 #[path = "../src/selected_p1/font_source/mod.rs"]

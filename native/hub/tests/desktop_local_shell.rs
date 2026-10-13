@@ -375,7 +375,7 @@ mod windows_probe {
     /// 保留 spawn 返回的 Child handle，只终止本轮 test fixture，不按裸 PID 杀宿主。
     fn supervise(mode: &str, write_entered: Option<&AtomicBool>) -> Report {
         let executable = succeeds(std::env::current_exe());
-        let parent = std::env::temp_dir().join("opencode");
+        let parent = std::env::temp_dir();
         assert!(parent.is_dir());
         let nonce = format!(
             "{}-{}",
