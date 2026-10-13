@@ -166,14 +166,13 @@ fn scope_lifecycle_under_borrow_does_not_repanic_in_allocator() {
         || {
             let root = root();
             audit::with_state_borrowed_for_test(|| {
-                assert!(
-                    std::panic::catch_unwind(|| audit::AuditScope::start(&root)).is_err()
-                );
+                assert!(std::panic::catch_unwind(|| audit::AuditScope::start(&root)).is_err());
             });
             let scope = audit::AuditScope::start(&root);
             audit::with_state_borrowed_for_test(|| {
                 assert!(
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scope.finish())).is_err()
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scope.finish()))
+                        .is_err()
                 );
                 all_allocator_entries();
             });

@@ -233,7 +233,12 @@ unsafe impl GlobalAlloc for Allocator {
         }
         let pointer = unsafe { System.alloc(layout) };
         if entry.is_some() {
-            record(if pointer.is_null() { 4 } else { 1 }, pointer, layout, false);
+            record(
+                if pointer.is_null() { 4 } else { 1 },
+                pointer,
+                layout,
+                false,
+            );
         }
         pointer
     }
@@ -245,7 +250,12 @@ unsafe impl GlobalAlloc for Allocator {
         }
         let pointer = unsafe { System.alloc_zeroed(layout) };
         if entry.is_some() {
-            record(if pointer.is_null() { 4 } else { 1 }, pointer, layout, false);
+            record(
+                if pointer.is_null() { 4 } else { 1 },
+                pointer,
+                layout,
+                false,
+            );
         }
         pointer
     }
