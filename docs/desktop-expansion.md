@@ -10,6 +10,14 @@
 - 每阶段完整验收后独立提交到 `feat-desktop`；不把局部交付当阶段完成，最终范围不缩水为 MVP。
 - Windows 为原生实跑收敛平台；macOS/Linux 以三平台 CI 的检查/测试/构建保证可移植性，GUI 与沙箱未实跑时明确标注未验证，不冒充通过。
 
+### 本分支安全与可靠性边界
+
+本分支完成本软件界面、应用层和平台宿主可控的保证：认证与 host-key 信任、凭据保护、权限隔离、配置事务与快照、真实生命周期、应用自持资源预算、背压、超时和取消。正常 Native SSH 可使用现有稳定依赖入口，不以替换底层运行时作为交付前件。
+
+难以通过应用侧简单实现的第三方内部秘密擦除、全部可达分配的源式准入、全进程硬内存包络、算法内部有界推进、冷锁零隐藏 heap 与整体编译后常时性证明，按[分支后深层安全加固风险](followups/20261014_分支后深层安全加固风险.md)评级延后。原 P1 的 `403701760` 全量包络与 `SourceClosed` 不再是本分支交付条件，也不作为已实现保证对外宣称；应用已实施的有效预算和安全清理继续保留。
+
+真实使用路径上的内存不安全、泄密、信任绕过、错误竞态、死锁及不可控资源耗尽不能仅记录延期。实验候选不自动接入正式构建；旧接口、正常配置和压缩行为不缩水，三平台功能验证及未验证场景披露保持。
+
 ## 配置全集（设置目标）
 
 以 shellx 领域配置为基准，不扩大为 GTK 应用的其他产品功能（分组、tags、旧配置导入不在范围）。颜色选项：`Default`、`OneDark`、`SolarizedDark`、`SolarizedLight`、`Dracula`、`Monokai`、`Nord`、`GruvboxDark`、`TokyoNight`、`CampbellPowershell`，应用主题与 profile 终端颜色分别保存。
@@ -59,7 +67,7 @@ Profile 参数（终端参数/协议/绑定/滚回）在新会话或显式重启
 - 独立 V2 `Prepare/Prepared/Start/Cancel` 与有序事件。Prepare 无密码、不启动传输，固定目录目标并单次读取 configuration 捕获字体资源；Start 接收密码后立即进入 `SecretString`，核验同身份、字体投影与实测几何后一次性转交运行会话；`Accepted` 不等于已认证。
 - 准备态有界生命周期：有限有效期、每 session/generation 至多一个未消费态、全局数量与实际资源预算上限；取消/替换/过期/消费/退出均终结并释放，迟到结果不复活。
 - 事件按 source + identity + generation + seq 过滤，防迟到与重复。
-- **新 V2 Prepare/Start 默认关闭**（`Preparations::default()` 返回 `PolicyUnavailable`，仅测试构造器开启），待资源预算证明完成后开放。
+- **新 V2 Prepare/Start 当前默认关闭**（`Preparations::default()` 返回 `PolicyUnavailable`，仅测试构造器开启），待正常生产接线、应用自持资源生命周期与功能验收完成后开放；不再等待第三方全资源闭包。不得直接删除守护代替接线。
 
 **终端输入（4B-I / 4C）**——部分实现：
 
@@ -68,21 +76,19 @@ Profile 参数（终端参数/协议/绑定/滚回）在新会话或显式重启
 - 输入架构采用「单一原生输入 surface + Rust 先仲裁」：Flutter 公共按键事件无原生事件 ID，不能与另一通道元数据配对；键盘/文本/指针统一进入应用私有 Windows 输入窗口（TSF 前门控、Translate 前仲裁），文本/IME 提交保持单一来源票据。原型由 `native-input-spike` feature 控制，默认关闭。
 - 已验证：同 SDK 隔离握手、合成按键精确编码字节、TSF/COM 生命周期与退休安全。未完成：物理键盘、非 US 布局、真实 IME/文本/指针、ABI 3 宿主联调。
 
-**selected 读取与资源预算（P1）**——进行中：
+**配置读取与应用资源控制**——待生产组合验收：
 
-目标：配置读取全部经过分配前硬预算，仅可证明的预算不足才 typed 拒绝，不按库规模/页大小/编码/扫描数拒绝正常小 selected。架构三部分：
+目标：保全完整配置与字体绑定，在同一有效快照上 Prepare／Start；应用自持的准备态、字体、队列和大对象有明确预算与生命周期。取消、过期、替换、窗口关闭和迟到结果不能复活会话或提前释放仍使用的资源，不按数据库规模、编码或扫描数拒绝正常小配置。
 
-1. 只读 helper 子进程（rsHell `selected-read-helper`）：独立 SQLite 内存 arena 承担 C 侧硬界；请求级 fail-closed（首次实际配额不足永久失效该请求）；同一只读事务返回 selected 原始字段与组存在性事实；构建期来源经 `BuildEvidence` 与实际产物绑定。
-2. 应用侧预算账本（`native/hub/src/selected_p1/`）：`resource`（ledger/owner/秘密）、`decode_shape`、`domain_decode`、`font_source`、`font_provider`、`session_owner`、`reply_port`、`control_runtime`、`helper_runtime`、`helper_artifact` 各单元，覆盖分配前 grant、no-Weak 最后持有者、秘密 exact backing 与 wipe→free→退额。
-3. 构建与整合：`scripts/ci/build_selected_helper_artifact.ps1` 记录实际编译来源与产物哈希；`helper_artifact` 单元接入应用读取链到完整 domain 快照。
+`native/hub/src/selected_p1/`、只读 selected helper 和产物来源检查已有独立候选。生产路径选择以功能、事务、权限和应用可控资源保证为依据，不要求为全量 SQLite／第三方分配证书更换读取架构。真实 VM 接口若采用外部 backing，必须保证最后使用者释放；其他安全所有权方案也可使用，不为取得证书强制特定 finalizer 形态。
 
-未完成：正常 Prepare/VM 注册、跨进程最后持有者（VM finalizer）、WAL/打包/三平台验收。
+未完成：正常 Prepare／Start 生产组合、字体与元数据投影、关闭／重连、真实边界所有权及三平台功能验证。全资源包络候选保留但不作为这些工作的前件。
 
-**网络运行时（scoped russh）**——进行中：
+**正常网络与实验 scoped 入口**：
 
-rsHell 依赖的 russh 在库内分配与认证秘密上无法从应用侧闭合，因此团队 fork 增加显式 scoped 入口：应用自有 executor/poller/timer/stream 持有运行根，库内每处动态增长分配前准入，密码/keyboard-interactive 从第一份 owned 副本起受保护并在释放前擦除。旧公开 constructors、SSH wire、认证模式与 host key 信任不变。crypto-bigint fork 为共享 Montgomery 参数补最后持有者擦除。
+本分支在现有 Native 入口上完成实际认证、host-key 信任、PTY、双向读写、resize、keepalive、超时、取消及重连，保持认证模式与正常压缩；应用管理输出队列、并发、错误提示和关闭状态。稳定依赖的运行时无需为取得完整资源证书而替换。
 
-已验证：认证→PTY→数据→关闭的库内路径（client 无 Tokio runtime，内存 duplex 对端，GNU/MSVC 双 SDK）。剩余：flush 缓冲、server 发起 channel、公钥/证书/外部签名、crypto/RNG/TLS、压缩的完整源闭包。
+scoped russh、borrowed bigint、独立压缩 codec 及 inline 同步候选用于后续高保证加固，不作为本分支正常连接前件。其局部通过不能代表全资源闭包，未整合或存在中间态的候选不进入正常路径；已使用依赖中的有效 bug 修复与安全补丁保持。
 
 **验收矩阵要点**（阶段四完成条件）：真实目录/快速连接选择不同 profile 且不混快照；准备态边界 fake 证明；两个不同 profile 真实改变期望区域且首个 PTY 与快照一致；ENQ 精确 answerback；输入绑定矩阵（含覆盖 `desktopCommand`/`zoom.handleKey`/`TerminalView.shortcuts` 冲突）；四种滚动组合；多字体窗格与重开；生命周期导航往返；移动回归不退化。
 
@@ -137,6 +143,6 @@ Windows 原生验收入口：`scripts/ci/windows_auth_check.ps1`（隔离 Native
 
 ## 当前检查点状态
 
-- 检查点提交（2026-10-12）：Guo `5743be9e`、rsHell `070b5d93`、russh `5594db64`、crypto-bigint `9a4f70ac`，均已推送并核验。
+- 正式构建的依赖身份以 `UPSTREAM.md` 与 manifest／lock 为准；独立发布库和未整合实验候选不自动进入应用。
 - 已验证（Windows 本机）：Guo all-targets check、Rust 库测试、Flutter 全套 418 与 analyze、rsHell core/session/storage 回归、helper 各 target、scoped russh 双 SDK 测试与 RSA 擦除审计、本地 Shell 43 项、System scope/helper、C++ 输入组件 415 断言。
-- 正常新 V2、Local/System 生产入口、P1 整体均保持关闭；恢复条件与剩余义务见[桌面检查点待完成验收](followups/20261012_桌面检查点待完成验收.md)。
+- 正常新 V2、Local/System 生产入口尚未开放；恢复条件是正常接线、应用安全可靠性与功能验收，见[桌面检查点待完成验收](followups/20261012_桌面检查点待完成验收.md)。高保证资源候选按风险条目延后，不代替或阻塞这些功能。
