@@ -84,6 +84,146 @@ fn all_allocator_entries() {
     }
 }
 
+fn reject_and_failure(scope: audit::AuditScope<'_>) -> audit::Failure {
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scope.finish())).is_err());
+    match audit::first_failure_for_test() {
+        Some(failure) => failure,
+        None => panic!("不完整审计必须保存首次失败定位"),
+    }
+}
+
+fn nested_zeroed_and_free() {
+    let layout = Layout::new::<[u8; 61]>();
+    // SAFETY: 非空真实 backing 用原 Layout 释放；allocator 回调中不格式化或 unwind。
+    unsafe {
+        let pointer = ALLOCATOR.alloc_zeroed(layout);
+        if pointer.is_null() {
+            std::process::abort();
+        }
+        ALLOCATOR.dealloc(pointer, layout);
+    }
+}
+
+fn exercise_entry(kind: audit::EntryKind, operation: impl FnOnce(&mut dyn FnMut())) {
+    let layout = succeeds(Layout::from_size_align(37, 8));
+    let resized = succeeds(Layout::from_size_align(73, 8));
+    let mut pointer = std::ptr::null_mut();
+    // SAFETY: dealloc/realloc 的 fixture 必须先取得真实非空 backing。
+    unsafe {
+        if matches!(kind, audit::EntryKind::Dealloc | audit::EntryKind::Realloc) {
+            pointer = ALLOCATOR.alloc(layout);
+            if pointer.is_null() {
+                std::process::abort();
+            }
+        }
+        operation(&mut || {
+            pointer = match kind {
+                audit::EntryKind::Alloc => ALLOCATOR.alloc(layout),
+                audit::EntryKind::AllocZeroed => ALLOCATOR.alloc_zeroed(layout),
+                audit::EntryKind::Dealloc => {
+                    ALLOCATOR.dealloc(pointer, layout);
+                    std::ptr::null_mut()
+                }
+                audit::EntryKind::Realloc => {
+                    let next = ALLOCATOR.realloc(pointer, layout, resized.size());
+                    if next.is_null() {
+                        std::process::abort();
+                    }
+                    next
+                }
+            };
+        });
+        if !pointer.is_null() {
+            ALLOCATOR.dealloc(
+                pointer,
+                if kind == audit::EntryKind::Realloc {
+                    resized
+                } else {
+                    layout
+                },
+            );
+        }
+    }
+}
+
+const ENTRY_KINDS: [audit::EntryKind; 4] = [
+    audit::EntryKind::Alloc,
+    audit::EntryKind::AllocZeroed,
+    audit::EntryKind::Dealloc,
+    audit::EntryKind::Realloc,
+];
+
+#[test]
+fn first_state_borrow_failure_keeps_entry_despite_later_system_reentry() {
+    child_or_run(
+        "first_state_borrow_failure_keeps_entry_despite_later_system_reentry",
+        || {
+            for kind in ENTRY_KINDS {
+                exercise_entry(kind, |operation| {
+                    let root = root();
+                    let scope = audit::AuditScope::start(&root);
+                    audit::before_phase_for_test(audit::Phase::System, nested_zeroed_and_free);
+                    audit::with_state_borrowed_for_test(operation);
+                    let failure = reject_and_failure(scope);
+                    assert_eq!(
+                        failure,
+                        audit::Failure {
+                            reason: audit::FailureReason::StateBorrowed,
+                            phase: audit::Phase::Record,
+                            entry: Some(audit::Entry {
+                                kind,
+                                size: 37,
+                                align: 8,
+                            }),
+                            nested: None,
+                        }
+                    );
+                    let scope = audit::AuditScope::start(&root);
+                    assert!(audit::first_failure_for_test().is_none());
+                    assert!(scope.finish().events().is_empty());
+                });
+            }
+        },
+    );
+}
+
+#[test]
+fn real_nested_allocator_failure_identifies_phase_and_both_entries() {
+    child_or_run(
+        "real_nested_allocator_failure_identifies_phase_and_both_entries",
+        || {
+            for phase in [
+                audit::Phase::Record,
+                audit::Phase::Snapshot,
+                audit::Phase::System,
+            ] {
+                let root = root();
+                let scope = audit::AuditScope::start(&root);
+                audit::before_phase_for_test(phase, nested_zeroed_and_free);
+                allocate_and_free();
+                let failure = reject_and_failure(scope);
+                assert_eq!(
+                    failure,
+                    audit::Failure {
+                        reason: audit::FailureReason::Reentry,
+                        phase,
+                        entry: Some(audit::Entry {
+                            kind: audit::EntryKind::Alloc,
+                            size: 37,
+                            align: 8,
+                        }),
+                        nested: Some(audit::Entry {
+                            kind: audit::EntryKind::AllocZeroed,
+                            size: 61,
+                            align: 1,
+                        }),
+                    }
+                );
+            }
+        },
+    );
+}
+
 #[test]
 fn inactive_borrow_allows_real_allocator_without_unwind() {
     child_or_run(

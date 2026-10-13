@@ -62,10 +62,66 @@ impl State {
 
 thread_local! { static STATE: RefCell<State> = const { RefCell::new(State::empty()) }; }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FailureReason {
+    StateBorrowed,
+    TlsUnavailable,
+    Reentry,
+    AllocationCountOverflow,
+    AllocatorActiveAtFinish,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Phase {
+    Scope,
+    Record,
+    Snapshot,
+    System,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EntryKind {
+    Alloc,
+    AllocZeroed,
+    Dealloc,
+    Realloc,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Entry {
+    pub kind: EntryKind,
+    // realloc 的 size/align 是输入的原 Layout。
+    pub size: usize,
+    pub align: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Failure {
+    pub reason: FailureReason,
+    pub phase: Phase,
+    pub entry: Option<Entry>,
+    pub nested: Option<Entry>,
+}
+
 struct Control {
     active: Cell<bool>,
     busy: Cell<bool>,
-    incomplete: Cell<bool>,
+    first_failure: Cell<Option<Failure>>,
+    phase: Cell<Phase>,
+    entry: Cell<Option<Entry>>,
+}
+
+impl Control {
+    fn fail(&self, reason: FailureReason, nested: Option<Entry>) {
+        if self.first_failure.get().is_none() {
+            self.first_failure.set(Some(Failure {
+                reason,
+                phase: self.phase.get(),
+                entry: self.entry.get(),
+                nested,
+            }));
+        }
+    }
 }
 
 // 无 Drop、常量初始化的 TLS 不依赖析构顺序；状态借用失败仍能登记审计缺口。
@@ -73,38 +129,54 @@ thread_local! {
     static CONTROL: Control = const { Control {
         active: Cell::new(false),
         busy: Cell::new(false),
-        incomplete: Cell::new(false),
+        first_failure: Cell::new(None),
+        phase: Cell::new(Phase::Scope),
+        entry: Cell::new(None),
     } };
 }
 
-fn incomplete() {
+fn incomplete(reason: FailureReason) {
     CONTROL
-        .try_with(|control| control.incomplete.set(true))
+        .try_with(|control| control.fail(reason, None))
         .unwrap_or_else(|_| std::process::abort());
 }
 
 struct AllocatorEntry;
 
-fn enter_allocator() -> Option<AllocatorEntry> {
-    CONTROL
+fn enter_allocator(kind: EntryKind, layout: Layout) -> Option<AllocatorEntry> {
+    let call = Entry {
+        kind,
+        size: layout.size(),
+        align: layout.align(),
+    };
+    let entry = CONTROL
         .try_with(|control| {
             if !control.active.get() {
                 return None;
             }
             if control.busy.replace(true) {
-                control.incomplete.set(true);
+                control.fail(FailureReason::Reentry, Some(call));
                 return None;
             }
+            control.entry.set(Some(call));
             Some(AllocatorEntry)
         })
         // 无法判断审计是否活动时不能声称完整；allocator 内不能 unwind。
-        .unwrap_or_else(|_| std::process::abort())
+        .unwrap_or_else(|_| std::process::abort());
+    if entry.is_some() {
+        phase(Phase::Record);
+    }
+    entry
 }
 
 impl Drop for AllocatorEntry {
     fn drop(&mut self) {
         CONTROL
-            .try_with(|control| control.busy.set(false))
+            .try_with(|control| {
+                control.busy.set(false);
+                control.entry.set(None);
+                control.phase.set(Phase::Scope);
+            })
             .unwrap_or_else(|_| std::process::abort());
     }
 }
@@ -114,12 +186,12 @@ fn with_state<T>(operation: impl FnOnce(&mut State) -> T) -> Option<T> {
         .try_with(|cell| match cell.try_borrow_mut() {
             Ok(mut state) => Some(operation(&mut state)),
             Err(_) => {
-                incomplete();
+                incomplete(FailureReason::StateBorrowed);
                 None
             }
         })
         .unwrap_or_else(|_| {
-            incomplete();
+            incomplete(FailureReason::TlsUnavailable);
             None
         })
 }
@@ -134,14 +206,46 @@ pub fn with_state_borrowed_for_test(operation: impl FnOnce()) {
 }
 
 #[cfg(test)]
+type PhaseHook = (Phase, fn());
+
+#[cfg(test)]
 thread_local! {
-    static SNAPSHOT_HOOK: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
+    static PHASE_HOOK: Cell<Option<PhaseHook>> = const { Cell::new(None) };
 }
 
 /// 在真实 snapshot 的边界注入一次 allocator 重入。
 #[cfg(test)]
 pub fn before_snapshot_for_test(operation: fn()) {
-    SNAPSHOT_HOOK.with(|hook| hook.set(Some(operation)));
+    before_phase_for_test(Phase::Snapshot, operation);
+}
+
+/// 只在指定的真实 allocator 阶段边界调用一次受控操作。
+#[cfg(test)]
+pub fn before_phase_for_test(phase: Phase, operation: fn()) {
+    PHASE_HOOK.with(|hook| hook.set(Some((phase, operation))));
+}
+
+/// 仅返回首次失败的固定定位字段，不提供任何部分事件证明。
+#[cfg(test)]
+pub fn first_failure_for_test() -> Option<Failure> {
+    CONTROL.with(|control| control.first_failure.get())
+}
+
+fn phase(phase: Phase) {
+    CONTROL
+        .try_with(|control| control.phase.set(phase))
+        .unwrap_or_else(|_| std::process::abort());
+    #[cfg(test)]
+    PHASE_HOOK
+        .try_with(|hook| {
+            if let Some((target, operation)) = hook.get()
+                && target == phase
+            {
+                hook.set(None);
+                operation();
+            }
+        })
+        .unwrap_or_else(|_| incomplete(FailureReason::TlsUnavailable));
 }
 
 fn should_fail(layout: Layout) -> bool {
@@ -177,24 +281,18 @@ fn record(kind: u32, pointer: *mut u8, layout: Layout, zero_before_free: bool) {
     let Some(root) = with_state(|state| state.root) else {
         return;
     };
-    #[cfg(test)]
-    SNAPSHOT_HOOK
-        .try_with(|hook| {
-            if let Some(operation) = hook.take() {
-                operation();
-            }
-        })
-        .unwrap_or_else(|_| incomplete());
+    phase(Phase::Snapshot);
     // SAFETY: scope 保证 ledger 存活且不可 Send；snapshot 不跨 STATE 借用。
     // AllocatorEntry 覆盖 snapshot 与 System，嵌套操作只标记缺口，不再次取账本锁。
     let snapshot = unsafe { &*root }.snapshot();
+    phase(Phase::Record);
     with_state(|state| {
         if kind == 1 && state.secret_size == Some(layout.size()) && state.secret_pointer == 0 {
             state.secret_pointer = pointer as usize;
         }
         if kind == 1 {
             let Some(allocations) = state.allocations.checked_add(1) else {
-                incomplete();
+                incomplete(FailureReason::AllocationCountOverflow);
                 return;
             };
             state.allocations = allocations;
@@ -226,13 +324,17 @@ pub struct Allocator;
 // SAFETY: 所有成功 allocation 与原 Layout 原样转发 System；故障注入只返回 null。
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let entry = enter_allocator();
+        let entry = enter_allocator(EntryKind::Alloc, layout);
         if entry.is_some() && should_fail(layout) {
             record(4, std::ptr::null_mut(), layout, false);
             return std::ptr::null_mut();
         }
+        if entry.is_some() {
+            phase(Phase::System);
+        }
         let pointer = unsafe { System.alloc(layout) };
         if entry.is_some() {
+            phase(Phase::Record);
             record(
                 if pointer.is_null() { 4 } else { 1 },
                 pointer,
@@ -243,13 +345,17 @@ unsafe impl GlobalAlloc for Allocator {
         pointer
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let entry = enter_allocator();
+        let entry = enter_allocator(EntryKind::AllocZeroed, layout);
         if entry.is_some() && should_fail(layout) {
             record(4, std::ptr::null_mut(), layout, false);
             return std::ptr::null_mut();
         }
+        if entry.is_some() {
+            phase(Phase::System);
+        }
         let pointer = unsafe { System.alloc_zeroed(layout) };
         if entry.is_some() {
+            phase(Phase::Record);
             record(
                 if pointer.is_null() { 4 } else { 1 },
                 pointer,
@@ -260,14 +366,15 @@ unsafe impl GlobalAlloc for Allocator {
         pointer
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        let entry = enter_allocator();
+        let entry = enter_allocator(EntryKind::Dealloc, layout);
         if entry.is_some() {
             record(2, pointer, layout, observe_free(pointer, layout));
+            phase(Phase::System);
         }
         unsafe { System.dealloc(pointer, layout) };
     }
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        let entry = enter_allocator();
+        let entry = enter_allocator(EntryKind::Realloc, layout);
         let Ok(next) = Layout::from_size_align(size, layout.align()) else {
             return std::ptr::null_mut();
         };
@@ -276,8 +383,12 @@ unsafe impl GlobalAlloc for Allocator {
             return std::ptr::null_mut();
         }
         let zero_before_free = entry.is_some() && observe_free(pointer, layout);
+        if entry.is_some() {
+            phase(Phase::System);
+        }
         let next_pointer = unsafe { System.realloc(pointer, layout, size) };
         if entry.is_some() {
+            phase(Phase::Record);
             if next_pointer.is_null() {
                 record(4, pointer, next, false);
             } else {
@@ -308,7 +419,7 @@ impl<'root> AuditScope<'root> {
             state.root = root;
         });
         CONTROL.with(|control| {
-            control.incomplete.set(false);
+            control.first_failure.set(None);
             control.active.set(true);
         });
         Self {
@@ -333,9 +444,11 @@ impl<'root> AuditScope<'root> {
     }
 
     pub fn finish(self) -> Report {
-        let incomplete = CONTROL.with(|control| {
+        CONTROL.with(|control| {
             control.active.set(false);
-            control.incomplete.replace(false) || control.busy.get()
+            if control.busy.get() {
+                control.fail(FailureReason::AllocatorActiveAtFinish, None);
+            }
         });
         let report = with_state(|state| {
             let state = std::mem::replace(state, State::empty());
@@ -346,8 +459,9 @@ impl<'root> AuditScope<'root> {
             }
         });
         drop(self);
+        let failure = CONTROL.with(|control| control.first_failure.get());
         // 缺口在 allocator 返回并停用审计后报告，所有调用者都不能拿部分事件作证明。
-        assert!(!incomplete, "allocator 审计不完整：存在重入或状态不可访问");
+        assert!(failure.is_none(), "allocator 审计不完整：{failure:?}");
         let report = match report {
             Some(report) => report,
             None => panic!("allocator 审计不完整：无法读取审计状态"),
