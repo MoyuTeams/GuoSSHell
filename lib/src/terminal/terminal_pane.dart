@@ -1663,12 +1663,10 @@ class TerminalViewport extends StatelessWidget {
       keyboardType: TextInputType.emailAddress,
       keyboardAppearance: Brightness.dark,
     );
+    // 原生输入（含分支未定期间）只从祖先屏蔽焦点，不改写共享 focusNode 自身的
+    // canRequestFocus；否则转入 legacy 后该节点仍不可聚焦，拿不到 TextInput 连接。
     final surface = nativeInput
-        ? Focus(
-            focusNode: focusNode,
-            canRequestFocus: false,
-            child: IgnorePointer(child: view),
-          )
+        ? ExcludeFocus(child: IgnorePointer(child: view))
         : view;
     return painted == null
         ? surface
