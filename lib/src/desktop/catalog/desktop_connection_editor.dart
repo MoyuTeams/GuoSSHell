@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:fluent_ui/fluent_ui.dart';
 
 import '../../bindings/bindings.dart';
@@ -49,6 +50,19 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
     text: widget.existing?.command ?? '',
   );
 
+  /// System OpenSSH 的私钥文件路径；已有连接的值随目录投影读回。
+  final _identity = TextEditingController();
+  bool _identityEdited = false;
+
+  late DesktopTransport _transport =
+      widget.existing?.transport ?? DesktopTransport.nativeSsh;
+
+  /// 系统 ssh 是否可用；null 为尚未查询到。
+  bool? _systemAvailable;
+  String _systemReason = '';
+
+  bool get _systemSsh => _transport == DesktopTransport.systemOpenSsh;
+
   late AuthMethod _auth = widget.existing?.auth ?? AuthMethod.password;
   late bool _savePassword = widget.existing?.passwordSaved ?? true;
   late String _keyId = widget.existing?.keyId ?? '';
@@ -86,13 +100,17 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
     final existing = widget.existing;
     if (existing != null) {
       widget.gateway
-          .connectionProfileId(existing.id)
+          .connection(existing.id)
           .then(
-            (id) {
-              // 用户已显式选择则不覆盖。
-              if (mounted && _profileId == null) {
-                setState(() => _profileId = id);
-              }
+            (connection) {
+              if (!mounted) return;
+              setState(() {
+                // 用户已显式选择或编辑则不覆盖。
+                _profileId ??= connection.profileId;
+                if (!_identityEdited) {
+                  _identity.text = connection.systemIdentityPath;
+                }
+              });
             },
             onError: (_) {
               if (mounted) setState(() => _profileIdFailed = true);
@@ -100,11 +118,26 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
           );
     }
     try {
-      final profiles = await widget.gateway.terminalProfiles();
-      if (mounted) setState(() => _profiles = profiles);
+      final options = await widget.gateway.targetOptions();
+      if (mounted) {
+        setState(() {
+          _profiles = options.profiles;
+          _systemAvailable = options.systemAvailable;
+          _systemReason = options.systemReason;
+        });
+      }
     } catch (_) {
       if (mounted) setState(() => _profilesFailed = true);
     }
+  }
+
+  Future<void> _pickIdentity() async {
+    final file = await openFile(confirmButtonText: '选择');
+    if (!mounted || file == null) return;
+    setState(() {
+      _identity.text = file.path;
+      _identityEdited = true;
+    });
   }
 
   void _syncChanged() {
@@ -123,6 +156,7 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
       _username,
       _password,
       _command,
+      _identity,
     ]) {
       controller.dispose();
     }
@@ -193,6 +227,8 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
           keyId: _auth == AuthMethod.publicKey ? _keyId : '',
           command: _command.text,
           profileId: _profileId ?? '',
+          transport: _transport,
+          systemIdentityPath: _systemSsh ? _identity.text : '',
         ),
       );
       if (result.error != CatalogError.none) {
@@ -301,6 +337,39 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
         _field(_username, '用户名'),
         const SizedBox(height: DesktopSpacing.lg),
         if (!widget.quick) ...[
+          Text('连接方式', style: FluentTheme.of(context).typography.body),
+          const SizedBox(height: DesktopSpacing.sm),
+          ComboBox<DesktopTransport>(
+            key: const Key('catalog-transport'),
+            value: _transport,
+            items: [
+              const ComboBoxItem(
+                value: DesktopTransport.nativeSsh,
+                child: Text('Native SSH'),
+              ),
+              ComboBoxItem(
+                value: DesktopTransport.systemOpenSsh,
+                // 已是 System 的连接即使暂时找不到 ssh 也保留原值。
+                enabled: _systemAvailable == true || _systemSsh,
+                child: const Text('System OpenSSH'),
+              ),
+            ],
+            onChanged: _busy
+                ? null
+                : (value) {
+                    if (value != null) setState(() => _transport = value);
+                  },
+          ),
+          if (_systemAvailable == false) ...[
+            const SizedBox(height: DesktopSpacing.sm),
+            Text(
+              'System OpenSSH 不可用：$_systemReason',
+              style: FluentTheme.of(context).typography.caption,
+            ),
+          ],
+          const SizedBox(height: DesktopSpacing.lg),
+        ],
+        if (!widget.quick && !_systemSsh) ...[
           Text('认证方式', style: FluentTheme.of(context).typography.body),
           const SizedBox(height: DesktopSpacing.sm),
           ComboBox<AuthMethod>(
@@ -324,6 +393,35 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
         ],
         if (widget.quick) ...[
           _field(_password, '密码', hint: '可留空，连接时再输入', secret: true),
+          const SizedBox(height: DesktopSpacing.md),
+        ] else if (_systemSsh) ...[
+          Text(
+            '由系统 ssh 处理认证：~/.ssh/config、agent 与 known_hosts 照常生效，'
+            '主机密钥确认与密码在终端里输入。',
+            style: FluentTheme.of(context).typography.body,
+          ),
+          const SizedBox(height: DesktopSpacing.md),
+          Text('私钥文件（可选）', style: FluentTheme.of(context).typography.body),
+          const SizedBox(height: DesktopSpacing.sm),
+          Row(
+            children: [
+              Expanded(
+                child: TextBox(
+                  key: const ValueKey('catalog-field-私钥文件（可选）'),
+                  controller: _identity,
+                  placeholder: '留空则由 ssh 配置与 agent 决定',
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  onChanged: (_) => _identityEdited = true,
+                ),
+              ),
+              const SizedBox(width: DesktopSpacing.sm),
+              Button(
+                onPressed: _busy ? null : _pickIdentity,
+                child: const Text('浏览…'),
+              ),
+            ],
+          ),
           const SizedBox(height: DesktopSpacing.md),
         ] else if (_auth == AuthMethod.password) ...[
           ToggleSwitch(

@@ -8,6 +8,7 @@
 //! 时间同样不算进连接时限。
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,7 +25,7 @@ use rshell_m0::rshell_core::{
 pub use rshell_m0::rshell_session::LocalLaunch;
 use rshell_m0::rshell_session::{
     AuthPlan, ExternalSigner, InteractionBroker, KnownHostsVerifier, NativeSshTransport,
-    SessionTransport, TransportRequest, interaction_channel,
+    SessionTransport, TransportRequest, build_system_ssh_argv, interaction_channel,
 };
 use rshell_m0::russh::keys::{PrivateKey, PublicKey};
 use secrecy::{ExposeSecret, SecretString};
@@ -149,6 +150,10 @@ pub enum TargetKind {
     /// 本地 shell：不认证，每次连接（含重连）都按同一启动描述新起进程。
     /// `None` 在连接时取平台默认 shell，工作目录为用户主目录。
     Local(Option<LocalLaunch>),
+    /// 系统 OpenSSH：在本地 PTY 中运行系统 `ssh`，配置、agent、known_hosts、主机密钥确认
+    /// 与密码提示都由 ssh 自己在终端里处理。每次连接（含重连）重新查找 ssh 并按连接配置组装参数。
+    /// 携带的路径只用于测试隔离：作为 `-F <path>` 放在参数最前（产品路径为 `None`）。
+    System(Option<PathBuf>),
 }
 
 impl Target {
@@ -158,6 +163,19 @@ impl Target {
             saved,
             kind: TargetKind::Ssh,
         }
+    }
+
+    /// 系统 ssh；`config` 见 [`TargetKind::System`]。
+    pub fn system(profile: ConnectionProfile, saved: bool, config: Option<PathBuf>) -> Self {
+        Self {
+            profile,
+            saved,
+            kind: TargetKind::System(config),
+        }
+    }
+
+    pub fn is_system(&self) -> bool {
+        matches!(self.kind, TargetKind::System(_))
     }
 
     /// 本地 shell；`profile` 只是占位，主机、端口与用户名为空，不进入目录。
@@ -291,8 +309,7 @@ fn validate_desktop_for<const DESKTOP: bool>(
     Ok(())
 }
 
-/// 解析目录与终端配置；System OpenSSH 只返回不可用。解析不构造传输层或启动程序，
-/// 本地 shell 在连接时才启动。
+/// 解析目录与终端配置。解析不构造传输层或启动程序；本地 shell 与系统 ssh 在连接时才启动。
 pub async fn resolve_desktop(
     context: &Arc<AppContext>,
     request: DesktopConnectRequest,
@@ -430,12 +447,6 @@ async fn resolve_desktop_inner(
             "target/connection_id".to_owned(),
         ));
     }
-    if request.target == DesktopTargetKind::SystemOpenSsh {
-        return Err((
-            DesktopConnectError::TransportUnavailable,
-            "transport not implemented".to_owned(),
-        ));
-    }
     let native = ConnectRequest {
         session_id: request.session_id,
         connection_id: request.connection_id,
@@ -450,16 +461,47 @@ async fn resolve_desktop_inner(
         pixel_height: request.pixel_height,
         dpi: request.dpi,
     };
-    let target = match saved {
-        _ if request.target == DesktopTargetKind::LocalShell => Target::local(None),
-        Some(profile) => Target::ssh(profile, true),
-        None => resolve_target(context, &native).await.map_err(|_| {
-            (
-                DesktopConnectError::InvalidField,
-                "host/port/username".to_owned(),
-            )
-        })?,
+    let target = match (request.target, saved) {
+        (DesktopTargetKind::LocalShell, _) => Target::local(None),
+        (DesktopTargetKind::SystemOpenSsh, Some(profile)) => {
+            Target::system(profile, true, system_ssh_test_config())
+        }
+        (DesktopTargetKind::NativeSsh, Some(profile)) => Target::ssh(profile, true),
+        (kind, None) => {
+            let (transport, authentication) = if kind == DesktopTargetKind::SystemOpenSsh {
+                (TransportKind::SystemOpenSsh, AuthenticationKind::Agent)
+            } else {
+                (TransportKind::NativeSsh, AuthenticationKind::Password)
+            };
+            let profile = quick_profile(&native, transport, authentication).map_err(|_| {
+                (
+                    DesktopConnectError::InvalidField,
+                    "host/port/username".to_owned(),
+                )
+            })?;
+            if transport == TransportKind::SystemOpenSsh {
+                Target::system(profile, false, system_ssh_test_config())
+            } else {
+                Target::ssh(profile, false)
+            }
+        }
     };
+    // 系统 ssh 的参数在准备时就校验（拒绝像选项的主机名等），找不到 ssh 也在此拒绝；
+    // 都不启动进程。
+    if target.is_system() {
+        if build_system_ssh_argv(&target.profile).is_err() {
+            return Err((
+                DesktopConnectError::InvalidField,
+                "system_ssh_argv".to_owned(),
+            ));
+        }
+        if !spawn_blocking(system_ssh_found).await.unwrap_or(false) {
+            return Err((
+                DesktopConnectError::TransportUnavailable,
+                "ssh not found".to_owned(),
+            ));
+        }
+    }
     let resolved = DesktopTarget {
         request: native,
         target,
@@ -525,7 +567,7 @@ impl Target {
     pub fn describe(&self) -> String {
         match self.kind {
             TargetKind::Local(_) => LOCAL_DESCRIPTION.to_owned(),
-            TargetKind::Ssh => format!(
+            TargetKind::Ssh | TargetKind::System(_) => format!(
                 "{}@{}:{}",
                 self.profile.username, self.profile.host, self.profile.port
             ),
@@ -533,22 +575,36 @@ impl Target {
     }
 }
 
+/// 快速连接的临时配置：由请求里的字段组成，不进入目录。
+fn quick_profile(
+    request: &ConnectRequest,
+    transport: TransportKind,
+    authentication: AuthenticationKind,
+) -> Result<ConnectionProfile, Abort> {
+    let (host, username) = catalog::validate_target(&request.host, request.port, &request.username)
+        .map_err(|error| Abort::failed(FailureKind::InvalidTarget, format!("{error:?}")))?;
+    let mut profile = ConnectionProfile::new(format!("{username}@{host}"), host);
+    profile.port = request.port;
+    profile.username = username.to_owned();
+    profile.transport = transport;
+    profile.authentication = authentication;
+    profile.remote_command =
+        Some(request.command.trim().to_owned()).filter(|command| !command.is_empty());
+    Ok(profile)
+}
+
 /// 找到连接配置：目录里的按 id 取；快速连接由请求里的字段临时组成（密码认证）。
+/// 旧路径（移动端）只支持 Native SSH。
 pub async fn resolve_target(
     context: &Arc<AppContext>,
     request: &ConnectRequest,
 ) -> Result<Target, Abort> {
     if request.connection_id.is_empty() {
-        let (host, username) =
-            catalog::validate_target(&request.host, request.port, &request.username)
-                .map_err(|error| Abort::failed(FailureKind::InvalidTarget, format!("{error:?}")))?;
-        let mut profile = ConnectionProfile::new(format!("{username}@{host}"), host);
-        profile.port = request.port;
-        profile.username = username.to_owned();
-        profile.transport = TransportKind::NativeSsh;
-        profile.authentication = AuthenticationKind::Password;
-        profile.remote_command =
-            Some(request.command.trim().to_owned()).filter(|command| !command.is_empty());
+        let profile = quick_profile(
+            request,
+            TransportKind::NativeSsh,
+            AuthenticationKind::Password,
+        )?;
         return Ok(Target::ssh(profile, false));
     }
 
@@ -591,8 +647,23 @@ pub async fn establish(
         kind,
     } = target;
     let transport_request = native_transport_request(terminal.size, terminal.terminal_type)?;
-    if let TargetKind::Local(launch) = kind {
-        // 本地 shell 不认证、不校验主机密钥；TERM 由传输层按请求设入子进程环境。
+    let launch = match kind {
+        TargetKind::Ssh => None,
+        TargetKind::Local(launch) => Some(launch),
+        // 系统 ssh 每次连接都重新组装：重连即重新运行 ssh。
+        TargetKind::System(config) => {
+            let task_profile = profile.clone();
+            let launch = spawn_blocking(move || system_ssh_launch(&task_profile, config))
+                .await
+                .map_err(|error| {
+                    Abort::failed(FailureKind::Other, format!("ssh task: {error}"))
+                })??;
+            Some(Some(launch))
+        }
+    };
+    if let Some(launch) = launch {
+        // 本地 shell 与系统 ssh 不经应用认证、不校验主机密钥（系统 ssh 在终端里自行处理）；
+        // TERM 由传输层按请求设入子进程环境。spawn 成功即视为已连接。
         drop(quick_password);
         let transport = connect_local(
             launch,
@@ -831,6 +902,80 @@ async fn connect_local(
             FailureKind::InvalidTarget,
             "local shell unavailable".to_owned(),
         )),
+    }
+}
+
+/// 系统 ssh 的启动描述：在 PATH 中查找 ssh，参数由上游按连接配置组装（含参数校验与
+/// `StrictHostKeyChecking=ask`）；环境沿用应用进程，用户自己的 ssh 配置照常生效。
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn system_ssh_launch(
+    profile: &ConnectionProfile,
+    config: Option<PathBuf>,
+) -> Result<LocalLaunch, Abort> {
+    let program = rshell_platform::ssh_executable()
+        .map_err(|_| Abort::failed(FailureKind::Other, "ssh not found".to_owned()))?;
+    Ok(LocalLaunch::Command {
+        program,
+        args: system_ssh_args(profile, config)?,
+        cwd: None,
+        env: std::collections::BTreeMap::new(),
+    })
+}
+
+/// 是否找到系统 ssh：只看 PATH 中的文件是否存在，不执行它。移动目标恒为 false。
+pub(crate) fn system_ssh_found() -> bool {
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    {
+        rshell_platform::ssh_executable().is_ok()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn system_ssh_launch(
+    _profile: &ConnectionProfile,
+    _config: Option<PathBuf>,
+) -> Result<LocalLaunch, Abort> {
+    Err(Abort::failed(
+        FailureKind::InvalidTarget,
+        "system ssh unavailable".to_owned(),
+    ))
+}
+
+/// 系统 ssh 的参数：可选的测试配置 `-F <path>` 在最前，其余全部来自上游组装。
+pub(crate) fn system_ssh_args(
+    profile: &ConnectionProfile,
+    config: Option<PathBuf>,
+) -> Result<Vec<std::ffi::OsString>, Abort> {
+    let mut args = Vec::new();
+    if let Some(config) = config {
+        args.push("-F".into());
+        args.push(config.into_os_string());
+    }
+    args.extend(build_system_ssh_argv(profile).map_err(|_| {
+        Abort::failed(
+            FailureKind::InvalidTarget,
+            "system ssh arguments".to_owned(),
+        )
+    })?);
+    Ok(args)
+}
+
+/// 仅 debug 构建读取 `GUOSH_SYSTEM_SSH_CONFIG`：端到端测试借它让系统 ssh 使用隔离的
+/// `-F` 配置、不碰用户自己的 ~/.ssh。release 构建不读取，产品路径恒为 `None`。
+fn system_ssh_test_config() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os("GUOSH_SYSTEM_SSH_CONFIG")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
     }
 }
 
@@ -1410,6 +1555,65 @@ mod tests {
             native_transport_request(size, Some("invalid\0term")),
             Err(Abort::Failed { .. })
         ));
+    }
+
+    #[test]
+    fn system_ssh_arguments_come_from_upstream_with_only_an_optional_config_prefix() {
+        use rshell_m0::rshell_core::{AuthenticationKind, TransportKind};
+        use std::path::PathBuf;
+        let mut profile = ConnectionProfile::new("系统 ssh", "example.test");
+        profile.port = 2200;
+        profile.username = "user".into();
+        profile.transport = TransportKind::SystemOpenSsh;
+        profile.authentication = AuthenticationKind::Agent;
+        let args = |profile: &ConnectionProfile, config: Option<PathBuf>| {
+            super::system_ssh_args(profile, config)
+                .ok()
+                .expect("合法参数")
+                .into_iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            args(&profile, None),
+            [
+                "-p",
+                "2200",
+                "-o",
+                "StrictHostKeyChecking=ask",
+                "--",
+                "user@example.test"
+            ]
+        );
+
+        profile.port = 22;
+        profile.authentication = AuthenticationKind::PublicKey;
+        profile.identity_file = Some(PathBuf::from("id_test"));
+        profile.remote_command = Some("uptime".into());
+        assert_eq!(
+            args(&profile, Some(PathBuf::from("fixture_config"))),
+            [
+                "-F",
+                "fixture_config",
+                "-i",
+                "id_test",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=ask",
+                "--",
+                "user@example.test",
+                "uptime"
+            ]
+        );
+
+        // 上游校验仍生效：像选项的主机、改写目的地的用户名都拒绝。
+        for (host, username) in [("-oProxyCommand=x", "user"), ("example.test", "a@b")] {
+            let mut bad = profile.clone();
+            bad.host = host.into();
+            bad.username = username.into();
+            assert!(super::system_ssh_args(&bad, None).is_err());
+        }
     }
 
     #[test]

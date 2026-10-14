@@ -317,9 +317,6 @@ impl Preparations {
         if !desktop {
             return Err(Failure::PlatformUnavailable);
         }
-        if request.target == crate::signals::DesktopTargetKind::SystemOpenSsh {
-            return Err(Failure::TransportUnavailable);
-        }
         if !self.native_enabled {
             return Err(Failure::PolicyUnavailable);
         }
@@ -560,8 +557,9 @@ impl Preparations {
             return Err(Failure::Duplicate);
         }
         let target = &entry.ready.as_ref().ok_or(Failure::NotPrepared)?.0;
-        // 只有快速 Native SSH 随 Start 带密码；目录目标与本地 shell 带密码即拒绝。
-        if (target.target.saved || target.target.is_local()) && !password.expose_secret().is_empty()
+        // 只有快速 Native SSH 随 Start 带密码；目录目标、本地 shell 与系统 ssh 带密码即拒绝。
+        if (target.target.saved || target.target.is_local() || target.target.is_system())
+            && !password.expose_secret().is_empty()
         {
             return Err(Failure::InvalidTarget);
         }

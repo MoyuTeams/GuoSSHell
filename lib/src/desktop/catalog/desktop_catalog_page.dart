@@ -138,8 +138,11 @@ class _DesktopCatalogPageState extends State<DesktopCatalogPage> {
   }
 
   Widget _row(ConnectionSummary connection) {
-    final target =
+    final address =
         '${connection.username}@${connection.host}:${connection.port}';
+    final target = connection.transport == DesktopTransport.systemOpenSsh
+        ? '$address · 系统 ssh'
+        : address;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: DesktopSpacing.md),
       child: Column(
@@ -163,12 +166,8 @@ class _DesktopCatalogPageState extends State<DesktopCatalogPage> {
             runSpacing: DesktopSpacing.sm,
             children: [
               FilledButton(
-                onPressed: () => widget.openTarget(
-                  SessionTarget.saved(
-                    connectionId: connection.id,
-                    title: connectionTitle(connection),
-                  ),
-                ),
+                onPressed: () =>
+                    widget.openTarget(desktopSavedTarget(connection)),
                 child: const Text('连接'),
               ),
               Button(

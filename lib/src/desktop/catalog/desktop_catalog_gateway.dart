@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../../bindings/bindings.dart';
 import '../../catalog/catalog_requests.dart';
+import '../../terminal/session_target.dart';
 import '../workspace/desktop_target_options.dart';
 
 const _version = 1;
@@ -55,11 +56,12 @@ abstract class DesktopCatalogGateway {
   /// 保存失败时可抛 [DesktopCatalogRejected]；超时抛 [TimeoutException]。
   Future<CatalogResult> save(DesktopConnectionDraft draft);
 
-  /// 已有连接当前引用的 profile id；空串表示跟随应用默认。
-  Future<String> connectionProfileId(String id);
+  /// 已有连接的桌面目录投影：profile 引用（空串跟随应用默认）、连接方式与
+  /// System 私钥文件路径。不含任何秘密。
+  Future<DesktopConnectionSummary> connection(String id);
 
-  /// 可选的终端 profile 列表。
-  Future<List<DesktopProfileOption>> terminalProfiles();
+  /// 可选的终端 profile 列表与各传输的可用性。
+  Future<DesktopTargetOptions> targetOptions();
   Future<CatalogResult> duplicate(String id);
   Future<CatalogResult> delete(String id);
 }
@@ -80,6 +82,13 @@ class DesktopConnectionDraft {
   /// 终端 profile 引用；空串表示跟随应用默认。
   final String profileId;
 
+  /// 连接方式：Native SSH 或 System OpenSSH。System 时 [auth]、密码与 [keyId]
+  /// 不使用，认证由系统 ssh 处理。
+  final DesktopTransport transport;
+
+  /// System OpenSSH 可选的私钥文件路径；空串表示由 ssh 自己的配置与 agent 决定。
+  final String systemIdentityPath;
+
   const DesktopConnectionDraft({
     required this.id,
     required this.name,
@@ -92,8 +101,23 @@ class DesktopConnectionDraft {
     required this.keyId,
     required this.command,
     required this.profileId,
+    this.transport = DesktopTransport.nativeSsh,
+    this.systemIdentityPath = '',
   });
+
+  bool get systemSsh => transport == DesktopTransport.systemOpenSsh;
 }
+
+/// 目录连接的会话目标：System 连接带上传输，Prepare 按它选择目标种类。
+SessionTarget desktopSavedTarget(
+  ConnectionSummary item, {
+  String profileId = '',
+}) => SessionTarget.saved(
+  connectionId: item.id,
+  title: connectionTitle(item),
+  profileId: profileId,
+  systemSsh: item.transport == DesktopTransport.systemOpenSsh,
+);
 
 class RustDesktopCatalogGateway implements DesktopCatalogGateway {
   const RustDesktopCatalogGateway();
@@ -122,28 +146,7 @@ class RustDesktopCatalogGateway implements DesktopCatalogGateway {
         .map((pack) => pack.message)
         .firstWhere((result) => result.requestId == requestId)
         .timeout(_timeout);
-    DesktopSaveConnection(
-      version: _version,
-      requestId: requestId,
-      id: draft.id,
-      name: draft.name,
-      targetKind: DesktopCatalogTargetKind.ssh,
-      transport: DesktopTransport.nativeSsh,
-      host: draft.host,
-      port: draft.port,
-      username: draft.username,
-      auth: switch (draft.auth) {
-        AuthMethod.password => DesktopAuthMethod.password,
-        AuthMethod.publicKey => DesktopAuthMethod.publicKey,
-        AuthMethod.keyboardInteractive => DesktopAuthMethod.keyboardInteractive,
-      },
-      passwordAction: draft.passwordAction,
-      password: draft.password,
-      keyId: draft.keyId,
-      systemIdentityPath: '',
-      command: draft.command,
-      profileId: draft.profileId,
-    ).sendSignalToRust();
+    desktopSaveRequest(draft, requestId).sendSignalToRust();
     final result = await reply;
     if (result.error != DesktopCatalogError.none) {
       throw DesktopCatalogRejected(_desktopErrorText(result.error));
@@ -156,7 +159,7 @@ class RustDesktopCatalogGateway implements DesktopCatalogGateway {
   }
 
   @override
-  Future<String> connectionProfileId(String id) async {
+  Future<DesktopConnectionSummary> connection(String id) async {
     final requestId = _nextRequestId++;
     final reply = DesktopCatalogState.rustSignalStream
         .map((pack) => pack.message)
@@ -172,18 +175,56 @@ class RustDesktopCatalogGateway implements DesktopCatalogGateway {
       throw DesktopCatalogRejected(_desktopErrorText(state.error));
     }
     for (final connection in state.connections) {
-      if (connection.id == id) return connection.profileId;
+      if (connection.id == id) return connection;
     }
     throw const DesktopCatalogRejected('这条连接已不存在');
   }
 
   @override
-  Future<List<DesktopProfileOption>> terminalProfiles() async =>
-      (await const RustDesktopTargetOptionsGateway().query()).profiles;
+  Future<DesktopTargetOptions> targetOptions() =>
+      const RustDesktopTargetOptionsGateway().query();
 
   @override
   Future<CatalogResult> duplicate(String id) => duplicateConnection(id);
 
   @override
   Future<CatalogResult> delete(String id) => deleteConnection(id);
+}
+
+/// 草稿 → 桌面保存请求。System 连接不带密码与应用私钥；认证按是否给了私钥文件取
+/// PublicKey（ssh -i）或 Agent（由 ssh 的配置与 agent 决定）。
+DesktopSaveConnection desktopSaveRequest(
+  DesktopConnectionDraft draft,
+  int requestId,
+) {
+  final system = draft.systemSsh;
+  final identity = system ? draft.systemIdentityPath.trim() : '';
+  return DesktopSaveConnection(
+    version: _version,
+    requestId: requestId,
+    id: draft.id,
+    name: draft.name,
+    targetKind: DesktopCatalogTargetKind.ssh,
+    transport: draft.transport,
+    host: draft.host,
+    port: draft.port,
+    username: draft.username,
+    auth: system
+        ? (identity.isEmpty
+              ? DesktopAuthMethod.agent
+              : DesktopAuthMethod.publicKey)
+        : switch (draft.auth) {
+            AuthMethod.password => DesktopAuthMethod.password,
+            AuthMethod.publicKey => DesktopAuthMethod.publicKey,
+            AuthMethod.keyboardInteractive =>
+              DesktopAuthMethod.keyboardInteractive,
+          },
+    // 切到 System 时清掉可能存过的 Native 密码。
+    passwordAction: system ? PasswordAction.clear : draft.passwordAction,
+    password: system ? '' : draft.password,
+    keyId: system ? '' : draft.keyId,
+    systemIdentityPath: identity,
+    command: draft.command,
+    profileId: draft.profileId,
+  );
 }

@@ -374,10 +374,10 @@ class _TerminalPaneState extends State<TerminalPane> {
   }
 
   void _startLegacy() {
-    // 旧路径（移动端）没有本地 shell；不向 Rust 发空主机的连接请求。
-    if (_controller.target.isLocal) {
+    // 旧路径（移动端）没有本地 shell 与系统 ssh；不向 Rust 发空主机的连接请求。
+    if (_controller.target.runsLocalProcess) {
       _state = SessionState.failed;
-      _detail = '本地终端仅在桌面端可用';
+      _detail = _controller.target.isLocal ? '本地终端仅在桌面端可用' : '系统 ssh 仅在桌面端可用';
       return;
     }
     _branchReady = true;
@@ -480,10 +480,10 @@ class _TerminalPaneState extends State<TerminalPane> {
       _detail = normal.error.isNotEmpty ? normal.error : state?.detail ?? '';
       _hint = state?.hint ?? ConnectHint.none;
     });
-    // 本地 shell 以退出码 0 结束：与常见终端一致直接关窗格；非 0 保留并提供重新启动。
-    // 离开 closed（重新启动）后允许下一次退出再关闭。
+    // 本地 shell 或系统 ssh 以退出码 0 结束：与常见终端一致直接关窗格；非 0 保留并提供
+    // 重新启动。离开 closed（重新启动）后允许下一次退出再关闭。
     if (_state != SessionState.closed) _exitClosing = false;
-    if (_controller.target.isLocal &&
+    if (_controller.target.runsLocalProcess &&
         !_exitClosing &&
         !normal.closing &&
         normal.error.isEmpty &&
@@ -1379,7 +1379,8 @@ class _TerminalPaneState extends State<TerminalPane> {
         ? SessionState.failed
         : _state;
     final local = _controller.target.isLocal;
-    final exitCode = local ? localShellExitCode(_detail) : null;
+    final process = _controller.target.runsLocalProcess;
+    final exitCode = process ? localShellExitCode(_detail) : null;
     final banner = switch (bannerState) {
       SessionState.connecting when local => _Banner(
         icon: Icons.sync,
@@ -1422,12 +1423,16 @@ class _TerminalPaneState extends State<TerminalPane> {
             ? null
             : '服务器在局域网内时，需要允许 GuoSSHell 访问本地网络。',
       ),
-      SessionState.closed when local => _Banner(
+      SessionState.closed when process => _Banner(
         icon: Icons.link_off,
         text: exitCode == null ? '进程已退出' : '进程已退出（代码 $exitCode）',
         detail: exitCode == null ? _detail : '',
         actions: [
-          TextButton(onPressed: _reconnect, child: const Text('重新启动')),
+          // 系统 ssh 重新运行即重新连接。
+          TextButton(
+            onPressed: _reconnect,
+            child: Text(local ? '重新启动' : '重新连接'),
+          ),
           TextButton(onPressed: widget.onClose, child: const Text('关闭')),
         ],
       ),

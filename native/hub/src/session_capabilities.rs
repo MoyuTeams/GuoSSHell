@@ -1,4 +1,4 @@
-//! 桌面能力查询：只读配置修订，不探测网络、不搜索用户的 ssh 或启动本地程序。
+//! 桌面能力查询：只读配置修订，并在 PATH 中查找系统 ssh；不探测网络、不启动本地程序。
 
 use std::sync::Arc;
 
@@ -16,7 +16,7 @@ use crate::signals::{
 const MOBILE_UNAVAILABLE: &str = "移动端不支持桌面会话协议";
 const VERSION_UNAVAILABLE: &str = "不支持的桌面会话协议版本";
 const STORAGE_UNAVAILABLE: &str = "配置存储不可用";
-const SYSTEM_UNAVAILABLE: &str = "System OpenSSH 传输尚未实现";
+const SYSTEM_UNAVAILABLE: &str = "未找到系统 ssh（OpenSSH 客户端）";
 
 /// 无请求字段可以提升能力；唯一真实入口取 Rust 的编译目标。
 pub async fn handle(
@@ -35,6 +35,7 @@ pub async fn handle(
                 request_id,
                 DesktopCapabilitiesStatus::StorageUnavailable,
                 None,
+                false,
             )
         })
 }
@@ -49,6 +50,7 @@ fn build_for(
             request.request_id,
             DesktopCapabilitiesStatus::UnsupportedPlatform,
             None,
+            false,
         );
     }
     if request.protocol_version != DESKTOP_CONNECT_VERSION {
@@ -56,6 +58,7 @@ fn build_for(
             request.request_id,
             DesktopCapabilitiesStatus::UnsupportedVersion,
             None,
+            false,
         );
     }
     match repository.load_configuration() {
@@ -63,22 +66,27 @@ fn build_for(
             request.request_id,
             DesktopCapabilitiesStatus::Ready,
             Some(snapshot.revision),
+            connect::system_ssh_found(),
         ),
         Err(_) => result(
             request.request_id,
             DesktopCapabilitiesStatus::StorageUnavailable,
             None,
+            false,
         ),
     }
 }
 
 /// 为将来传输增加能力时只调整各分支：未通过安全、存储和运行条件的分支保持 false。
+/// `system_ssh` 为本次是否找到系统 ssh。
 fn result(
     request_id: u32,
     status: DesktopCapabilitiesStatus,
     revision: Option<u64>,
+    system_ssh: bool,
 ) -> DesktopCapabilitiesResult {
     let native_ready = status == DesktopCapabilitiesStatus::Ready;
+    let system_ready = native_ready && system_ssh;
     let native_reason = match status {
         DesktopCapabilitiesStatus::Ready => "",
         DesktopCapabilitiesStatus::UnsupportedPlatform => MOBILE_UNAVAILABLE,
@@ -105,10 +113,16 @@ fn result(
                     vec![]
                 },
             },
+            // 系统 ssh 自行处理认证（agent、私钥文件、密码均在终端里），应用不提供凭证。
             DesktopTransportCapability {
                 target: DesktopTargetKind::SystemOpenSsh,
-                backend_available: false,
-                unavailable_reason: SYSTEM_UNAVAILABLE.into(),
+                backend_available: system_ready,
+                unavailable_reason: match (native_ready, system_ready) {
+                    (_, true) => "",
+                    (true, false) => SYSTEM_UNAVAILABLE,
+                    (false, _) => native_reason,
+                }
+                .into(),
                 credentials: vec![],
             },
             // 本地 shell 与 Native 同在桌面目标可用，不需要凭证。
@@ -175,9 +189,13 @@ mod tests {
         );
         let system = &reply.transports[1];
         assert_eq!(system.target, DesktopTargetKind::SystemOpenSsh);
-        assert!(!system.backend_available);
-        assert!(!system.unavailable_reason.is_empty());
-        assert!(system.credentials.is_empty());
+        assert_eq!(system.backend_available, crate::connect::system_ssh_found());
+        assert_eq!(
+            system.unavailable_reason.is_empty(),
+            system.backend_available,
+            "不可用时给出原因"
+        );
+        assert!(system.credentials.is_empty(), "认证由系统 ssh 处理");
         let local = &reply.transports[2];
         assert_eq!(local.target, DesktopTargetKind::LocalShell);
         assert!(local.backend_available);
@@ -262,13 +280,19 @@ mod tests {
 
     #[test]
     fn unavailable_transports_keep_fixed_reasons_for_future_implementation() {
-        let ready = result(1, DesktopCapabilitiesStatus::Ready, Some(1));
-        let storage = result(2, DesktopCapabilitiesStatus::StorageUnavailable, None);
+        let ready = result(1, DesktopCapabilitiesStatus::Ready, Some(1), true);
+        assert!(ready.transports[1].backend_available);
+        assert!(ready.transports[1].unavailable_reason.is_empty());
+        let missing = result(1, DesktopCapabilitiesStatus::Ready, Some(1), false);
+        assert!(!missing.transports[1].backend_available);
+        assert_eq!(missing.transports[1].unavailable_reason, SYSTEM_UNAVAILABLE);
+        // 存储不可用时找到 ssh 也不开放，原因与 Native 相同。
+        let storage = result(2, DesktopCapabilitiesStatus::StorageUnavailable, None, true);
+        assert!(!storage.transports[1].backend_available);
         assert_eq!(
-            ready.transports[1].unavailable_reason,
-            storage.transports[1].unavailable_reason
+            storage.transports[1].unavailable_reason,
+            storage.transports[0].unavailable_reason
         );
-        assert_eq!(ready.transports[1].unavailable_reason, SYSTEM_UNAVAILABLE);
         // 本地 shell 与 Native 同条件可用，不可用时沿用同一原因。
         assert_eq!(
             storage.transports[2].unavailable_reason,

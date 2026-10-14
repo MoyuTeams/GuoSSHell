@@ -18,6 +18,7 @@ class DesktopTargetOptions {
     required this.profiles,
     required this.nativeAvailable,
     this.localAvailable = false,
+    this.systemAvailable = false,
     this.nativeReason = '',
     this.systemReason = 'System OpenSSH 尚未开放，不能启动连接。',
     this.localReason = '本地 shell 尚未开放，不能启动会话。',
@@ -25,6 +26,7 @@ class DesktopTargetOptions {
   final List<DesktopProfileOption> profiles;
   final bool nativeAvailable;
   final bool localAvailable;
+  final bool systemAvailable;
   final String nativeReason;
   final String systemReason;
   final String localReason;
@@ -106,6 +108,7 @@ class RustDesktopTargetOptionsGateway implements DesktopTargetOptionsGateway {
         ],
         nativeAvailable: available(DesktopTargetKind.nativeSsh),
         localAvailable: available(DesktopTargetKind.localShell),
+        systemAvailable: available(DesktopTargetKind.systemOpenSsh),
         nativeReason: reason(DesktopTargetKind.nativeSsh, 'Native SSH 当前不可用。'),
         systemReason: reason(
           DesktopTargetKind.systemOpenSsh,
@@ -131,6 +134,7 @@ SessionTarget desktopTargetWithProfile(
         connectionId: target.connectionId,
         title: target.title,
         profileId: profileId,
+        systemSsh: target.isSystemSsh,
       )
     : SessionTarget.quick(
         host: target.host,
@@ -148,14 +152,21 @@ class DesktopProfilePicker extends StatelessWidget {
     required this.value,
     required this.onChanged,
     required this.saved,
+    this.systemSsh = false,
   });
   final DesktopTargetOptions options;
   final String value;
   final ValueChanged<String> onChanged;
   final bool saved;
 
+  /// 所连目录连接是 System OpenSSH；传输由连接决定，这里只展示。
+  final bool systemSsh;
+
   String get _local =>
       options.localAvailable ? '可用，从侧栏「本地终端」打开' : options.localReason;
+
+  String get _system =>
+      options.systemAvailable ? '可用，在连接编辑器的「连接方式」中选择' : options.systemReason;
 
   @override
   Widget build(BuildContext context) => Column(
@@ -163,11 +174,16 @@ class DesktopProfilePicker extends StatelessWidget {
     children: [
       DropDownButton(
         key: const ValueKey('workspace-transport'),
-        title: const Text('传输：Native SSH'),
+        title: Text(systemSsh ? '传输：System OpenSSH' : '传输：Native SSH'),
         items: [
-          MenuFlyoutItem(text: const Text('Native SSH（当前传输）'), onPressed: null),
           MenuFlyoutItem(
-            text: Text('System OpenSSH：${options.systemReason}'),
+            text: Text(systemSsh ? 'Native SSH' : 'Native SSH（当前传输）'),
+            onPressed: null,
+          ),
+          MenuFlyoutItem(
+            text: Text(
+              systemSsh ? 'System OpenSSH（当前传输）' : 'System OpenSSH：$_system',
+            ),
             onPressed: null,
           ),
           MenuFlyoutItem(text: Text('本地 shell：$_local'), onPressed: null),
@@ -192,7 +208,7 @@ class DesktopProfilePicker extends StatelessWidget {
       const SizedBox(height: DesktopSpacing.sm),
       const Text('显式选择优先；未选择时由 Rust 解析连接引用／应用默认。'),
       const SizedBox(height: DesktopSpacing.md),
-      Text('System OpenSSH：${options.systemReason}'),
+      Text('System OpenSSH：$_system'),
       const SizedBox(height: DesktopSpacing.sm),
       Text('本地 shell：$_local'),
     ],

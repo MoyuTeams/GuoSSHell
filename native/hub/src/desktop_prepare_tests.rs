@@ -931,9 +931,10 @@ fn reservations_bound_actual_inflight_count_and_bytes_and_shutdown_releases_all(
 }
 
 #[test]
-fn forged_mobile_and_non_native_preparations_fail_before_any_resource_reservation() {
+fn forged_mobile_and_old_version_preparations_fail_before_any_resource_reservation() {
     let mut table = Preparations::enabled_for_test();
     let mut request = prepare(1, 1, 1);
+    request.target = DesktopTargetKind::SystemOpenSsh;
     assert!(matches!(
         table.begin_on(request.clone(), Instant::now(), false),
         Err(Failure::PlatformUnavailable)
@@ -943,13 +944,71 @@ fn forged_mobile_and_non_native_preparations_fail_before_any_resource_reservatio
         table.begin_on(request.clone(), Instant::now(), true),
         Err(Failure::UnsupportedVersion)
     ));
-    request.version = VERSION;
-    request.target = DesktopTargetKind::SystemOpenSsh;
-    assert!(matches!(
-        table.begin_on(request.clone(), Instant::now(), true),
-        Err(Failure::TransportUnavailable)
-    ));
     assert_eq!(table.budget.usage(), Usage::default());
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn system_ssh_prepares_without_password_and_rejects_option_like_targets() {
+    let fixture = Fixture::new();
+    let mut table = Preparations::enabled_for_test();
+    let request = DesktopPrepare {
+        target: DesktopTargetKind::SystemOpenSsh,
+        command: "uptime".into(),
+        ..prepare(11, 1, 50)
+    };
+    let (identity, lease, _) = table
+        .begin_on(request.clone(), Instant::now(), true)
+        .expect("系统 ssh 准备预约");
+    let loaded = fixture.load(&request, identity.clone(), lease).await;
+    let (reply, binary) = table.complete(loaded, Instant::now()).expect("准备完成");
+    assert_eq!(reply.state, State::Prepared);
+    drop(binary);
+
+    assert_eq!(
+        table
+            .start(&start(&request, &identity), secret(), Instant::now())
+            .err(),
+        Some(Failure::InvalidTarget),
+        "系统 ssh 不经应用收密码"
+    );
+    let launch = table
+        .start(
+            &start(&request, &identity),
+            SecretString::from(String::new()),
+            Instant::now(),
+        )
+        .expect("系统 ssh Start");
+    assert!(launch.target.target.is_system());
+    assert!(!launch.target.target.saved);
+    assert_eq!(launch.target.target.describe(), "fixture@example.test:22");
+    let profile = &launch.target.target.profile;
+    assert_eq!(
+        profile.transport,
+        rshell_m0::rshell_core::TransportKind::SystemOpenSsh
+    );
+    assert_eq!(
+        profile.authentication,
+        rshell_m0::rshell_core::AuthenticationKind::Agent
+    );
+    assert_eq!(profile.remote_command.as_deref(), Some("uptime"));
+    drop(launch);
+
+    // 上游参数校验在准备阶段生效：用户名带 '@' 会改写目的地，判为非法目标。
+    let mut invalid = DesktopPrepare {
+        target: DesktopTargetKind::SystemOpenSsh,
+        ..prepare(12, 1, 60)
+    };
+    invalid.username = "evil@other".into();
+    let (identity, lease, _) = table
+        .begin_on(invalid.clone(), Instant::now(), true)
+        .expect("预约");
+    let loaded = fixture.load(&invalid, identity, lease).await;
+    let (reply, _) = table.complete(loaded, Instant::now()).expect("准备结束");
+    assert_eq!(reply.state, State::Failed);
+    assert_eq!(reply.failure, Failure::InvalidTarget);
+    drop(table);
+    fixture.close();
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]

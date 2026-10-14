@@ -292,11 +292,11 @@ void main() {
         );
         expect(result.error, CatalogError.none);
         expect(
-          await _settle(
+          (await _settle(
             tester,
             '读取连接 profile',
-            gateway.connectionProfileId(result.connectionId),
-          ),
+            gateway.connection(result.connectionId),
+          )).profileId,
           profile,
         );
         return result.connectionId;

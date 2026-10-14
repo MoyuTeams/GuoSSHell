@@ -26,6 +26,9 @@ pub struct ConnectionSummary {
     /// PublicKey：用的私钥。
     pub key_id: String,
     pub command: String,
+    /// 连接方式。System OpenSSH 只在桌面列出，其认证由系统 ssh 处理：`auth` 固定为
+    /// Password 占位、`password_saved` 为 false、`key_id` 为空。
+    pub transport: DesktopTransport,
 }
 
 /// 目录（按 `query` 过滤后的有序列表）。查询或目录变化后整份重发。

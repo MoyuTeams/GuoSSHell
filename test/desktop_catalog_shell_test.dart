@@ -66,6 +66,7 @@ void main() {
               passwordSaved: false,
               keyId: '',
               command: '',
+              transport: DesktopTransport.nativeSsh,
             ),
           ],
         ),

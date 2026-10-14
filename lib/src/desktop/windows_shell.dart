@@ -225,9 +225,7 @@ class _WindowsShellState extends State<WindowsShell> {
       (ModalRoute.of(context)?.isCurrent ?? true);
 
   void _open(ConnectionSummary item) {
-    _workspace.openTab(
-      SessionTarget.saved(connectionId: item.id, title: connectionTitle(item)),
-    );
+    _workspace.openTab(desktopSavedTarget(item));
     _focusActive();
   }
 
@@ -285,6 +283,7 @@ class _WindowsShellState extends State<WindowsShell> {
                 options: options,
                 value: profile,
                 saved: true,
+                systemSsh: item.transport == DesktopTransport.systemOpenSsh,
                 onChanged: (id) => update(() => profile = id),
               ),
             ),
@@ -302,13 +301,7 @@ class _WindowsShellState extends State<WindowsShell> {
         ),
       );
       if (!mounted || selected == null) return;
-      _workspace.openTab(
-        SessionTarget.saved(
-          connectionId: item.id,
-          title: connectionTitle(item),
-          profileId: selected,
-        ),
-      );
+      _workspace.openTab(desktopSavedTarget(item, profileId: selected));
     } finally {
       _dialogOpen = false;
       _focusActive();

@@ -239,7 +239,9 @@ class _ConnectionRowState extends State<_ConnectionRow> {
             style: const TextStyle(fontSize: 13),
           ),
           subtitle: Text(
-            '${widget.item.username}@${widget.item.host}',
+            widget.item.transport == DesktopTransport.systemOpenSsh
+                ? '${widget.item.username}@${widget.item.host} · 系统 ssh'
+                : '${widget.item.username}@${widget.item.host}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 11, color: desktopMuted),

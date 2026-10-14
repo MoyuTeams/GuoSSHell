@@ -210,12 +210,30 @@ fn summaries(catalog: &ConnectionCatalog, query: &str) -> Vec<ConnectionSummary>
         .collect()
 }
 
-/// 边界上的连接摘要。只有本 App 写这个目录：私钥认证总是引用钥匙串里的私钥，
+/// 边界上的连接摘要。只有本 App 写这个目录：Native 的私钥认证总是引用钥匙串里的私钥，
 /// 也不会有 agent 认证。
 fn summary(profile: &ConnectionProfile) -> Option<ConnectionSummary> {
-    // 移动旧列表不能展示移动旧保存动作无法编辑或连接的 System 项。
-    if profile.transport != TransportKind::NativeSsh {
-        return None;
+    summary_for(profile, crate::connect::desktop_supported())
+}
+
+fn summary_for(profile: &ConnectionProfile, desktop: bool) -> Option<ConnectionSummary> {
+    if profile.transport == TransportKind::SystemOpenSsh {
+        // 移动旧列表不能展示移动端无法编辑或连接的 System 项；桌面由桌面编辑器与 V2 会话处理。
+        if !desktop {
+            return None;
+        }
+        return Some(ConnectionSummary {
+            id: profile.id.0.to_string(),
+            name: profile.name.clone(),
+            host: profile.host.clone(),
+            port: profile.port,
+            username: profile.username.clone(),
+            auth: AuthMethod::Password,
+            password_saved: false,
+            key_id: String::new(),
+            command: profile.remote_command.clone().unwrap_or_default(),
+            transport: DesktopTransport::SystemOpenSsh,
+        });
     }
     let auth = match profile.authentication {
         AuthenticationKind::Password => AuthMethod::Password,
@@ -236,6 +254,7 @@ fn summary(profile: &ConnectionProfile) -> Option<ConnectionSummary> {
         password_saved: auth == AuthMethod::Password && profile.credential_ref.is_some(),
         key_id: keys::key_id(profile).unwrap_or_default().to_owned(),
         command: profile.remote_command.clone().unwrap_or_default(),
+        transport: DesktopTransport::NativeSsh,
     })
 }
 
@@ -910,7 +929,18 @@ mod tests {
         assert_eq!(entry.system_identity_path, "user selected identity");
         assert!(!entry.password_saved);
         assert!(entry.key_id.is_empty());
-        assert!(super::summaries(&load(&context).expect("目录"), "").is_empty());
+        // 旧列表：移动端隐藏 System 项；桌面列出且不带凭据信息。
+        let profile = load(&context)
+            .expect("目录")
+            .connections
+            .into_values()
+            .next()
+            .expect("System 项");
+        assert!(super::summary_for(&profile, false).is_none());
+        let listed = super::summary_for(&profile, true).expect("桌面列出 System 项");
+        assert_eq!(listed.transport, DesktopTransport::SystemOpenSsh);
+        assert!(!listed.password_saved);
+        assert!(listed.key_id.is_empty());
 
         let mut legacy = request(AuthMethod::Password, PasswordAction::Clear, "");
         legacy.id = native_id.clone();

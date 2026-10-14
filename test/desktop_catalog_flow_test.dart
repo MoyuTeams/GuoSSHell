@@ -13,6 +13,8 @@ import 'package:guosh_shell/src/desktop/keys/desktop_key_actions.dart';
 import 'package:guosh_shell/src/desktop/keys/desktop_key_sync_state.dart';
 import 'package:guosh_shell/src/desktop/legacy_material_surface.dart';
 import 'package:guosh_shell/src/desktop/workspace/desktop_target_options.dart';
+import 'package:guosh_shell/src/terminal/desktop_ordered_session.dart'
+    show desktopTargetKind;
 import 'package:guosh_shell/src/terminal/session_target.dart';
 
 const saved = ConnectionSummary(
@@ -25,6 +27,7 @@ const saved = ConnectionSummary(
   passwordSaved: true,
   keyId: '',
   command: '',
+  transport: DesktopTransport.nativeSsh,
 );
 
 const emptyKeyState = KeyListState(
@@ -63,17 +66,39 @@ class FakeCatalog implements DesktopCatalogGateway {
   bool profilesFail = false;
   String currentProfileId = '';
   bool profileIdFail = false;
+  DesktopTransport currentTransport = DesktopTransport.nativeSsh;
+  String currentIdentityPath = '';
+  bool systemAvailable = true;
 
   @override
-  Future<String> connectionProfileId(String id) async {
+  Future<DesktopConnectionSummary> connection(String id) async {
     if (profileIdFail) throw StateError('读取失败');
-    return currentProfileId;
+    return DesktopConnectionSummary(
+      id: id,
+      name: '',
+      targetKind: DesktopCatalogTargetKind.ssh,
+      transport: currentTransport,
+      host: '',
+      port: 22,
+      username: '',
+      auth: DesktopAuthMethod.agent,
+      passwordSaved: false,
+      keyId: '',
+      systemIdentityPath: currentIdentityPath,
+      command: '',
+      profileId: currentProfileId,
+    );
   }
 
   @override
-  Future<List<DesktopProfileOption>> terminalProfiles() async {
+  Future<DesktopTargetOptions> targetOptions() async {
     if (profilesFail) throw StateError('读取失败');
-    return profiles;
+    return DesktopTargetOptions(
+      profiles: profiles,
+      nativeAvailable: true,
+      systemAvailable: systemAvailable,
+      systemReason: '未找到系统 ssh（测试）',
+    );
   }
 
   CatalogResult result(CatalogError error) =>
@@ -673,5 +698,117 @@ void main() {
     await pickProfile(tester, '终端甲');
     await save(tester);
     expect(fake.drafts.single.profileId, 'p1');
+  });
+
+  Future<void> pickTransport(WidgetTester tester, String label) async {
+    final combo = find.byKey(const fluent.Key('catalog-transport'));
+    await reveal(tester, combo);
+    await tester.tap(combo);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(label).last);
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('选 System OpenSSH 后隐藏密码与认证方式，保存携带连接方式与私钥文件', (tester) async {
+    final fake = FakeCatalog()..saveError = CatalogError.storage;
+    await pumpEditor(tester, fake);
+    await field(tester, '主机', 'example.test');
+    await field(tester, '用户名', 'tester');
+    await field(tester, '密码', 'must-not-leak');
+    await pickTransport(tester, 'System OpenSSH');
+    expect(find.byKey(const fluent.Key('catalog-auth')), findsNothing);
+    expect(find.byKey(const fluent.ValueKey('catalog-field-密码')), findsNothing);
+    expect(find.byKey(const fluent.Key('catalog-save-password')), findsNothing);
+    expect(find.textContaining('由系统 ssh 处理认证'), findsOneWidget);
+    await save(tester);
+    var draft = fake.drafts.last;
+    expect(draft.transport, DesktopTransport.systemOpenSsh);
+    expect(draft.systemIdentityPath, isEmpty);
+    var request = desktopSaveRequest(draft, 1);
+    expect(request.transport, DesktopTransport.systemOpenSsh);
+    expect(request.auth, DesktopAuthMethod.agent);
+    expect(request.password, isEmpty);
+    expect(request.passwordAction, PasswordAction.clear);
+    expect(request.keyId, isEmpty);
+
+    await field(tester, '私钥文件（可选）', ' C:/keys/id_test ');
+    await save(tester);
+    draft = fake.drafts.last;
+    request = desktopSaveRequest(draft, 2);
+    expect(request.auth, DesktopAuthMethod.publicKey);
+    expect(request.systemIdentityPath, 'C:/keys/id_test');
+    expect(request.password, isEmpty);
+
+    // 切回 Native：密码与认证方式恢复，System 路径不随请求发送。
+    await pickTransport(tester, 'Native SSH');
+    expect(find.byKey(const fluent.Key('catalog-auth')), findsOneWidget);
+    await save(tester);
+    request = desktopSaveRequest(fake.drafts.last, 3);
+    expect(request.transport, DesktopTransport.nativeSsh);
+    expect(request.auth, DesktopAuthMethod.password);
+    expect(request.systemIdentityPath, isEmpty);
+    expect(request.password, 'must-not-leak');
+  });
+
+  testWidgets('系统 ssh 不可用时 System 选项禁用并提示原因', (tester) async {
+    final fake = FakeCatalog()..systemAvailable = false;
+    await pumpEditor(tester, fake);
+    expect(find.text('System OpenSSH 不可用：未找到系统 ssh（测试）'), findsOneWidget);
+    final combo = find.byKey(const fluent.Key('catalog-transport'));
+    await reveal(tester, combo);
+    await tester.tap(combo);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('System OpenSSH').last, warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const fluent.Key('catalog-auth')), findsOneWidget);
+  });
+
+  testWidgets('编辑已有 System 连接读回私钥文件路径，打开时 Prepare 走 SystemOpenSsh', (
+    tester,
+  ) async {
+    const system = ConnectionSummary(
+      id: 'system-1',
+      name: '系统连接',
+      host: 'example.test',
+      port: 22,
+      username: 'tester',
+      auth: AuthMethod.password,
+      passwordSaved: false,
+      keyId: '',
+      command: '',
+      transport: DesktopTransport.systemOpenSsh,
+    );
+    final fake = FakeCatalog()
+      ..currentTransport = DesktopTransport.systemOpenSsh
+      ..currentIdentityPath = '/home/tester/.ssh/id_work'
+      ..saveError = CatalogError.storage;
+    await pumpEditor(tester, fake, existing: system);
+    expect(find.byKey(const fluent.Key('catalog-auth')), findsNothing);
+    expect(
+      tester
+          .widget<fluent.TextBox>(
+            find.byKey(const fluent.ValueKey('catalog-field-私钥文件（可选）')),
+          )
+          .controller!
+          .text,
+      '/home/tester/.ssh/id_work',
+    );
+    await save(tester);
+    expect(fake.drafts.last.transport, DesktopTransport.systemOpenSsh);
+    expect(fake.drafts.last.systemIdentityPath, '/home/tester/.ssh/id_work');
+
+    final target = desktopSavedTarget(system, profileId: 'p1');
+    expect(target.isSystemSsh, isTrue);
+    expect(target.runsLocalProcess, isTrue);
+    expect(target.connectionId, 'system-1');
+    expect(desktopTargetKind(target), DesktopTargetKind.systemOpenSsh);
+    expect(
+      desktopTargetKind(desktopTargetWithProfile(target, 'p2')),
+      DesktopTargetKind.systemOpenSsh,
+    );
+    expect(
+      desktopTargetKind(desktopSavedTarget(saved)),
+      DesktopTargetKind.nativeSsh,
+    );
   });
 }

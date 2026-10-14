@@ -3,11 +3,14 @@
 运行：pwsh -NoProfile -File scripts/ci/windows_auth_check.ps1
 受控派生中止验证：增加 -VerifyKeygenAbort（仅此模式使用系统已有 .NET Framework 编译器）。
 终端 profile 端到端：增加 -Target profile（fixture 带 GUOSH_DEMO_ENQ=1，跑 desktop_profile_effect_smoke_test）。
+System OpenSSH 端到端：增加 -Target system（跑 desktop_system_ssh_smoke_test）。本轮在运行目录写 ssh 配置，
+经 GUOSH_SYSTEM_SSH_CONFIG（仅 debug 构建读取）让系统 ssh 以 -F 使用它：known_hosts、身份文件均在本轮目录，
+不连 agent、只用密码认证；Windows OpenSSH 不按 HOME/USERPROFILE 定位 ~/.ssh，故不用重定向主目录的方式。
 本轮 fixture 与应用数据完全隔离；成功必须包含进程树退出、精确目录删除及环境恢复。
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('auth', 'profile')][string] $Target = 'auth',
+    [ValidateSet('auth', 'profile', 'system')][string] $Target = 'auth',
     [ValidateRange(60, 3600)][int] $TimeoutSeconds = 1200,
     [switch] $FlutterChild,
     [switch] $ServerChild,
@@ -74,6 +77,7 @@ if ($FlutterChild -or $ServerChild) {
         $testFile = @{
             auth = 'integration_test/desktop_ssh_auth_smoke_test.dart'
             profile = 'integration_test/desktop_profile_effect_smoke_test.dart'
+            system = 'integration_test/desktop_system_ssh_smoke_test.dart'
         }[$Target]
         & flutter test $testFile -d windows --no-pub --reporter expanded
         exit $LASTEXITCODE
@@ -83,6 +87,7 @@ if ($FlutterChild -or $ServerChild) {
 foreach ($tool in @('cargo', 'flutter', 'ssh-keygen', 'pwsh')) {
     $null = Get-Command $tool -ErrorAction Stop
 }
+if ($Target -eq 'system') { $null = Get-Command ssh -ErrorAction Stop }
 
 # Windows Job 的内核归属不会被 PID 重用、进程重挂或名称相同的其他 worker 混淆。
 # 子孙进程自动归属，禁止 breakaway；句柄关闭仍会兜底终止本轮 Job。
@@ -206,7 +211,7 @@ $names = @(
     'GUOSH_HOST', 'GUOSH_PORT', 'GUOSH_USER', 'GUOSH_PASS', 'GUOSH_CMD',
     'GUOSH_DEMO_DATA', 'GUOSH_DEMO_INPUT_LOG', 'GUOSH_DEMO_ENQ', 'GUOSH_DESKTOP_TEST_DATA',
     'GUOSH_AUTH_RUN', 'GUOSH_AUTH_RUN_ID', 'GUOSH_AUTH_PORT', 'GUOSH_AUTH_FINGERPRINT',
-    'GUOSH_AUTH_REAL_KEYGEN', 'PATH'
+    'GUOSH_AUTH_REAL_KEYGEN', 'GUOSH_SYSTEM_SSH_CONFIG', 'PATH'
 )
 $previous = @{}
 foreach ($name in $names) {
@@ -264,7 +269,8 @@ try {
     } finally { $probe.Stop() }
     # 不使用 AppReady 的 debug 自动连接，必须从常驻真实目录发起。
     # ENQ 探针只由 profile 目标显式开启，继承值不得影响认证 smoke。
-    foreach ($name in @('GUOSH_HOST', 'GUOSH_PORT', 'GUOSH_USER', 'GUOSH_PASS', 'GUOSH_CMD', 'GUOSH_DEMO_ENQ')) {
+    foreach ($name in @('GUOSH_HOST', 'GUOSH_PORT', 'GUOSH_USER', 'GUOSH_PASS', 'GUOSH_CMD', 'GUOSH_DEMO_ENQ',
+            'GUOSH_SYSTEM_SSH_CONFIG')) {
         if (Test-Path -LiteralPath "Env:$name") {
             Remove-Item -LiteralPath "Env:$name" -ErrorAction Stop
         }
@@ -278,6 +284,31 @@ try {
         GUOSH_AUTH_PORT = "$port"
     }
     if ($Target -eq 'profile') { $values.GUOSH_DEMO_ENQ = '1' }
+    if ($Target -eq 'system') {
+        # 只在测试夹具层面隔离：配置、known_hosts、身份文件全在本轮目录；主机名别名只在此配置里
+        # 定义，配置未生效时 ssh 无法解析目标，不会连到别处，也不会写用户自己的 known_hosts。
+        $sshDir = (New-Item -ItemType Directory -Path (Join-Path $run 'ssh')).FullName
+        Assert-OwnedDirectory $sshDir (Join-Path $run 'ssh')
+        $sshPath = { param([string] $name) '"' + ((Join-Path $sshDir $name) -replace '\\', '/') + '"' }
+        [IO.File]::WriteAllText((Join-Path $sshDir 'global_known_hosts'), '')
+        $sshConfig = @(
+            'Host guosh-system-smoke'
+            '  HostName 127.0.0.1'
+            "  Port $port"
+            'Host *'
+            "  UserKnownHostsFile $(& $sshPath 'known_hosts')"
+            "  GlobalKnownHostsFile $(& $sshPath 'global_known_hosts')"
+            "  IdentityFile $(& $sshPath 'no_identity')"
+            '  IdentitiesOnly yes'
+            '  IdentityAgent none'
+            '  PubkeyAuthentication no'
+            '  PreferredAuthentications password'
+            '  UpdateHostKeys no'
+            '  NumberOfPasswordPrompts 1'
+        ) -join "`n"
+        [IO.File]::WriteAllText((Join-Path $sshDir 'config'), "$sshConfig`n")
+        $values.GUOSH_SYSTEM_SSH_CONFIG = Join-Path $sshDir 'config'
+    }
     foreach ($entry in $values.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
     }
@@ -442,6 +473,17 @@ try {
             throw 'fixture profile 输入日志不符'
         }
         '[windows-auth] fixture 证据：TERM vt220/xterm-256color；无 exec；profile 输入日志首尾匹配'
+    } elseif ($Target -eq 'system') {
+        $echoHex = [Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes('systemsmoke42')).ToLowerInvariant()
+        if ($received -cne $echoHex) { throw 'fixture 系统 ssh 输入日志不精确匹配' }
+        # 系统 ssh 只把本轮 fixture 主机密钥记进本轮 known_hosts。
+        $hostKey = ([IO.File]::ReadAllText((Join-Path $fixture 'hostkey.pub')).Trim() -split '\s+')[1]
+        $recorded = @([IO.File]::ReadAllLines((Join-Path $run 'ssh/known_hosts')) |
+            Where-Object { $_.Trim() -ne '' })
+        if ($recorded.Count -ne 1 -or -not $recorded[0].Contains("ssh-ed25519 $hostKey")) {
+            throw '本轮 known_hosts 未精确记录 fixture 主机密钥'
+        }
+        '[windows-auth] fixture 证据：系统 ssh 密码认证 / channel / shell；无 exec；输入日志精确匹配；known_hosts 仅本轮 fixture'
     } else {
         $echoHex = [Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes('authsmokeecho123authaftermanagement456')).ToLowerInvariant()
         if ($received -cne $echoHex) { throw 'fixture 原生输入日志不精确匹配' }
@@ -518,6 +560,10 @@ if ($null -ne $failure) { throw $failure }
 if (-not $passed) { throw '缺少本轮通过证据' }
 if ($Target -eq 'profile') {
     '[windows-auth] PROFILE PASS：设置协议建 profile→V2 会话 TERM/answerback/绑定/左右 Alt 生效，默认 profile 对照通过；清理无残留'
+    return
+}
+if ($Target -eq 'system') {
+    '[windows-auth] SYSTEM PASS：编辑器保存 System 连接→系统 ssh 在终端内首见主机密钥与密码→回显→关闭窗格；清理无残留'
     return
 }
 '[windows-auth] PASS：Windows 阶段三真实目录→Fluent 首见认证→Native SSH 回显→断开/返回管理；清理无残留'

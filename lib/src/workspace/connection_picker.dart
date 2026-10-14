@@ -95,6 +95,9 @@ class _ConnectionPickerState extends State<_ConnectionPicker> {
                   SessionTarget.saved(
                     connectionId: connection.id,
                     title: connectionTitle(connection),
+                    // System 连接只在桌面列出，打开时须走 SystemOpenSsh 目标。
+                    systemSsh:
+                        connection.transport == DesktopTransport.systemOpenSsh,
                   ),
                 ),
               ),

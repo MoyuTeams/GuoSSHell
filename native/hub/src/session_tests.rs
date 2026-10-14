@@ -36,6 +36,9 @@ mod native;
 #[path = "session_local_tests.rs"]
 mod local;
 
+#[path = "session_system_tests.rs"]
+mod system;
+
 fn context(vault: Arc<dyn CredentialVault>) -> Arc<AppContext> {
     context_at(
         vault,
@@ -124,22 +127,52 @@ fn binding(index: u8, action: &str) -> KeyBinding {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 #[tokio::test]
-async fn desktop_targets_that_are_not_implemented_never_enter_the_transport() {
+async fn desktop_system_ssh_resolves_saved_and_quick_targets_without_starting_ssh() {
     let context = context(Arc::new(MemoryCredentialVault::new()));
     let mut request = desktop(DesktopTargetKind::SystemOpenSsh);
     request.host = "example.test".into();
-    request.port = 22;
+    request.port = 2200;
     request.username = "user".into();
-    let result = tokio::time::timeout(
+    let quick = tokio::time::timeout(
         Duration::from_secs(2),
         connect::resolve_desktop(&context, request),
     )
     .await
-    .expect("拒绝不等待网络或子进程");
+    .expect("解析不等待网络或子进程")
+    .expect("快速系统 ssh 目标");
+    assert!(quick.target.is_system());
+    assert!(!quick.target.saved);
+    assert_eq!(quick.target.profile.transport, TransportKind::SystemOpenSsh);
+    assert_eq!(
+        quick.target.profile.authentication,
+        AuthenticationKind::Agent
+    );
+    assert_eq!(quick.target.describe(), "user@example.test:2200");
+
+    // 目录里的 System 连接按其 transport 解析；以 Native 目标打开即拒绝。
+    let mut saved = profile();
+    saved.username = "user".into();
+    saved.transport = TransportKind::SystemOpenSsh;
+    saved.authentication = AuthenticationKind::Agent;
+    let id = saved.id.0.to_string();
+    context
+        .credentials
+        .apply_catalog(CatalogMutation::Create(saved), SecretUpdate::Unchanged)
+        .expect("保存 System 目录连接");
+    let mut by_id = desktop(DesktopTargetKind::SystemOpenSsh);
+    by_id.connection_id = id.clone();
+    let resolved = connect::resolve_desktop(&context, by_id)
+        .await
+        .expect("目录系统 ssh 目标");
+    assert!(resolved.target.is_system());
+    assert!(resolved.target.saved);
+    let mut as_native = desktop(DesktopTargetKind::NativeSsh);
+    as_native.connection_id = id;
     assert!(matches!(
-        result,
-        Err((DesktopConnectError::TransportUnavailable, _))
+        connect::resolve_desktop(&context, as_native).await,
+        Err((DesktopConnectError::InvalidField, _))
     ));
 }
 

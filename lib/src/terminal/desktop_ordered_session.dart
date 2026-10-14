@@ -599,15 +599,19 @@ class DesktopOrderedSession extends ChangeNotifier {
   static Uint64 _u64(int value) => Uint64(BigInt.from(value));
 }
 
-/// Prepare 的目标种类：本地终端走 LocalShell，其余走 Native SSH。
+/// Prepare 的目标种类：本地终端走 LocalShell，System 连接走 SystemOpenSsh，其余走 Native SSH。
 DesktopTargetKind desktopTargetKind(SessionTarget target) =>
-    target.isLocal ? DesktopTargetKind.localShell : DesktopTargetKind.nativeSsh;
+    switch (target.kind) {
+      SessionTargetKind.local => DesktopTargetKind.localShell,
+      SessionTargetKind.systemSsh => DesktopTargetKind.systemOpenSsh,
+      SessionTargetKind.ssh => DesktopTargetKind.nativeSsh,
+    };
 
 final _localExit = RegExp(
   r'^exit code=Some\((-?\d+)\) success=(?:true|false)$',
 );
 
-/// 本地 shell 退出后 Rust 状态 detail 的固定格式 `exit code=Some(N) success=…`
+/// 本地 shell 或系统 ssh 退出后 Rust 状态 detail 的固定格式 `exit code=Some(N) success=…`
 /// 中的退出码；其他格式（含 `None`）返回 null。
 int? localShellExitCode(String detail) {
   final match = _localExit.firstMatch(detail);
