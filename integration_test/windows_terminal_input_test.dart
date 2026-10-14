@@ -12,6 +12,7 @@ import 'package:path_provider_platform_interface/path_provider_platform_interfac
 import 'package:terminal_view/terminal_view.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:guosh_shell/main.dart' as app;
+import 'package:guosh_shell/src/desktop/settings/desktop_settings_page.dart';
 import 'package:guosh_shell/src/terminal/terminal_pane.dart';
 
 class _IsolatedPaths extends PathProviderPlatform {
@@ -160,9 +161,25 @@ void main() {
     });
     await checkInput('中文输入', () => native.commit('中文输入'));
 
-    // 设置弹窗关闭后由工作区恢复焦点。
+    // 设置页由终端经 V2 有序输入交 Rust 判定 Ctrl+, 打开；关闭后由工作区恢复焦点。
+    Future<void> until(String what, bool Function() ready) async {
+      final limit = DateTime.now().add(const Duration(seconds: 5));
+      while (!ready()) {
+        if (DateTime.now().isAfter(limit)) fail('等待超时：$what');
+        await tick(100);
+      }
+    }
+
     await shortcut(LogicalKeyboardKey.comma);
-    await tester.tap(find.text('完成'));
+    await until(
+      '设置页打开',
+      () => find.byType(DesktopSettingsPage).evaluate().isNotEmpty,
+    );
+    await tester.tap(find.byKey(const ValueKey('close-settings')));
+    await until(
+      '设置页关闭',
+      () => find.byType(DesktopSettingsPage).evaluate().isEmpty,
+    );
     await tick(350);
     await checkInput('afterdialog', () => native.text('afterdialog'));
 
@@ -178,13 +195,7 @@ void main() {
       '用户名': 'probe',
       '密码': 'probe',
     }.entries) {
-      final label = find.byWidgetPredicate(
-        (w) => w is f.InfoLabel && w.label.toPlainText() == entry.key,
-      );
-      final field = find.descendant(
-        of: label,
-        matching: find.byType(f.TextBox),
-      );
+      final field = find.byKey(ValueKey('catalog-field-${entry.key}'));
       expect(field, findsOneWidget, reason: '快速连接表单：${entry.key}');
       tester.widget<f.TextBox>(field).controller!.text = entry.value;
     }
