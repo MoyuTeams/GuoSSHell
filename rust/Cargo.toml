@@ -40,9 +40,9 @@ keyring-core = "1.0.0"
 # 源为团队 fork MoyuTeams/rsHell（基于官方 hugefiver/rsHell，补丁见 UPSTREAM.md）。
 # 升级时同时更新这里的 rev 与根 Cargo.lock，再跑上游及 GuoSSHell 的回归。
 # 代价：全新环境首次构建需要网络。
-rshell-core = { git = "https://github.com/MoyuTeams/rsHell", rev = "0ed54be086b2dc7aae2b4b2cc5126adad7ebb347" }
-rshell-session = { git = "https://github.com/MoyuTeams/rsHell", rev = "0ed54be086b2dc7aae2b4b2cc5126adad7ebb347" }
-rshell-storage = { git = "https://github.com/MoyuTeams/rsHell", rev = "0ed54be086b2dc7aae2b4b2cc5126adad7ebb347" }
+rshell-core = { git = "https://github.com/MoyuTeams/rsHell", rev = "b4311370e633c08837d0a2d18fd77ec874305827" }
+rshell-session = { git = "https://github.com/MoyuTeams/rsHell", rev = "b4311370e633c08837d0a2d18fd77ec874305827" }
+rshell-storage = { git = "https://github.com/MoyuTeams/rsHell", rev = "b4311370e633c08837d0a2d18fd77ec874305827" }
 # 与 rshell-session 保持完全相同的版本与 feature，避免同一个 crate 出现两份不同类型。
 russh = { version = "=0.62.5", git = "https://github.com/MoyuTeams/russh", rev = "392265d2b622fdce3fd57f836db134773c475950", default-features = false, features = ["flate2", "ring", "rsa"] }
 secrecy = "0.10.3"
