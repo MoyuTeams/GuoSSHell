@@ -2,10 +2,12 @@
 阶段三 Windows 真实目录与 Fluent SSH 认证验收。仅使用已有 Flutter、Cargo、ssh-keygen。
 运行：pwsh -NoProfile -File scripts/ci/windows_auth_check.ps1
 受控派生中止验证：增加 -VerifyKeygenAbort（仅此模式使用系统已有 .NET Framework 编译器）。
+终端 profile 端到端：增加 -Target profile（fixture 带 GUOSH_DEMO_ENQ=1，跑 desktop_profile_effect_smoke_test）。
 本轮 fixture 与应用数据完全隔离；成功必须包含进程树退出、精确目录删除及环境恢复。
 #>
 [CmdletBinding()]
 param(
+    [ValidateSet('auth', 'profile')][string] $Target = 'auth',
     [ValidateRange(60, 3600)][int] $TimeoutSeconds = 1200,
     [switch] $FlutterChild,
     [switch] $ServerChild,
@@ -69,7 +71,11 @@ if ($FlutterChild -or $ServerChild) {
                 exit $child.ExitCode
             } finally { $child.Dispose() }
         }
-        & flutter test integration_test/desktop_ssh_auth_smoke_test.dart -d windows --no-pub --reporter expanded
+        $testFile = @{
+            auth = 'integration_test/desktop_ssh_auth_smoke_test.dart'
+            profile = 'integration_test/desktop_profile_effect_smoke_test.dart'
+        }[$Target]
+        & flutter test $testFile -d windows --no-pub --reporter expanded
         exit $LASTEXITCODE
     } finally { Pop-Location }
 }
@@ -198,7 +204,7 @@ function Stop-OwnedProcess($Process, $Job) {
 
 $names = @(
     'GUOSH_HOST', 'GUOSH_PORT', 'GUOSH_USER', 'GUOSH_PASS', 'GUOSH_CMD',
-    'GUOSH_DEMO_DATA', 'GUOSH_DEMO_INPUT_LOG', 'GUOSH_DESKTOP_TEST_DATA',
+    'GUOSH_DEMO_DATA', 'GUOSH_DEMO_INPUT_LOG', 'GUOSH_DEMO_ENQ', 'GUOSH_DESKTOP_TEST_DATA',
     'GUOSH_AUTH_RUN', 'GUOSH_AUTH_RUN_ID', 'GUOSH_AUTH_PORT', 'GUOSH_AUTH_FINGERPRINT',
     'GUOSH_AUTH_REAL_KEYGEN', 'PATH'
 )
@@ -257,7 +263,8 @@ try {
         $port = ([Net.IPEndPoint] $probe.LocalEndpoint).Port
     } finally { $probe.Stop() }
     # 不使用 AppReady 的 debug 自动连接，必须从常驻真实目录发起。
-    foreach ($name in @('GUOSH_HOST', 'GUOSH_PORT', 'GUOSH_USER', 'GUOSH_PASS', 'GUOSH_CMD')) {
+    # ENQ 探针只由 profile 目标显式开启，继承值不得影响认证 smoke。
+    foreach ($name in @('GUOSH_HOST', 'GUOSH_PORT', 'GUOSH_USER', 'GUOSH_PASS', 'GUOSH_CMD', 'GUOSH_DEMO_ENQ')) {
         if (Test-Path -LiteralPath "Env:$name") {
             Remove-Item -LiteralPath "Env:$name" -ErrorAction Stop
         }
@@ -270,6 +277,7 @@ try {
         GUOSH_AUTH_RUN_ID = $runId
         GUOSH_AUTH_PORT = "$port"
     }
+    if ($Target -eq 'profile') { $values.GUOSH_DEMO_ENQ = '1' }
     foreach ($entry in $values.GetEnumerator()) {
         [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
     }
@@ -392,7 +400,8 @@ try {
     $gate = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $gateName)
     $flutterJob = [GuoSSHellAuthJob]::new()
     $flutter = Start-Process -FilePath $pwsh -ArgumentList @(
-        '-NoProfile', '-File', "`"$PSCommandPath`"", '-FlutterChild', '-GateName', $gateName
+        '-NoProfile', '-File', "`"$PSCommandPath`"", '-FlutterChild', '-GateName', $gateName,
+        '-Target', $Target
     ) -WorkingDirectory $root -NoNewWindow -PassThru `
         -RedirectStandardOutput (Join-Path $run 'flutter.stdout.log') `
         -RedirectStandardError (Join-Path $run 'flutter.stderr.log')
@@ -421,9 +430,23 @@ try {
     }
     if ($serverLog.Contains('exec_request')) { throw 'fixture 错走 exec，本轮不能算通过' }
     $received = [IO.File]::ReadAllText((Join-Path $run 'received.txt')) -replace '\s', ''
-    $echoHex = [Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes('authsmokeecho123authaftermanagement456')).ToLowerInvariant()
-    if ($received -cne $echoHex) { throw 'fixture 原生输入日志不精确匹配' }
-    '[windows-auth] fixture 证据：password accepted / channel / shell；无 exec；输入日志精确匹配'
+    if ($Target -eq 'profile') {
+        foreach ($marker in @('pty_request term=vt220 ', 'pty_request term=xterm-256color ')) {
+            if (-not $serverLog.Contains($marker)) { throw 'fixture 缺少 profile/默认 TERM 证据' }
+        }
+        # 非默认 profile：answerback GUOSH-AB、F5→DEL、左 Alt+x→ESC x、右 Alt+x→x；
+        # 默认 profile：其 answerback（逐字节由 Dart 端核对）后 F5→CSI 15~。
+        $customHex = [Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes('GUOSH-AB')).ToLowerInvariant() + '7f1b7878'
+        if (-not $received.StartsWith($customHex, [StringComparison]::Ordinal) -or
+            -not $received.EndsWith('1b5b31357e', [StringComparison]::Ordinal)) {
+            throw 'fixture profile 输入日志不符'
+        }
+        '[windows-auth] fixture 证据：TERM vt220/xterm-256color；无 exec；profile 输入日志首尾匹配'
+    } else {
+        $echoHex = [Convert]::ToHexString([Text.Encoding]::UTF8.GetBytes('authsmokeecho123authaftermanagement456')).ToLowerInvariant()
+        if ($received -cne $echoHex) { throw 'fixture 原生输入日志不精确匹配' }
+        '[windows-auth] fixture 证据：password accepted / channel / shell；无 exec；输入日志精确匹配'
+    }
     $passed = $true
 } catch {
     $failure = $_
@@ -493,4 +516,8 @@ if ($VerifyKeygenAbort -and $abortTriggered -and $failure.Exception -is [Operati
 }
 if ($null -ne $failure) { throw $failure }
 if (-not $passed) { throw '缺少本轮通过证据' }
+if ($Target -eq 'profile') {
+    '[windows-auth] PROFILE PASS：设置协议建 profile→V2 会话 TERM/answerback/绑定/左右 Alt 生效，默认 profile 对照通过；清理无残留'
+    return
+}
 '[windows-auth] PASS：Windows 阶段三真实目录→Fluent 首见认证→Native SSH 回显→断开/返回管理；清理无残留'

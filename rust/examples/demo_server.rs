@@ -7,6 +7,7 @@
 //! 登录 `probe` / `probe`。连上后先发一段彩色 + CJK + emoji 横幅，
 //! 然后每 700 ms 追加一行日志（模拟 `tail -f`，用来压帧率）。
 //! 输入回显为青色；window-change 回发 RESIZE-ACK（M1 验收要看的远端响应）。
+//! 设置 `GUOSH_DEMO_ENQ=1` 时，横幅后额外发一个 ENQ（0x05），用来验证终端 answerback。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -243,6 +244,17 @@ async fn demo_stream(channel: Channel<Msg>) {
         {
             return;
         }
+    }
+
+    // ENQ 探针（GUOSH_DEMO_ENQ=1）：横幅之后发 0x05，终端引擎的 answerback 回复
+    // 会当普通输入回到 `data`，落进 GUOSH_DEMO_INPUT_LOG。
+    if std::env::var("GUOSH_DEMO_ENQ").as_deref() == Ok("1")
+        && channel
+            .data_bytes(Bytes::from_static(b"\x05"))
+            .await
+            .is_err()
+    {
+        return;
     }
 
     let start = std::time::Instant::now();
