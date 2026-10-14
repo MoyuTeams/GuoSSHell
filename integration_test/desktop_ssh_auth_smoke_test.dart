@@ -210,14 +210,17 @@ void main() {
       await WindowsDesktopWindow.initialize();
       await initializeRust(assignRustSignal);
       rustStarted = true;
+      // 桌面窗格走 V2：提示、状态与帧经带来源的 Desktop* 信号到达。
       listeners.addAll([
-        InteractionPrompt.rustSignalStream.listen(
-          (pack) => prompts.add(pack.message),
+        DesktopPrompt.rustSignalStream.listen(
+          (pack) => prompts.add(pack.message.prompt),
         ),
-        SessionStatus.rustSignalStream.listen(
-          (pack) => statuses.add(pack.message),
+        DesktopSessionStatus.rustSignalStream.listen(
+          (pack) => statuses.add(pack.message.status),
         ),
-        FrameUpdate.rustSignalStream.listen((pack) => frames.add(pack.message)),
+        DesktopFrame.rustSignalStream.listen(
+          (pack) => frames.add(pack.message.frame),
+        ),
         KeyResult.rustSignalStream.listen(
           (pack) => keyResults.add(pack.message),
         ),

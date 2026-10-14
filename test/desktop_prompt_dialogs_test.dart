@@ -1,29 +1,19 @@
+import 'dart:async';
+
 import 'package:fluent_ui/fluent_ui.dart' as fluent;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' as material;
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guosh_shell/src/bindings/bindings.dart';
 import 'package:guosh_shell/src/desktop/desktop_theme.dart';
 import 'package:guosh_shell/src/desktop/interaction/desktop_prompt_dialogs.dart';
-import 'package:guosh_shell/src/desktop/native_input/desktop_native_host.dart';
 import 'package:guosh_shell/src/terminal/prompt_dialogs.dart' show PromptAnswer;
 import 'package:guosh_shell/src/terminal/session_target.dart';
 import 'package:guosh_shell/src/terminal/terminal_pane.dart';
+import 'package:rinf/rinf.dart';
 
-/// 销毁回归使用真实 legacy 提示链，不依赖测试宿主是否具备 normal 输入能力。
-class _LegacyPromptHost extends DesktopNativeHost {
-  static const channel = MethodChannel('test/legacy-prompt-native');
-  _LegacyPromptHost() : super(channel: channel);
-
-  @override
-  Future<DesktopNativeCapability> attachRuntime() async =>
-      const DesktopNativeCapability(
-        moduleAttached: false,
-        inputSourceAvailable: false,
-        productionEnabled: false,
-      );
-}
+import 'desktop_session_controller_test.dart'
+    show DesktopSessionTestGateway, prepared;
 
 InteractionPrompt _prompt(
   PromptKind kind, {
@@ -109,13 +99,29 @@ Future<void> _removePaneWithActivePrompt(
     Uint8List(0),
   );
   addTearDown(() => SettingsState.latestRustSignal = null);
-  addTearDown(() {
-    SessionStatus.latestRustSignal = null;
-    InteractionPrompt.latestRustSignal = null;
-  });
   final showing = ValueNotifier(true);
-  final legacyHost = _LegacyPromptHost();
-  addTearDown(() => _LegacyPromptHost.channel.setMethodCallHandler(null));
+  final gateway = DesktopSessionTestGateway();
+  addTearDown(gateway.dispose);
+  void ended(DesktopSource source) => gateway.lifecycleBus.add(
+    RustSignalPack(
+      DesktopNativeLifecycle(
+        version: 1,
+        source: source,
+        identity: 'frozen',
+        attempt: Uint64(BigInt.one),
+        focusEpoch: Uint64(BigInt.one),
+        lifecycleRevision: Uint64(BigInt.one),
+        state: NativeLifecycleState.ended,
+      ),
+      Uint8List(0),
+    ),
+  );
+  gateway.onOrdered = (request) {
+    if (request.event is DesktopEventDisconnect) {
+      scheduleMicrotask(() => ended(request.source));
+    }
+    return DesktopSessionTestGateway.accept(request);
+  };
   final controller = TerminalPaneController(
     const SessionTarget.quick(host: 'nas.lan', port: 22, username: 'probe'),
   );
@@ -134,7 +140,7 @@ Future<void> _removePaneWithActivePrompt(
                     width: 1,
                     child: TerminalPane(
                       controller: controller,
-                      desktopHost: legacyHost,
+                      desktopGateway: gateway,
                       onActivate: () {},
                       onClose: () {},
                     ),
@@ -148,13 +154,24 @@ Future<void> _removePaneWithActivePrompt(
   await tester.pump();
   expect(controller.sessionId, greaterThan(0));
   expect(controller.ownsNativeInput, isFalse);
-  assignRustSignal['InteractionPrompt']!(
-    _prompt(
-      changedHostKey ? PromptKind.hostKey : PromptKind.password,
-      changed: changedHostKey,
-      sessionId: controller.sessionId,
-    ).bincodeSerialize(),
-    Uint8List(0),
+  // 桌面窗格走 V2：Prepared 给出 identity 后，认证提示经 DesktopPrompt 到达。
+  final source = gateway.prepares.single.source;
+  final snapshot = prepared(gateway.prepares.single.requestId);
+  gateway.emit(snapshot.copyWith(source: source));
+  await tester.pump();
+  gateway.promptBus.add(
+    RustSignalPack(
+      DesktopPrompt(
+        source: source,
+        identity: 'frozen',
+        prompt: _prompt(
+          changedHostKey ? PromptKind.hostKey : PromptKind.password,
+          changed: changedHostKey,
+          sessionId: controller.sessionId,
+        ),
+      ),
+      Uint8List(0),
+    ),
   );
   await tester.pumpAndSettle();
   expect(find.byType(fluent.ContentDialog), findsOneWidget);
@@ -166,17 +183,22 @@ Future<void> _removePaneWithActivePrompt(
     expect(find.byType(fluent.ContentDialog), findsNWidgets(2));
   }
   // 引擎先报告取消但没有 closed/failed；窗格随即被工作区直接卸载。
-  // 此状态也可避免测试加载真实 Native 动态库发送 DisconnectRequest。
-  assignRustSignal['SessionStatus']!(
-    SessionStatus(
-      sessionId: controller.sessionId,
-      state: SessionState.cancelled,
-      failure: FailureKind.none,
-      detail: '',
-      localNetworkSettingsUrl: '',
-      hint: ConnectHint.none,
-    ).bincodeSerialize(),
-    Uint8List(0),
+  gateway.statusBus.add(
+    RustSignalPack(
+      DesktopSessionStatus(
+        source: source,
+        identity: 'frozen',
+        status: SessionStatus(
+          sessionId: controller.sessionId,
+          state: SessionState.cancelled,
+          failure: FailureKind.none,
+          detail: '',
+          localNetworkSettingsUrl: '',
+          hint: ConnectHint.none,
+        ),
+      ),
+      Uint8List(0),
+    ),
   );
   await tester.pump();
   expect(
@@ -186,6 +208,27 @@ Future<void> _removePaneWithActivePrompt(
   showing.value = false;
   await tester.pumpAndSettle();
   expect(find.byType(fluent.ContentDialog), findsNothing);
+  // 卸载即关闭：未 Start 时取消准备，已 Start 时等 Accepted 后有序断开。
+  if (gateway.starts.isEmpty) {
+    gateway.emit(
+      snapshot.copyWith(
+        source: source,
+        requestId: gateway.cancels.single.requestId,
+        state: DesktopPreparationState.cancelled,
+        snapshot: () => null,
+      ),
+    );
+  } else {
+    gateway.emit(
+      snapshot.copyWith(
+        source: source,
+        requestId: gateway.starts.single.requestId,
+        state: DesktopPreparationState.accepted,
+        snapshot: () => null,
+      ),
+    );
+  }
+  await tester.pumpAndSettle();
   // 测试无 Native 动态库；若旧异步回调仍尝试送出接受回包，这里会留下 FFI 异常。
   expect(tester.takeException(), isNull);
   debugDefaultTargetPlatformOverride = null;

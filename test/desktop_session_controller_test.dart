@@ -102,11 +102,37 @@ class DesktopSessionTestGateway implements DesktopSessionGateway {
       StreamController<RustSignalPack<DesktopSessionStatus>>.broadcast(
         sync: true,
       );
+  final promptBus = StreamController<RustSignalPack<DesktopPrompt>>.broadcast(
+    sync: true,
+  );
+  final eventResultBus =
+      StreamController<RustSignalPack<DesktopEventResult>>.broadcast(
+        sync: true,
+      );
+  final clipboardBus =
+      StreamController<RustSignalPack<DesktopClipboard>>.broadcast(sync: true);
   final prepares = <DesktopPrepare>[];
   final starts = <DesktopStart>[];
   final cancels = <DesktopCancel>[];
   final commands = <DesktopNativeCommand>[];
   final queries = <DesktopNativeLifecycleQuery>[];
+  final orderedEvents = <DesktopOrdered>[];
+
+  /// 有序事件的回执；默认受理。返回 null 表示暂不回执。
+  DesktopEventResult? Function(DesktopOrdered request)? onOrdered;
+
+  static DesktopEventResult accept(
+    DesktopOrdered request, {
+    DesktopFailure failure = DesktopFailure.none,
+    DesktopAction? action,
+  }) => DesktopEventResult(
+    source: request.source,
+    identity: request.identity,
+    seq: request.seq,
+    failure: failure,
+    action: action,
+  );
+
   @override
   get preparations => preparationBus.stream;
   @override
@@ -121,7 +147,24 @@ class DesktopSessionTestGateway implements DesktopSessionGateway {
   @override
   Stream<RustSignalPack<DesktopSessionStatus>> get statuses => statusBus.stream;
   @override
-  Stream<RustSignalPack<DesktopPrompt>> get prompts => const Stream.empty();
+  Stream<RustSignalPack<DesktopPrompt>> get prompts => promptBus.stream;
+  @override
+  Stream<RustSignalPack<DesktopEventResult>> get eventResults =>
+      eventResultBus.stream;
+  @override
+  Stream<RustSignalPack<DesktopClipboard>> get clipboards =>
+      clipboardBus.stream;
+  @override
+  void ordered(DesktopOrdered request) {
+    orderedEvents.add(request);
+    final result = onOrdered == null ? accept(request) : onOrdered!(request);
+    // 与 Rust 一样异步回执，避免在同步广播回调中重入。
+    if (result != null) {
+      scheduleMicrotask(
+        () => eventResultBus.add(RustSignalPack(result, Uint8List(0))),
+      );
+    }
+  }
   @override
   Stream<RustSignalPack<DesktopSelection>> get selections =>
       const Stream.empty();
@@ -206,6 +249,9 @@ class DesktopSessionTestGateway implements DesktopSessionGateway {
     await frameBus.close();
     await projectionBus.close();
     await statusBus.close();
+    await promptBus.close();
+    await eventResultBus.close();
+    await clipboardBus.close();
   }
 }
 

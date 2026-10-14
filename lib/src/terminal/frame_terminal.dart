@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show KeyEvent;
 // 我们的 fork 没把这个类放进公开导出面，但锚点机制依赖它（行身份），
 // 属于有意的实现级依赖，fork 收紧导出面前先直接引。
 // ignore: implementation_imports
@@ -18,7 +19,22 @@ class KeyInputEvent extends TerminalInputEvent {
   final bool shift;
   final bool control;
   final bool alt;
-  const KeyInputEvent(this.key, {this.shift = false, this.control = false, this.alt = false});
+
+  /// 触发本次按键的硬件事件（物理键、是否连发）；软件合成时为 null。
+  final KeyEvent? source;
+
+  /// 硬件事件到达时左/右 Alt 是否按住（由渲染库在当时采样）。
+  final bool leftAlt;
+  final bool rightAlt;
+  const KeyInputEvent(
+    this.key, {
+    this.shift = false,
+    this.control = false,
+    this.alt = false,
+    this.source,
+    this.leftAlt = false,
+    this.rightAlt = false,
+  });
 }
 
 class TextInputEvent extends TerminalInputEvent {
@@ -575,6 +591,9 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
     bool shift = false,
     bool alt = false,
     bool ctrl = false,
+    KeyEvent? source,
+    bool leftAlt = false,
+    bool rightAlt = false,
   }) {
     var name = keyName(key);
     if (name == null) return false;
@@ -595,6 +614,9 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
         shift: shift,
         control: ctrl || _consumeModifier(_modCtrl),
         alt: alt || _consumeModifier(_modAlt),
+        source: source,
+        leftAlt: leftAlt,
+        rightAlt: rightAlt,
       ),
     );
   }

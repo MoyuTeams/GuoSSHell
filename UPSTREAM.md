@@ -231,8 +231,8 @@ scoped 路径不得靠过滤协商或永久拒绝压缩替代交付。独立 bor
 | 项 | 值 |
 |---|---|
 | 上游仓库 | https://github.com/Termphin/terminal_view（pub.dev `terminal_view` 0.2.0，fork 自 xterm.dart 4.0.0） |
-| fork | https://github.com/MoyuTeams/terminal_view ，分支 `guosh/frame-source` |
-| 固定提交 | `fb19f119821cf327a3bee4f11d522826b062e54d` |
+| fork | https://github.com/MoyuTeams/terminal_view ，分支 `feat/key-source`（基于 `guosh/frame-source`） |
+| 固定提交 | `e8f23569c6e07a04dad11a3459d456d8d71c0b4c` |
 | 上游基线 | `19c6ebb4bb03898f3d626c588acd0e0a1d92c152`（Termphin `main`） |
 | 许可证 | MIT，随包保留上游 `LICENSE` 与 `NOTICE` |
 
@@ -240,7 +240,7 @@ scoped 路径不得靠过滤协商或永久拒绝压缩替代交付。独立 bor
 terminal_view:
   git:
     url: https://github.com/MoyuTeams/terminal_view.git
-    ref: fb19f119821cf327a3bee4f11d522826b062e54d
+    ref: e8f23569c6e07a04dad11a3459d456d8d71c0b4c
 ```
 
 以下改动都在渲染库的控件、输入连接或绘制内部，应用只能通过 `TerminalView`
@@ -264,6 +264,7 @@ terminal_view:
 | 仅用户操作能让视图离开底部 | `a80a70b` | ① 清屏回弹后视图不再跟随输出 |
 | 含组合字符的单元格走完整字素绘制 | `f0a1e0d` | ① ASCII 批量绘制丢失组合标记 |
 | 同目录文件使用 `package:` 导入 | `fb19f11` | 代码规范，无行为变化 |
+| 键盘事件携带触发它的硬件事件（`TerminalKeyboardEvent.source`）及当时采样的左/右 Alt；`keyInput` 同名可选参数 | `e8f2356` | ③ 接缝：桌面有序输入需要物理键、是否连发与左右 Alt 来源交 Rust 按终端 profile 编码，库内处理按键后只交出逻辑键与合并的 Alt |
 
 Termphin `main` 在上游基线之后的提交尚未并入 fork。升级时先把 fork 变基到新的
 上游提交，去掉上游已等价修复的改动，更新本节的固定提交与表格，并运行库测试

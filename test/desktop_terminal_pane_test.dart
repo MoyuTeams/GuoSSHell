@@ -9,7 +9,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guosh_shell/src/bindings/bindings.dart';
-import 'package:guosh_shell/src/desktop/native_input/desktop_native_host.dart';
 import 'package:guosh_shell/src/desktop/windows_chrome.dart';
 import 'package:guosh_shell/src/desktop/workspace/desktop_workspace_scope.dart';
 import 'package:guosh_shell/src/terminal/session_target.dart';
@@ -31,69 +30,20 @@ import 'desktop_session_controller_test.dart'
     show DesktopSessionTestGateway, prepared, u64;
 
 Uint8List _colorBinary() => Uint8List.fromList([
-  1,
-  0,
-  3,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  1,
-  0,
-  0,
-  0,
-  0,
-  1,
-  0,
-  0,
-  0,
-  32,
-  1,
-  0,
-  1,
-  0,
-  1,
-  1,
-  1,
-  1,
-  0,
-  1,
-  0,
-  0,
-  0,
-  32,
-  2,
-  0,
-  1,
-  0,
-  2,
-  19,
-  87,
-  143,
-  2,
-  19,
-  87,
-  143,
-  0,
-  1,
-  0,
-  0,
-  0,
-  32,
+  1, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, //
+  32, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 32, 2, 0, 1, 0, 2, 19, 87, //
+  143, 2, 19, 87, 143, 0, 1, 0, 0, 0, 32,
+]);
+
+Uint8List _textBinary() => Uint8List.fromList([
+  1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, //
+  104, 105,
 ]);
 
 Future<List<Color>> _cellPixels(
   WidgetTester tester,
   GlobalKey boundaryKey,
-  GlobalKey<TerminalViewState> viewKey,
+  TerminalViewState view,
 ) async {
   final boundary =
       boundaryKey.currentContext!.findRenderObject()! as RenderRepaintBoundary;
@@ -102,7 +52,7 @@ Future<List<Color>> _cellPixels(
     final bytes = (await tester.runAsync(
       () => image!.toByteData(format: ui.ImageByteFormat.rawRgba),
     ))!;
-    final render = viewKey.currentState!.renderTerminal;
+    final render = view.renderTerminal;
     return [
       for (int column = 0; column < 3; column++)
         (() {
@@ -125,6 +75,7 @@ Future<List<Color>> _cellPixels(
   }
 }
 
+/// 桌面 V2 窗格：测试网关代替 Rust，回执默认受理；Disconnect 后报 lifecycle ended。
 class _PaneHarness {
   final gateway = DesktopSessionTestGateway();
   final controller = TerminalPaneController(
@@ -135,21 +86,21 @@ class _PaneHarness {
       profileId: 'selected',
     ),
   );
-  final calls = <MethodCall>[];
   final clipboardWrites = <String>[];
-  bool allowed = true;
+  final executed = <DesktopAction>[];
   bool ownsInput = false;
-  int panes = 0;
-  int epoch = 3;
   int lifecycleRevision = 0;
   int attempt = 12;
   final paintKey = GlobalKey();
-  String claimAction = 'copy';
-  final paneVisible = ValueNotifier(true);
-  Future<DesktopActionOutcome> Function(DesktopAction)? execute;
-  Completer<Object?>? clipboardWrite;
-  TargetPlatform? _oldPlatform;
+
+  /// 单条有序事件的回执；返回 null 用默认受理。
+  DesktopEventResult? Function(DesktopOrdered request)? reply;
   DesktopSource get source => gateway.prepares.single.source;
+
+  List<DesktopOrdered> where<T extends DesktopEvent>() => [
+    for (final request in gateway.orderedEvents)
+      if (request.event is T) request,
+  ];
 
   void lifecycle(NativeLifecycleState state) => gateway.lifecycleBus.add(
     RustSignalPack(
@@ -158,9 +109,27 @@ class _PaneHarness {
         source: source,
         identity: 'frozen',
         attempt: u64(attempt),
-        focusEpoch: u64(epoch),
+        focusEpoch: u64(1),
         lifecycleRevision: u64(++lifecycleRevision),
         state: state,
+      ),
+      Uint8List(0),
+    ),
+  );
+
+  void status(SessionState state) => gateway.statusBus.add(
+    RustSignalPack(
+      DesktopSessionStatus(
+        source: source,
+        identity: 'frozen',
+        status: SessionStatus(
+          sessionId: source.sessionId,
+          state: state,
+          failure: FailureKind.none,
+          detail: '',
+          localNetworkSettingsUrl: '',
+          hint: ConnectHint.none,
+        ),
       ),
       Uint8List(0),
     ),
@@ -170,12 +139,12 @@ class _PaneHarness {
     WidgetTester tester, {
     double width = 1280,
     String scheme = 'default',
+    TargetPlatform platform = TargetPlatform.windows,
   }) async {
     tester.view.physicalSize = Size(width, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
-    _oldPlatform = debugDefaultTargetPlatformOverride;
-    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    debugDefaultTargetPlatformOverride = platform;
     final oldSettings = SettingsState.latestRustSignal;
     SettingsState.latestRustSignal = RustSignalPack(
       const SettingsState(
@@ -193,92 +162,25 @@ class _PaneHarness {
       SettingsState.latestRustSignal = oldSettings;
       debugDefaultTargetPlatformOverride = null;
     });
-    const channel = MethodChannel('test/normal-pane-host');
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      calls.add(call);
-      return switch (call.method) {
-        'attachRuntime' => {
-          'version': 1,
-          'moduleAttached': true,
-          'inputSourceAvailable': true,
-          'productionEnabled': true,
-        },
-        'attachPane' => {
-          'version': 1,
-          'state': 'attached',
-          'paneToken': 'pane-${++panes}',
-        },
-        'requestFocus' => {
-          'version': 1,
-          'state': 'active',
-          'attempt': '$attempt',
-          'focusEpoch': '${++epoch}',
-        },
-        'retirePane' => {
-          'version': 1,
-          'state': (call.arguments as Map)['phase'] == 'quiet'
-              ? 'nativequiet'
-              : 'released',
-        },
-        'invalidateGeometry' => {'version': 1, 'state': 'invalidated'},
-        'presentedFrame' => {
-          'version': 1,
-          'state': (call.arguments as Map)['focusEpoch'] == '$epoch'
-              ? 'presented'
-              : 'rejected',
-        },
-        'claimAction' => {
-          'version': 1,
-          'state': 'claimed',
-          'claimToken': 'copy-claim',
-          'action': claimAction,
-          'payload': '完整🙂\n复制内容',
-        },
-        'completeAction' => {
-          'version': 1,
-          'state': (call.arguments as Map)['kind'] == 'abort'
-              ? 'aborted'
-              : 'completed',
-        },
-        _ => throw MissingPluginException(call.method),
-      };
-    });
     messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
       if (call.method == 'Clipboard.setData') {
         clipboardWrites.add((call.arguments as Map)['text'] as String);
-        return clipboardWrite?.future;
+      }
+      if (call.method == 'Clipboard.getData') {
+        return {'text': '剪贴板'};
       }
       return null;
     });
-    addTearDown(() {
-      messenger.setMockMethodCallHandler(channel, null);
-      messenger.setMockMethodCallHandler(SystemChannels.platform, null);
-    });
-    gateway.onCommand = (command) {
-      gateway.commandBus.add(
-        RustSignalPack(
-          DesktopNativeCommandResult(
-            version: 1,
-            source: command.source,
-            identity: command.identity,
-            attempt: command.attempt,
-            focusEpoch: command.focusEpoch,
-            admission: NativeCommandAdmission.accepted,
-            consumedLatches: 0,
-            requestId: command.requestId,
-            effect: command.requestId,
-            failure: NativeCommandFailure.none,
-          ),
-          Uint8List(0),
-        ),
-      );
-      if (command.command is NativeCommandEvent &&
-          (command.command as NativeCommandEvent).value
-              is DesktopEventDisconnect) {
-        lifecycle(NativeLifecycleState.ended);
+    addTearDown(
+      () => messenger.setMockMethodCallHandler(SystemChannels.platform, null),
+    );
+    gateway.onOrdered = (request) {
+      if (request.event is DesktopEventDisconnect) {
+        scheduleMicrotask(() => lifecycle(NativeLifecycleState.ended));
       }
+      return reply?.call(request) ?? DesktopSessionTestGateway.accept(request);
     };
     await tester.pumpWidget(
       MaterialApp(
@@ -291,29 +193,18 @@ class _PaneHarness {
         home: RepaintBoundary(
           key: paintKey,
           child: DesktopWorkspaceScope(
-            execute: (action, {required origin}) async => execute == null
-                ? DesktopActionOutcome.unavailable
-                : await execute!(action),
+            execute: (action, {required origin}) async {
+              expect(origin, same(controller));
+              executed.add(action);
+              return DesktopActionOutcome.executed;
+            },
             ownsTerminalInput: (_, enabled) => ownsInput = enabled,
-            isCurrentOrigin: (origin) =>
-                identical(origin, controller) && allowed && origin.nativeActive,
-            canRequestFocus: (origin) =>
-                identical(origin, controller) &&
-                allowed &&
-                (origin.focusNode.context == null ||
-                    (ModalRoute.of(origin.focusNode.context!)?.isCurrent ??
-                        true)),
-            child: ValueListenableBuilder<bool>(
-              valueListenable: paneVisible,
-              child: TerminalPane(
-                controller: controller,
-                desktopGateway: gateway,
-                desktopHost: DesktopNativeHost(channel: channel),
-                onActivate: () {},
-                onClose: () {},
-              ),
-              builder: (_, visible, child) =>
-                  visible ? child! : const SizedBox.shrink(),
+            isCurrentOrigin: (origin) => identical(origin, controller),
+            child: TerminalPane(
+              controller: controller,
+              desktopGateway: gateway,
+              onActivate: () {},
+              onClose: () {},
             ),
           ),
         ),
@@ -331,30 +222,24 @@ class _PaneHarness {
     );
     await tester.pumpAndSettle();
     expect(gateway.starts.length, 1);
-    lifecycle(NativeLifecycleState.authenticated);
-    gateway.statusBus.add(
-      RustSignalPack(
-        DesktopSessionStatus(
-          source: source,
-          identity: 'frozen',
-          status: SessionStatus(
-            sessionId: source.sessionId,
-            state: SessionState.connected,
-            failure: FailureKind.none,
-            detail: '',
-            localNetworkSettingsUrl: '',
-            hint: ConnectHint.none,
-          ),
-        ),
-        Uint8List(0),
+    gateway.emit(
+      snapshot.copyWith(
+        source: source,
+        requestId: gateway.starts.single.requestId,
+        state: DesktopPreparationState.accepted,
+        snapshot: () => null,
       ),
     );
+    lifecycle(NativeLifecycleState.authenticated);
+    status(SessionState.connected);
     await tester.pumpAndSettle();
-    expect(controller.nativeActive, isTrue);
     expect(ownsInput, isTrue);
+    controller.focusNode.requestFocus();
+    await tester.pumpAndSettle();
+    expect(controller.focusNode.hasFocus, isTrue);
   }
 
-  void frame({Uint8List? binary, bool selection = true}) {
+  void frame({Uint8List? binary, bool selection = false, int seq = 1}) {
     final geometry = gateway.starts.single.geometry;
     gateway.projectionBus.add(
       RustSignalPack(
@@ -362,8 +247,8 @@ class _PaneHarness {
           source: source,
           identity: 'frozen',
           attempt: u64(attempt),
-          focusEpoch: u64(epoch),
-          frameRevision: 1,
+          focusEpoch: u64(1),
+          frameRevision: seq,
           appliedEffect: u64(0),
           rowRevision: u64(1),
           followBottom: true,
@@ -394,156 +279,384 @@ class _PaneHarness {
             sessionId: source.sessionId,
             cols: geometry.cols,
             rows: geometry.rows,
-            seq: 1,
+            seq: seq,
             topStableRow: 0,
             firstStableRow: 0,
             screenTopStableRow: 0,
-            cursorCol: selection ? 0 : -1,
-            cursorRow: selection ? 0 : -1,
+            cursorCol: -1,
+            cursorRow: -1,
             title: '终端',
             mouseReporting: false,
             alternateScreen: false,
           ),
         ),
-        binary ??
-            Uint8List.fromList([
-              1,
-              0,
-              1,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              0,
-              2,
-              0,
-              0,
-              0,
-              0,
-              2,
-              0,
-              0,
-              0,
-              104,
-              105,
-            ]),
+        binary ?? _textBinary(),
       ),
     );
   }
 
-  void menu() => gateway.menuBus.add(
-    RustSignalPack(
-      DesktopNativeContextMenuReady(
-        version: 1,
-        source: source,
-        identity: 'frozen',
-        attempt: u64(12),
-        focusEpoch: u64(epoch),
-        effect: u64(31),
-        stableRow: 0,
-        column: 1,
-      ),
-      Uint8List(0),
-    ),
-  );
-
   Future<void> close(WidgetTester tester) async {
     await tester.pumpWidget(const SizedBox.shrink());
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(ownsInput, isFalse);
+    expect(where<DesktopEventDisconnect>(), hasLength(1));
     controller.dispose();
     await gateway.dispose();
-    paneVisible.dispose();
-    debugDefaultTargetPlatformOverride = _oldPlatform;
+    debugDefaultTargetPlatformOverride = null;
   }
 }
 
 void main() {
-  testWidgets('静态帧重新激活升级 epoch 后实际重绘呈现，不等待远端输出', (tester) async {
+  testWidgets('桌面 V2：按键经有序通道发 Down/Up，seq 递增，本地快捷键交 Rust', (tester) async {
     final h = _PaneHarness();
     await h.mount(tester);
-    h.frame();
+    expect(
+      tester.widget<TerminalView>(find.byType(TerminalView)).shortcuts,
+      isEmpty,
+    );
+    expect(h.controller.ownsNativeInput, isFalse);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
     await tester.pumpAndSettle();
-    final original = h.controller.normalSession!.frame;
-    final before = h.calls
-        .where((call) => call.method == 'presentedFrame')
-        .length;
-    final epoch = h.epoch;
-    expect(await h.controller.requestTerminalFocus(), isTrue);
-    h.lifecycle(NativeLifecycleState.authenticated);
-    await tester.pumpAndSettle();
-    final calls = h.calls
-        .where((call) => call.method == 'presentedFrame')
-        .toList();
-    expect(h.epoch, greaterThan(epoch));
-    expect(calls.length, greaterThan(before));
-    expect((calls.last.arguments as Map)['focusEpoch'], '${h.epoch}');
-    expect((calls.last.arguments as Map)['frameRevision'], 1);
-    expect(h.controller.normalSession!.frame, same(original));
-    expect(h.controller.lastFrameSeq, 1);
-    expect(h.controller.normalSession!.error, isEmpty);
-    expect(h.controller.nativeActive, isTrue);
+    final keys = [
+      for (final request in h.where<DesktopEventKey>())
+        request.event as DesktopEventKey,
+    ];
+    expect(
+      [for (final key in keys) (key.key, key.phase)],
+      [
+        ('arrow_up', DesktopKeyPhase.down),
+        ('arrow_up', DesktopKeyPhase.up),
+        ('arrow_down', DesktopKeyPhase.down),
+        ('arrow_down', DesktopKeyPhase.up),
+      ],
+    );
+    expect(keys[0].physical, keys[1].physical);
+    expect(
+      keys[0].physical.toBigInt(),
+      BigInt.from(PhysicalKeyboardKey.arrowUp.usbHidUsage),
+    );
+    final seqs = [
+      for (final request in h.gateway.orderedEvents)
+        request.seq.toBigInt().toInt(),
+    ];
+    expect(seqs, [for (var i = 1; i <= seqs.length; i++) i]);
     await h.close(tester);
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    '静态配色 Prepared 实际进入 normal renderer，Default/Ansi/RGB 与重连清缓存保持原 profile',
-    (tester) async {
-      final h = _PaneHarness();
-      await h.mount(tester, scheme: 'one_dark');
-      h.frame(binary: _colorBinary(), selection: false);
-      await tester.pumpAndSettle();
-      final view = tester.widget<TerminalView>(find.byType(TerminalView));
-      final key = view.key! as GlobalKey<TerminalViewState>;
-      expect(view.theme, same(themeForProfile('one_dark')));
-      final expected = [
-        themeForProfile('one_dark').background,
-        themeForProfile('one_dark').red,
-        const Color.fromARGB(255, 19, 87, 143),
-      ];
-      expect(await _cellPixels(tester, h.paintKey, key), expected);
-      final old = h.controller.terminal.lineAt(0);
-      final late = prepared(h.gateway.prepares.single.requestId);
-      h.gateway.emit(
-        late.copyWith(
-          source: h.source.copyWith(generation: u64(77)),
-          snapshot: () => late.snapshot!.copyWith(
-            profile: late.snapshot!.profile.copyWith(
-              colorScheme: 'solarized_light',
+  testWidgets('左右 Alt 分别上报 Known 来源', (tester) async {
+    final h = _PaneHarness();
+    await h.mount(tester);
+    for (final alt in [
+      LogicalKeyboardKey.altLeft,
+      LogicalKeyboardKey.altRight,
+    ]) {
+      await tester.sendKeyDownEvent(alt);
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.sendKeyUpEvent(alt);
+    }
+    await tester.pumpAndSettle();
+    final downs = [
+      for (final request in h.where<DesktopEventKey>())
+        if ((request.event as DesktopEventKey).phase == DesktopKeyPhase.down)
+          request.event as DesktopEventKey,
+    ];
+    expect(downs, hasLength(2));
+    expect(
+      [downs[0].alt, downs[0].leftAlt, downs[0].rightAlt],
+      [true, true, false],
+    );
+    expect(
+      [downs[1].alt, downs[1].leftAlt, downs[1].rightAlt],
+      [true, false, true],
+    );
+    expect(
+      downs.map((key) => key.altSource),
+      everyElement(DesktopAltSource.known),
+    );
+    await h.close(tester);
+  });
+
+  testWidgets('Rust 回报 new_tab/split 动作经工作区执行入口，壳不重复执行', (tester) async {
+    final h = _PaneHarness();
+    await h.mount(tester);
+    h.reply = (request) {
+      final event = request.event;
+      return event is DesktopEventKey && event.defaultAction != null
+          ? DesktopSessionTestGateway.accept(
+              request,
+              action: event.defaultAction,
+            )
+          : null;
+    };
+    for (final key in [LogicalKeyboardKey.keyT, LogicalKeyboardKey.keyD]) {
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(key);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    }
+    await tester.pumpAndSettle();
+    expect(h.executed, [DesktopAction.newTab, DesktopAction.splitRight]);
+    final down = h
+        .where<DesktopEventKey>()
+        .map((request) => request.event as DesktopEventKey)
+        .firstWhere((key) => key.phase == DesktopKeyPhase.down);
+    expect(down.defaultAction, DesktopAction.newTab);
+    expect([down.control, down.shift], [true, true]);
+    await h.close(tester);
+  });
+
+  testWidgets('Busy 时按键按序排队、同 seq 重试，不丢键', (tester) async {
+    final h = _PaneHarness();
+    await h.mount(tester);
+    var busy = 3;
+    h.reply = (request) => request.event is DesktopEventKey && busy-- > 0
+        ? DesktopSessionTestGateway.accept(
+            request,
+            failure: DesktopFailure.busy,
+          )
+        : null;
+    final before = h.gateway.orderedEvents.length;
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.pumpAndSettle();
+    final sent = h.gateway.orderedEvents.skip(before).toList();
+    final keys = [
+      for (final request in sent)
+        if (request.event is DesktopEventKey)
+          (
+            request.seq.toBigInt().toInt(),
+            (request.event as DesktopEventKey).key,
+            (request.event as DesktopEventKey).phase,
+          ),
+    ];
+    // 前三次为 Busy 的同一 seq，之后每个 seq 只出现一次并保持键序。
+    expect(keys.take(4).map((key) => key.$1).toSet(), hasLength(1));
+    final accepted = keys.skip(3).toList();
+    expect(
+      [for (final key in accepted) (key.$2, key.$3)],
+      [
+        ('arrow_up', DesktopKeyPhase.down),
+        ('arrow_up', DesktopKeyPhase.up),
+        ('arrow_right', DesktopKeyPhase.down),
+        ('arrow_right', DesktopKeyPhase.up),
+      ],
+    );
+    final seqs = [for (final key in accepted) key.$1];
+    expect(seqs, [for (var i = 0; i < 4; i++) seqs.first + i]);
+    await h.close(tester);
+  });
+
+  testWidgets('Copy 动作发有序 Copy 并写入剪贴板；Paste 读剪贴板后发有序 Paste', (tester) async {
+    final h = _PaneHarness();
+    await h.mount(tester);
+    h.frame(selection: true);
+    await tester.pumpAndSettle();
+    expect(h.controller.canCopy, isTrue);
+    expect(h.where<DesktopEventFrameAck>(), isNotEmpty);
+    h.reply = (request) {
+      final event = request.event;
+      if (event is DesktopEventCopy) {
+        scheduleMicrotask(
+          () => h.gateway.clipboardBus.add(
+            RustSignalPack(
+              DesktopClipboard(
+                source: h.source,
+                identity: 'frozen',
+                text: '完整🙂\n复制内容',
+              ),
+              Uint8List(0),
+            ),
+          ),
+        );
+      }
+      return event is DesktopEventKey && event.defaultAction != null
+          ? DesktopSessionTestGateway.accept(
+              request,
+              action: event.defaultAction,
+            )
+          : null;
+    };
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(h.where<DesktopEventCopy>(), hasLength(1));
+    expect(h.clipboardWrites, ['完整🙂\n复制内容']);
+    expect(
+      h.where<DesktopEventPaste>().map(
+        (request) => (request.event as DesktopEventPaste).text,
+      ),
+      ['剪贴板'],
+    );
+    expect(h.executed, isEmpty);
+    await h.close(tester);
+  });
+
+  testWidgets('macOS ⌘C 交 Rust 仲裁后复制，Up 同名补发', (tester) async {
+    final h = _PaneHarness();
+    await h.mount(tester, platform: TargetPlatform.macOS);
+    h.frame(selection: true);
+    await tester.pumpAndSettle();
+    h.reply = (request) {
+      final event = request.event;
+      if (event is DesktopEventCopy) {
+        scheduleMicrotask(
+          () => h.gateway.clipboardBus.add(
+            RustSignalPack(
+              DesktopClipboard(
+                source: h.source,
+                identity: 'frozen',
+                text: 'hi',
+              ),
+              Uint8List(0),
+            ),
+          ),
+        );
+      }
+      return event is DesktopEventKey && event.defaultAction != null
+          ? DesktopSessionTestGateway.accept(
+              request,
+              action: event.defaultAction,
+            )
+          : null;
+    };
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyC);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+    await tester.pumpAndSettle();
+    final keys = [
+      for (final request in h.where<DesktopEventKey>())
+        request.event as DesktopEventKey,
+    ];
+    expect(
+      [for (final key in keys) (key.key, key.phase, key.superKey)],
+      [
+        ('character:c', DesktopKeyPhase.down, true),
+        ('character:c', DesktopKeyPhase.up, true),
+      ],
+    );
+    expect(keys.first.defaultAction, DesktopAction.copy);
+    expect(h.where<DesktopEventCopy>(), hasLength(1));
+    expect(h.clipboardWrites, ['hi']);
+    await h.close(tester);
+  });
+
+  testWidgets('静态配色 Prepared 实际进入 V2 renderer，重连换 attempt 清缓存保持原 profile', (
+    tester,
+  ) async {
+    final h = _PaneHarness();
+    await h.mount(tester, scheme: 'one_dark');
+    h.frame(binary: _colorBinary());
+    await tester.pumpAndSettle();
+    final view = tester.widget<TerminalView>(find.byType(TerminalView));
+    final key = tester.state<TerminalViewState>(find.byType(TerminalView));
+    expect(view.theme, same(themeForProfile('one_dark')));
+    final expected = [
+      themeForProfile('one_dark').background,
+      themeForProfile('one_dark').red,
+      const Color.fromARGB(255, 19, 87, 143),
+    ];
+    expect(await _cellPixels(tester, h.paintKey, key), expected);
+    final old = h.controller.terminal.lineAt(0);
+    h.attempt = 13;
+    h.lifecycle(NativeLifecycleState.connecting);
+    await tester.pumpAndSettle();
+    expect(h.controller.lastFrameSeq, 0);
+    expect(h.controller.terminal.lineAt(0), isNot(same(old)));
+    h.lifecycle(NativeLifecycleState.authenticated);
+    h.frame(binary: _colorBinary());
+    await tester.pumpAndSettle();
+    expect(h.controller.lastFrameSeq, 1);
+    expect(
+      tester.widget<TerminalView>(find.byType(TerminalView)).theme,
+      same(themeForProfile('one_dark')),
+    );
+    expect(await _cellPixels(tester, h.paintKey, key), expected);
+    await h.close(tester);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('移动端仍走旧路径：不发 Prepare，不登记有序输入，保留本地快捷键', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
+    final oldSettings = SettingsState.latestRustSignal;
+    SettingsState.latestRustSignal = RustSignalPack(
+      const SettingsState(
+        fontSize: 14,
+        minFontSize: 8,
+        maxFontSize: 64,
+        scrollbackLines: 1000,
+        maxScrollbackLines: 10000,
+        showKeyBar: false,
+        keyBarRows: [],
+      ),
+      Uint8List(0),
+    );
+    addTearDown(() => SettingsState.latestRustSignal = oldSettings);
+    final gateway = DesktopSessionTestGateway();
+    final controller = TerminalPaneController(
+      const SessionTarget.quick(host: 'nas.lan', port: 22, username: 'probe'),
+    );
+    var owns = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: DesktopWorkspaceScope(
+          execute: (_, {required origin}) async =>
+              DesktopActionOutcome.unavailable,
+          ownsTerminalInput: (_, enabled) => owns = enabled,
+          isCurrentOrigin: (_) => true,
+          // 1×1 不产生几何，旧路径不会发 ConnectRequest（测试无 Native 动态库）。
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: 1,
+              height: 1,
+              child: TerminalPane(
+                controller: controller,
+                desktopGateway: gateway,
+                onActivate: () {},
+                onClose: () {},
+              ),
             ),
           ),
         ),
-      );
-      await tester.pumpAndSettle();
-      expect(
-        tester.widget<TerminalView>(find.byType(TerminalView)).theme,
-        same(themeForProfile('one_dark')),
-      );
-      h.attempt = 13;
-      h.lifecycle(NativeLifecycleState.connecting);
-      await tester.pumpAndSettle();
-      expect(h.controller.lastFrameSeq, 0);
-      expect(h.controller.canCopy, isFalse);
-      expect(h.controller.terminal.windowCovers(0, 1), isFalse);
-      expect(h.controller.terminal.lineAt(0), isNot(same(old)));
-      h.lifecycle(NativeLifecycleState.authenticated);
-      await tester.pumpAndSettle();
-      h.frame(binary: _colorBinary(), selection: false);
-      await tester.pumpAndSettle();
-      expect(h.controller.terminal.lineAt(0), isNot(same(old)));
-      expect(await _cellPixels(tester, h.paintKey, key), expected);
-      await h.close(tester);
-      expect(tester.takeException(), isNull);
-    },
-  );
+      ),
+    );
+    await tester.pump();
+    expect(gateway.prepares, isEmpty);
+    expect(owns, isFalse);
+    expect(controller.sessionId, greaterThan(0));
+    expect(
+      tester.widget<TerminalView>(find.byType(TerminalView)).shortcuts,
+      isNotEmpty,
+    );
+    // 已取消的旧会话卸载时不发 DisconnectRequest。
+    assignRustSignal['SessionStatus']!(
+      SessionStatus(
+        sessionId: controller.sessionId,
+        state: SessionState.cancelled,
+        failure: FailureKind.none,
+        detail: '',
+        localNetworkSettingsUrl: '',
+        hint: ConnectHint.none,
+      ).bincodeSerialize(),
+      Uint8List(0),
+    );
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+    SessionStatus.latestRustSignal = null;
+    controller.dispose();
+    await gateway.dispose();
+    expect(tester.takeException(), isNull);
+    debugDefaultTargetPlatformOverride = null;
+  });
 
   testWidgets(
     '静态配色多 viewport 同帧各自着色，新来源 reset/theme 更新不重放旧 Picture 或覆盖邻 pane',
@@ -600,12 +713,12 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(await _cellPixels(tester, boundary, keys[0]), [
+      expect(await _cellPixels(tester, boundary, keys[0].currentState!), [
         themeForProfile('one_dark').background,
         themeForProfile('one_dark').red,
         const Color.fromARGB(255, 19, 87, 143),
       ]);
-      expect(await _cellPixels(tester, boundary, keys[1]), [
+      expect(await _cellPixels(tester, boundary, keys[1].currentState!), [
         themeForProfile('solarized_light').background,
         themeForProfile('solarized_light').red,
         const Color.fromARGB(255, 19, 87, 143),
@@ -616,12 +729,12 @@ void main() {
       schemes.value = ('one_dark', 'dracula');
       await tester.pumpAndSettle();
       expect(terminal[1].lineAt(0), isNot(same(old)));
-      expect(await _cellPixels(tester, boundary, keys[0]), [
+      expect(await _cellPixels(tester, boundary, keys[0].currentState!), [
         themeForProfile('one_dark').background,
         themeForProfile('one_dark').red,
         const Color.fromARGB(255, 19, 87, 143),
       ]);
-      expect(await _cellPixels(tester, boundary, keys[1]), [
+      expect(await _cellPixels(tester, boundary, keys[1].currentState!), [
         themeForProfile('dracula').background,
         themeForProfile('dracula').red,
         const Color.fromARGB(255, 19, 87, 143),
@@ -637,167 +750,4 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
-
-  testWidgets('normal ClosePane 实际移除 widget 后原 claim ACK/release 独立结算，不自等', (
-    tester,
-  ) async {
-    final h = _PaneHarness();
-    await h.mount(tester);
-    h.claimAction = 'closePane';
-    h.execute = (action) async {
-      expect(action, DesktopAction.closePane);
-      h.paneVisible.value = false;
-      await WidgetsBinding.instance.endOfFrame;
-      expect(find.byType(TerminalPane), findsNothing);
-      return DesktopActionOutcome.executed;
-    };
-    h.gateway.actionBus.add(
-      RustSignalPack(
-        DesktopNativeActionReady(
-          version: 1,
-          source: h.source,
-          identity: 'frozen',
-          attempt: u64(12),
-          focusEpoch: u64(h.epoch),
-          effect: u64(31),
-        ),
-        Uint8List(0),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.byType(TerminalPane), findsNothing);
-    final completed = h.calls.indexWhere(
-      (call) => call.method == 'completeAction',
-    );
-    final released = h.calls.indexWhere(
-      (call) =>
-          call.method == 'retirePane' &&
-          (call.arguments as Map)['phase'] == 'release',
-    );
-    expect(completed, greaterThan(0));
-    expect(released, greaterThan(completed));
-    expect((h.calls[completed].arguments as Map)['kind'], 'completed');
-    expect((h.calls[completed].arguments as Map)['paneToken'], 'pane-1');
-    await h.close(tester);
-    expect(tester.takeException(), isNull);
-  });
-
-  for (final width in [375.0, 768.0, 1280.0]) {
-    testWidgets(
-      '$width normal 原帧实际 paint 后 ACK，右键 quiet 后显示真实 Fluent 菜单并完成完整 Copy',
-      (tester) async {
-        final h = _PaneHarness();
-        await h.mount(tester, width: width);
-        h.frame();
-        expect(
-          h.gateway.commands.where(
-            (request) =>
-                request.command is NativeCommandEvent &&
-                (request.command as NativeCommandEvent).value
-                    is DesktopEventFrameAck,
-          ),
-          isEmpty,
-        );
-        await tester.pumpAndSettle();
-        expect(h.controller.canCopy, isTrue);
-        expect(
-          h.calls.where((call) => call.method == 'presentedFrame'),
-          isNotEmpty,
-        );
-        final ack = h.gateway.commands.singleWhere(
-          (request) =>
-              request.command is NativeCommandEvent &&
-              (request.command as NativeCommandEvent).value
-                  is DesktopEventFrameAck,
-        );
-        expect(ack.attempt, u64(12));
-        h.menu();
-        await tester.pumpAndSettle();
-        expect(find.byType(f.MenuFlyout), findsOneWidget);
-        expect(find.text('复制'), findsOneWidget);
-        expect(h.controller.nativeEditableSafe, isTrue);
-        h.lifecycle(NativeLifecycleState.inputRevoked);
-        await tester.pumpAndSettle();
-        expect(find.byType(f.MenuFlyout), findsOneWidget);
-        h.clipboardWrite = Completer<Object?>();
-        await tester.tap(find.text('复制'));
-        await tester.pumpAndSettle();
-        final action = h.gateway.commands.last;
-        expect(
-          (action.command as NativeCommandAction).value,
-          DesktopAction.copy,
-        );
-        h.gateway.actionBus.add(
-          RustSignalPack(
-            DesktopNativeActionReady(
-              version: 1,
-              source: h.source,
-              identity: 'frozen',
-              attempt: u64(12),
-              focusEpoch: u64(h.epoch),
-              effect: action.requestId,
-            ),
-            Uint8List(0),
-          ),
-        );
-        await tester.pump();
-        expect(h.clipboardWrites, ['完整🙂\n复制内容']);
-        expect(
-          h.calls.where((call) => call.method == 'completeAction'),
-          isEmpty,
-        );
-        h.clipboardWrite!.complete(null);
-        await tester.pumpAndSettle();
-        expect(
-          (h.calls
-                  .singleWhere((call) => call.method == 'completeAction')
-                  .arguments
-              as Map)['kind'],
-          'completed',
-        );
-        expect(
-          h.gateway.commands.any(
-            (request) =>
-                request.command is NativeCommandEvent &&
-                ((request.command as NativeCommandEvent).value
-                        is DesktopEventMouse ||
-                    (request.command as NativeCommandEvent).value
-                        is DesktopEventKey ||
-                    (request.command as NativeCommandEvent).value
-                        is DesktopEventText),
-          ),
-          isFalse,
-        );
-        await h.close(tester);
-        expect(tester.takeException(), isNull);
-      },
-    );
-  }
-  testWidgets('normal 菜单打开后原 pane 意图失效，迟到选项不请求新焦点或发 Paste', (tester) async {
-    final h = _PaneHarness();
-    await h.mount(tester);
-    h.frame();
-    await tester.pumpAndSettle();
-    h.menu();
-    await tester.pumpAndSettle();
-    expect(find.byType(f.MenuFlyout), findsOneWidget);
-    final focused = h.calls
-        .where((call) => call.method == 'requestFocus')
-        .length;
-    h.allowed = false;
-    await tester.tap(find.text('粘贴'));
-    await tester.pumpAndSettle();
-    expect(
-      h.calls.where((call) => call.method == 'requestFocus').length,
-      focused,
-    );
-    expect(
-      h.gateway.commands.where(
-        (request) => request.command is NativeCommandAction,
-      ),
-      isEmpty,
-    );
-    await h.close(tester);
-    expect(tester.takeException(), isNull);
-  });
 }

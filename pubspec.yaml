@@ -43,7 +43,7 @@ dependencies:
   terminal_view:
     git:
       url: https://github.com/MoyuTeams/terminal_view.git
-      ref: fb19f119821cf327a3bee4f11d522826b062e54d
+      ref: e8f23569c6e07a04dad11a3459d456d8d71c0b4c
   rinf: ^8.10.1
   path_provider: ^2.1.6
   url_launcher: ^6.3.2
