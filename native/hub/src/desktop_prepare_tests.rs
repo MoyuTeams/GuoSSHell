@@ -277,8 +277,18 @@ async fn default_guard_preserves_prepared_entry_font_and_budget_until_cancel() {
             .failure,
         Failure::Cancelled
     );
-    assert_eq!(table.budget.usage(), Usage::default());
+    assert_eq!(
+        table.budget.usage(),
+        Usage {
+            count: 0,
+            bytes: bytes.len(),
+            inflight: 0
+        },
+        "取消释放准备字体，但尚未交付的独立二进制仍持有额度"
+    );
     assert!(weak.upgrade().is_none());
+    drop(bytes);
+    assert_eq!(table.budget.usage(), Usage::default());
     f.close();
 }
 
@@ -373,8 +383,12 @@ async fn prepared_configuration_catalog_and_actual_font_survive_edits_and_runtim
     assert_eq!(resource.bytes().as_ref(), bytes.as_slice());
     assert_eq!(
         table.budget.usage(),
-        Usage::default(),
-        "准备预算转为运行所有权"
+        Usage {
+            count: 0,
+            bytes: bytes.len() * 2 + METADATA_LIMIT,
+            inflight: 0,
+        },
+        "Start 释放准备槽位，但运行字体和发送字节仍受计量"
     );
     assert_eq!(
         table
@@ -392,6 +406,209 @@ async fn prepared_configuration_catalog_and_actual_font_survive_edits_and_runtim
     drop(launch);
     assert!(weak.upgrade().is_none(), "退出释放实际资源");
     f.close();
+}
+
+#[tokio::test]
+async fn repeated_binary_handoff_retains_running_font_without_accumulating_orphaned_quota() {
+    let f = Fixture::new();
+    f.slot("apply");
+    let mut profile = crate::settings::default_profile(&f.context.repository).expect("默认配置");
+    crate::profile_fonts::write_binding(
+        &mut profile.settings,
+        &crate::profile_fonts::binding(ProfileFontMode::InheritTerminalSlot, None),
+    )
+    .expect("继承字体");
+    f.save(profile);
+    let mut table = Preparations::enabled_for_test();
+    for generation in 1..=3 {
+        let request = prepare(1, generation, generation as u32 * 10);
+        let (identity, lease, _) = table.begin(request.clone(), Instant::now()).expect("预约");
+        let loaded = f.load(&request, identity.clone(), lease).await;
+        let (reply, bytes) = table.complete(loaded, Instant::now()).expect("就绪");
+        let length = bytes.len();
+        assert!(length > 0);
+        let launch = table
+            .start(&start(&request, &identity), secret(), Instant::now())
+            .expect("运行转移");
+        let retained = launch.target.font.as_ref().expect("运行字体").clone();
+        let weak = Arc::downgrade(retained.resource.as_ref().expect("实际字体").bytes());
+        // Rust 测试未注册 Dart isolate，真实 sender 拒绝交付并销毁 binary。
+        bytes.send(reply);
+        let running = Usage {
+            count: 0,
+            bytes: length + METADATA_LIMIT,
+            inflight: 0,
+        };
+        assert_eq!(
+            table.budget.usage(),
+            running,
+            "发送失败不能留下无 owner 的字节额度"
+        );
+        drop(launch);
+        assert_eq!(
+            table.budget.usage(),
+            running,
+            "实际运行字体的迟到 holder 继续计量"
+        );
+        assert!(weak.upgrade().is_some());
+        drop(retained);
+        assert!(weak.upgrade().is_none());
+        assert_eq!(table.budget.usage(), Usage::default());
+    }
+    f.close();
+}
+
+#[tokio::test]
+async fn large_configuration_keeps_small_selected_projection_and_unknown_metadata() {
+    let f = Fixture::new();
+    let mut selected = crate::settings::default_profile(&f.context.repository).expect("默认配置");
+    selected.settings.terminal_type = "vt220".into();
+    selected.settings.answerback = "完整应答".into();
+    selected.settings.font_family = "selected-family".into();
+    crate::profile_fonts::write_binding(
+        &mut selected.settings,
+        &crate::profile_fonts::binding(ProfileFontMode::ExplicitFamily, None),
+    )
+    .expect("显式字体");
+    let unknown = serde_json::json!({"version": 97, "payload": "未知数据".repeat(40000)});
+    selected
+        .settings
+        .extensions
+        .insert("future.selected".into(), unknown.clone());
+    let snapshot = f.context.repository.load_configuration().expect("配置");
+    let mut profiles = vec![selected.clone()];
+    for index in 0..80 {
+        let mut profile = selected.clone();
+        profile.id = uuid::Uuid::new_v4().into();
+        profile.name = format!("其他配置{index}");
+        profiles.push(profile);
+    }
+    let outcome = f
+        .context
+        .repository
+        .commit_configuration(ConfigurationChange {
+            expected_revision: snapshot.revision,
+            settings: snapshot.settings,
+            upsert_profiles: profiles,
+            delete_profiles: vec![],
+        })
+        .expect("大配置 CAS");
+    assert!(matches!(
+        outcome,
+        rshell_m0::rshell_storage::ConfigurationCommitOutcome::Applied { .. }
+    ));
+    let revision = f
+        .context
+        .repository
+        .load_configuration()
+        .expect("快照")
+        .revision;
+    let mut table = Preparations::enabled_for_test();
+    let mut request = prepare(1, 1, 10);
+    request.profile_id = selected.id.0.to_string();
+    let (identity, lease, _) = table.begin(request.clone(), Instant::now()).expect("预约");
+    let loaded = f.load(&request, identity.clone(), lease).await;
+    assert!(
+        loaded.result.is_ok(),
+        "正常 selected 不受整库序列化规模限制：{:?}",
+        loaded.result.as_ref().err()
+    );
+    let (reply, bytes) = table.complete(loaded, Instant::now()).expect("就绪");
+    let projection = reply.snapshot.expect("完整投影");
+    assert_eq!(projection.profile.terminal_type, "vt220");
+    assert_eq!(projection.profile.answerback, "完整应答");
+    assert_eq!(projection.font.actual_family, "selected-family");
+    assert_eq!(projection.font.configuration_revision, revision);
+    assert_eq!(projection.font.profile_id, selected.id.0.to_string());
+    assert!(bytes.is_empty());
+    let after = f
+        .context
+        .repository
+        .load_configuration()
+        .expect("原业务数据");
+    assert_eq!(after.profiles.len(), 81);
+    assert!(
+        after
+            .profiles
+            .iter()
+            .all(|p| p.settings.extensions.get("future.selected") == Some(&unknown))
+    );
+    f.close();
+}
+
+#[tokio::test]
+async fn retained_command_and_overridden_raw_font_cannot_bypass_metadata_admission() {
+    for case in 0..3 {
+        let oversized_family = case == 1;
+        let f = Fixture::new();
+        let mut profile = crate::settings::default_profile(&f.context.repository).expect("配置");
+        if oversized_family {
+            profile.settings.font_family = "f".repeat(METADATA_LIMIT + 1);
+            crate::profile_fonts::write_binding(
+                &mut profile.settings,
+                &crate::profile_fonts::binding(ProfileFontMode::ExplicitFamily, None),
+            )
+            .expect("实际字体绑定");
+        }
+        f.save(profile.clone());
+        let mut connection = ConnectionProfile::new("目录目标", "example.test");
+        connection.username = "fixture".into();
+        connection.transport = rshell_m0::rshell_core::TransportKind::NativeSsh;
+        connection.authentication = rshell_m0::rshell_core::AuthenticationKind::Password;
+        connection.terminal_profile_id = Some(profile.id);
+        if oversized_family {
+            connection.terminal_overrides.font_family = Some("small-family".into());
+        } else {
+            let command_bytes = if case == 2 {
+                // 单份合法，但运行目标、attempt 与 Start 请求的共存数据超过预约。
+                METADATA_LIMIT / 3 + 1024
+            } else {
+                METADATA_LIMIT + 1
+            };
+            connection.remote_command = Some("c".repeat(command_bytes));
+        }
+        f.context
+            .credentials
+            .apply_catalog(
+                CatalogMutation::Create(connection.clone()),
+                SecretUpdate::Unchanged,
+            )
+            .expect("保存目录");
+        let catalog_before = f.context.repository.load_catalog().expect("已提交目录");
+        let configuration_before = f
+            .context
+            .repository
+            .load_configuration()
+            .expect("已提交配置");
+        let mut request = prepare(1, 1, 10);
+        request.connection_id = connection.id.0.to_string();
+        request.host.clear();
+        request.username.clear();
+        request.port = 0;
+        let mut table = Preparations::enabled_for_test();
+        let (identity, lease, _) = table.begin(request.clone(), Instant::now()).expect("预约");
+        let loaded = f.load(&request, identity, lease).await;
+        let (reply, bytes) = table.complete(loaded, Instant::now()).expect("准入结果");
+        assert_eq!(reply.failure, Failure::ByteBudget);
+        assert_eq!(reply.state, State::Failed);
+        assert!(reply.snapshot.is_none());
+        assert!(bytes.is_empty());
+        assert_eq!(table.budget.usage(), Usage::default());
+        let saved = f.context.repository.load_catalog().expect("原目录");
+        assert_eq!(
+            saved.connections.get(&connection.id),
+            catalog_before.connections.get(&connection.id)
+        );
+        let configuration = f.context.repository.load_configuration().expect("原配置");
+        assert_eq!(
+            configuration.profiles.iter().find(|p| p.id == profile.id),
+            configuration_before
+                .profiles
+                .iter()
+                .find(|p| p.id == profile.id)
+        );
+        f.close();
+    }
 }
 
 #[tokio::test(start_paused = true)]

@@ -103,10 +103,18 @@ std::uint32_t __cdecl SpySupport(const abi::SpikeOwner*, std::uint32_t operation
   ++active_spy->supports;
   return operation >= 1 && operation <= 4 ? abi::kUnsupported : abi::kInvalid;
 }
+std::uint32_t __cdecl SpyCommand(const abi::SpikeOwner*, const abi::Command*, abi::Reply*) {
+  return abi::kUnsupported;
+}
+std::uint32_t __cdecl SpyCopy(const abi::SpikeOwner*, const abi::ActionLease*,
+    std::uint8_t*, std::size_t, std::size_t*) { return abi::kUnsupported; }
+std::uint32_t __cdecl SpyProjection(const abi::SpikeOwner*, abi::Projection*) {
+  return abi::kUnsupported;
+}
 
 bridge::FunctionsTable SpyTable() noexcept {
   return {SpyOpen, SpyKey, SpyRevoke, SpyJoin, SpyInspect, SpyMode, SpyRead,
-          SpySupport, bridge::TableEvidence::InjectedSpy};
+          SpySupport, SpyCommand, SpyCopy, SpyProjection, bridge::TableEvidence::InjectedSpy};
 }
 
 source::NativeKeyEvent Event(source::ContextIdentity context, WPARAM vkey,
@@ -326,7 +334,14 @@ void SpyCases(HWND root, HINSTANCE instance) noexcept {
     table.key = nullptr;
     bridge::NativeInputBridge incomplete(window, table, true);
     Check(9, FAILED(window.Create(root, instance, Options(incomplete))) &&
-                 spy.opens == 0 && Shutdown(window, incomplete));
+                  spy.opens == 0 && Shutdown(window, incomplete));
+  }
+  for (unsigned i = 0; i < 3; ++i) {
+    auto table = SpyTable();
+    if (i == 0) table.command = nullptr;
+    if (i == 1) table.copy = nullptr;
+    if (i == 2) table.projection = nullptr;
+    Check(11 + i, !table.available());
   }
   {
     source::WindowSource window;
@@ -347,12 +362,19 @@ void SpyCases(HWND root, HINSTANCE instance) noexcept {
   }
   Check(7, spy.request.version == abi::kVersion && spy.request.size == sizeof(spy.request) &&
                spy.request.explicit_opt_in == 1 && spy.request.reserved == 0 &&
-               spy.request.native_context == &window &&
+                spy.request.native_context == &window &&
+                spy.request.origin == abi::kDeclaredSynthetic &&
+                spy.request.platform == abi::kFixturePlatform && spy.request.registration != 0 &&
                spy.request.fixture_name_len == sizeof(abi::kFixtureName) - 1 &&
                std::memcmp(spy.request.fixture_name, abi::kFixtureName,
                            spy.request.fixture_name_len) == 0);
   auto callbacks = adapter.callbacks();
   const auto context = window.identity();
+  const auto fields = Event(context, VK_F4);
+  callbacks.key(callbacks.user, fields);
+  Check(10, spy.last_key.native_event == fields.native_event_id &&
+      spy.last_key.layout_revision == 1 &&
+      spy.last_key.same_event_state == static_cast<std::uint64_t>(fields.key_bits));
   const WPARAM keys[] = {VK_RETURN, VK_ESCAPE, VK_TAB, VK_BACK, VK_DELETE, VK_INSERT,
       VK_HOME, VK_END, VK_PRIOR, VK_NEXT, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT};
   const std::uint32_t kinds[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
@@ -585,6 +607,40 @@ bool ReadBytes(const bridge::FunctionsTable& functions, const abi::SpikeOwner& o
   return false;
 }
 
+// 仅独立 fixture 管理 caller 完成 lease；不把 admission.action 当作 GUI dispatch。
+bool ClaimAndAckFixtureAction(const bridge::FunctionsTable& functions,
+    const abi::SpikeOwner& owner, std::uint32_t action) noexcept {
+  abi::Command request{};
+  request.version = abi::kVersion;
+  request.size = sizeof(request);
+  request.opcode = abi::kClaimAction;
+  abi::Reply reply{};
+  const auto deadline = GetTickCount64() + 3000;
+  std::uint32_t status = abi::kBusy;
+  do {
+    status = functions.command(&owner, &request, &reply);
+    if (status != abi::kBusy) break;
+    Sleep(1);
+  } while (GetTickCount64() < deadline);
+  if (status != abi::kOk || reply.version != abi::kVersion || reply.size != sizeof(reply) ||
+      reply.action.owner != owner.handle || reply.action.context !=
+          reinterpret_cast<std::uintptr_t>(owner.native_context) || reply.action.action != action) return false;
+  const auto lease = reply.action;
+  request.opcode = abi::kAckAction;
+  request.args[0] = lease.owner;
+  request.args[1] = lease.context;
+  request.args[2] = lease.effect;
+  request.args[3] = lease.action;
+  request.args[4] = lease.target;
+  request.args[5] = 2;  // fixture 没有正常 GUI 消费者；明确取消，不谎报 GUI 已执行。
+  do {
+    status = functions.command(&owner, &request, &reply);
+    if (status != abi::kBusy) break;
+    Sleep(1);
+  } while (GetTickCount64() < deadline);
+  return status == abi::kOk && reply.status == status;
+}
+
 bool PumpOwned(source::WindowSource& window, unsigned candidate) noexcept {
   // 只读本次 source 的消息队列；绝不观察任意其他 HWND 的按键。
   MSG message{};
@@ -798,15 +854,15 @@ void BusyScheduleNeedsAdmittedPressure() noexcept {
   std::size_t effective = 0;
   unsigned accepted = 0;
   unsigned busy = 0;
-  // 注入数字轨迹不是 actual Rust；16 次独立 press 中 8 次 Busy、8 次真实形状准入。
+  // 注入数字轨迹不是 actual Rust；这里只核验固定 peer 字节的压力前置条件。
   for (unsigned press = 0; press < 16; ++press) {
     const abi::SpikeAdmission down{abi::kVersion, sizeof(abi::SpikeAdmission),
         press % 2 ? abi::kOk : abi::kBusy, press % 2 ? 1U : 0U,
-        press % 2 ? std::uint64_t{accepted * 2 + 1} : 0, 0, press % 2 ? 5U : 0U};
+        press % 2 ? std::uint64_t{accepted * 2 + 1} : 0, 0, 0};
     if (down.status == abi::kBusy) { ++busy; continue; }
     const abi::SpikeAdmission up{abi::kVersion, sizeof(abi::SpikeAdmission), abi::kOk,
-        1, down.seq + 1, 0, 9};
-    effective += down.byte_len + up.byte_len;
+        1, down.seq + 1, 0, 0};
+    if (down.seq && up.seq == down.seq + 1) effective += 5 + 9;
     ++accepted;
   }
   Check(550, busy == 8 && accepted == 8 && effective == 112);
@@ -884,8 +940,8 @@ bool PausedPeerCharge(UiRun& run) noexcept {
             snapshot->engine_instance == baseline.engine_instance &&
             snapshot->remote_applied == baseline.remote_applied &&
             !snapshot->stopped && !snapshot->worker_done && !snapshot->worker_joined &&
-            snapshot->charged_slots <= 4 && snapshot->charged_bytes <= 128 &&
-            snapshot->charged_bytes == snapshot->charged_slots * 32;
+             snapshot->charged_slots <= 14 && snapshot->charged_bytes <= 32 &&
+             snapshot->inflight <= 1;
       }
       Sleep(1);
     } while (GetTickCount64() < admission_deadline);
@@ -915,19 +971,21 @@ bool PausedPeerCharge(UiRun& run) noexcept {
       continue;  // 原 physical 已 Up，下一次才是独立 press；不重试同一 Down。
     }
     if (down.result.status != abi::kOk || down.result.disposition != 1 || down.result.seq != next ||
-        down.result.byte_len != sizeof(down_bytes) || down.result.action || down.modifiers ||
+         down.result.byte_len != 0 || down.result.effect != down.result.seq ||
+         down.result.action || down.modifiers ||
         down.raw_source != abi::kRawVerified) return false;
     ++next;
-    effective += down.result.byte_len;
+    // admission 不编码字节；先累计固定模式的预期值，最终必须逐字节验证真实 peer。
+    effective += sizeof(down_bytes);
     std::memcpy(expected.data() + expected_size, down_bytes, sizeof(down_bytes));
     expected_size += sizeof(down_bytes);
     bridge::NumericObservation up{};
     if (!PressureEvent(run, presses, source::KeyPhase::Up, &up, &present) || !present) return false;
     if (up.result.status == abi::kOk) {
-      if (up.result.disposition != 1 || up.result.seq != next || up.result.byte_len != sizeof(up_bytes) ||
-          up.result.action) return false;
+      if (up.result.disposition != 1 || up.result.seq != next || up.result.byte_len != 0 ||
+          up.result.effect != up.result.seq || up.result.action) return false;
       ++next;
-      effective += up.result.byte_len;
+      effective += sizeof(up_bytes);
     } else if (up.result.status == abi::kBusy && EmptyPressureReply(up.result)) {
       ++pending_up;
       deferred_up = true;  // 尚未计 9 bytes；不补发 Up。
@@ -980,7 +1038,7 @@ bool PausedPeerCharge(UiRun& run) noexcept {
       PressureSnapshot(5, presses, after, effective, total_read);
       if (after.hub_instance != baseline.hub_instance || after.engine_instance != baseline.engine_instance ||
           after.remote_applied != baseline.remote_applied || after.stopped || after.worker_done ||
-          after.worker_joined || after.charged_bytes > 128 || after.charged_slots > 4) return false;
+           after.worker_joined || after.charged_bytes > 32 || after.charged_slots > 14) return false;
       if (!ConfirmPendingF7Up(after, &next, &effective, &deferred_up)) return false;
       if (status == abi::kBusy && !count && !deferred_up && total_read == expected_size &&
           effective == expected_size && !after.charged_slots && !after.charged_bytes &&
@@ -1026,18 +1084,18 @@ void ActualCases(UiRun& run) noexcept {
   const bool f2_repeat = Send(run, VK_F2, 0x3c, source::KeyPhase::Repeat);
   if (!f2_repeat) { Check(206, false); return; }
   const bool f2_up = Send(run, VK_F2, 0x3c, source::KeyPhase::Up);
-  if (!Check(206, f2_down && f2_repeat && f2_up && WaitIdle(run.functions, owner, 0))) return;
+  if (!Check(206, f2_down && f2_repeat && f2_up &&
+      ClaimAndAckFixtureAction(run.functions, owner, 1) && WaitIdle(run.functions, owner, 0))) return;
   unsigned actions = 0;
   for (std::size_t i = start; i < run.observations.count; ++i) {
     const auto& row = run.observations.rows[i];
-    if (row.result.action == 1 && row.phase == abi::kDown) ++actions;
-    Check(210 + static_cast<unsigned>(i - start), row.result.action == 0 ||
-                                                  (row.phase == abi::kDown && row.result.action == 1));
+    if (row.result.disposition == 1 && row.phase == abi::kDown && row.result.effect != 0) ++actions;
+    Check(210 + static_cast<unsigned>(i - start), row.result.action == 0);
   }
   Check(213, actions == 1 && !run.observations.overflow);
-  if (!Check(214, UiCommand(run, kSupport) && run.text_support == abi::kUnsupported &&
-             run.functions.support(&owner, 1) == abi::kUnsupported &&
-             run.functions.support(&owner, 3) == abi::kUnsupported)) return;
+  if (!Check(214, UiCommand(run, kSupport) && run.text_support == abi::kOk &&
+             run.functions.support(&owner, 1) == abi::kOk &&
+             run.functions.support(&owner, 3) == abi::kOk)) return;
   // 模式从真实 stream peer 写入，由 engine 回应 query；不缓存 mode 或复制 encoder。
   for (std::uint32_t command = 1; command <= 3; ++command) {
     Check(220 + command, run.functions.peer_mode(&owner, command) == abi::kOk &&
@@ -1145,24 +1203,24 @@ bool StandaloneTable(const wchar_t* path, bridge::FunctionsTable* table) {
   const auto diagnostic = parent.Preflight(path, true, nonce);
   if (diagnostic.status != sdk::Status::kOk || !diagnostic.fixture_only ||
       diagnostic.core_abi != abi::kVersion || diagnostic.pointer_bits != 64 ||
-      diagnostic.owners != 0 || diagnostic.core_exports != 8 || diagnostic.rinf_exports != 4) return false;
+       diagnostic.owners != 0 || diagnostic.core_exports != abi::kCoreSymbols.size() || diagnostic.rinf_exports != 4) return false;
   // lookup 只选择父已映射的 module；随后 FROM_ADDRESS 检查才是归属证据。
   const HMODULE module = GetModuleHandleW(parent.compiled_lib_path().c_str());
   if (!module) return false;
-  const char* names[] = {abi::kOpenSymbol, abi::kKeySymbol, abi::kRevokeSymbol,
-      abi::kJoinSymbol, abi::kInspectSymbol, abi::kPeerModeSymbol,
-      abi::kPeerReadSymbol, abi::kSupportSymbol};
-  std::array<FARPROC, 8> addresses{};
+  std::array<FARPROC, abi::kCoreSymbols.size()> addresses{};
   for (std::size_t i = 0; i < addresses.size(); ++i) {
-    addresses[i] = GetProcAddress(module, names[i]);
+    addresses[i] = GetProcAddress(module, abi::kCoreSymbols[i]);
     if (!MappedHere(module, addresses[i])) return false;
   }
   *table = {reinterpret_cast<abi::OpenFn>(addresses[0]), reinterpret_cast<abi::KeyFn>(addresses[1]),
       reinterpret_cast<abi::RevokeFn>(addresses[2]), reinterpret_cast<abi::JoinFn>(addresses[3]),
       reinterpret_cast<abi::InspectFn>(addresses[4]), reinterpret_cast<abi::PeerModeFn>(addresses[5]),
-      reinterpret_cast<abi::PeerReadFn>(addresses[6]), reinterpret_cast<abi::SupportFn>(addresses[7]),
-      bridge::TableEvidence::StandaloneCheckedFixture};
-  std::printf("preflight_fixture=1 core_abi=2 pointer_bits=64 owners=0 mapped_exports=8\n");
+       reinterpret_cast<abi::PeerReadFn>(addresses[6]), reinterpret_cast<abi::SupportFn>(addresses[7]),
+       reinterpret_cast<abi::CommandFn>(addresses[8]), reinterpret_cast<abi::CopyFn>(addresses[9]),
+       reinterpret_cast<abi::ProjectionFn>(addresses[10]),
+       bridge::TableEvidence::StandaloneCheckedFixture};
+  std::printf("preflight_fixture=1 core_abi=%u pointer_bits=64 owners=0 mapped_exports=%zu\n",
+      abi::kVersion, abi::kCoreSymbols.size());
   return true;
 }
 

@@ -1,4 +1,4 @@
-//! 桌面有序入口的来源与资源上限。业务按键策略由后续独立模块接入。
+//! 桌面有序入口的来源、资源上限与输入流排他选择。
 
 use crate::signals::desktop_session::{
     DesktopEvent, DesktopFailure, DesktopOrdered, DesktopSource,
@@ -34,6 +34,8 @@ impl Drop for InputLease {
 
 pub(crate) struct Protocol {
     pub source: Source,
+    pub mode: Arc<crate::desktop_input_port::InputMode>,
+    pub input: Option<Arc<crate::desktop_input_port::InputPort>>,
     last_seq: u64,
     usage: Arc<Mutex<Usage>>,
 }
@@ -41,6 +43,8 @@ impl Protocol {
     pub(crate) fn new(source: DesktopSource, identity: String) -> Self {
         Self {
             source: Source { source, identity },
+            mode: Arc::default(),
+            input: None,
             last_seq: 0,
             usage: Arc::default(),
         }
@@ -77,6 +81,9 @@ impl Protocol {
         }
         if !control && (u.events >= INPUT_EVENTS || u.bytes.saturating_add(bytes) > INPUT_BYTES) {
             return Err(DesktopFailure::Busy);
+        }
+        if !self.mode.legacy() {
+            return Err(DesktopFailure::MixedMode);
         }
         self.last_seq = r.seq;
         u.events += 1;

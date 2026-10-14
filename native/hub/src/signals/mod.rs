@@ -10,6 +10,7 @@
 //! 全局广播，多个会话并存时靠它分流。
 
 pub mod catalog;
+pub mod desktop_native_input;
 pub mod desktop_session;
 pub mod interaction;
 pub mod keys;

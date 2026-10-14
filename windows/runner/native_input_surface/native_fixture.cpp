@@ -56,6 +56,7 @@ struct Consumer final : Callbacks {
     ++revokes; *fence = owner.context; return !busy_revoke;
   }
   bool ConfirmRetired(const OwnerRef&, uint64_t) noexcept override { ++retired; return on_confirm ? on_confirm() : true; }
+  bool ContextQuiet(const OwnerRef&, const TicketRef*, uint64_t) noexcept override { ++context_quiet; return true; }
   void Pointer(const OwnerRef&, const PointerEvent& value) noexcept override { ++pointers; pointer = value; }
   Disposition disposition{Disposition::AllowNativeText};
   TicketRef last{};
@@ -64,6 +65,7 @@ struct Consumer final : Callbacks {
   Fault cancel_fault{};
   PointerEvent pointer{};
   unsigned gates{}, reserves{}, preedits{}, chunks{}, finishes{}, cancels{}, faults{}, revokes{}, retired{}, pointers{};
+  unsigned context_quiet{};
   bool fail_reserve{}, fail_payload{}, busy_revoke{};
   std::function<bool()> on_confirm;
   std::function<void()> on_reserve;
@@ -227,9 +229,10 @@ void StoreContracts(HWND hwnd, int* live) {
   Hr(store->RequestLock(TS_LF_READ | TS_LF_SYNC, &session), 123);
   Hr(session, 124); Check(sink->locks == 2, 125);
   Hr(store->EndDispatch(), 126);
-  Check(consumer->finishes == 1 && consumer->bytes == "a\xf0\x9f\x98\x80" "b", 127);
+  // 直接 ACP lock 不冒充真实 TSF OnEndEdit；提交覆盖见 ActualTsf。
+  Check(consumer->finishes == 0 && consumer->bytes.empty() && !store->Sealed(), 127);
   Hr(store->PumpNotifications(), 128);
-  Check(consumer->finishes == 1 && sink->texts == 0, 129);
+  Check(consumer->finishes == 0 && sink->texts == 0, 129);
   Check(FAILED(store->Bind(Ticket(102))), 130);
   Hr(store->UnadviseSink(sink.Get()), 131);
   store->Retire();
@@ -361,6 +364,47 @@ void ActualPlain(HWND hwnd, ITfThreadMgr* manager, TfClientId client, int* live)
     Check(surface->BeginRevoke() == Fault::None, 283);
     surface.Reset(); Check(pool.Collect() == 0, 284);
   }
+}
+
+void ContextLocalCancel(HWND hwnd, ITfThreadMgr* manager, TfClientId client, int* live) {
+  ContextPool pool;
+  auto consumer = std::make_shared<Consumer>();
+  ComPtr<NativeSurface> surface;
+  Hr(pool.Create(hwnd, Owner(291), consumer, std::make_shared<Permit>(live), &surface,
+      NativeOrigin::DeclaredSynthetic), 290);
+  Hr(surface->Open(manager, client), 291);
+  Hr(surface->ActivateDocument(), 292);
+  auto* store = surface->Store();
+  Hr(store->Bind(Ticket(291)), 293);
+  Hr(store->BeginDispatch({Ticket(291), 291, 1, TextRoute::TsfStore}), 294);
+  ComPtr<ITfComposition> composition;
+  ComPtr<CompositionSink> sink; sink.Attach(new CompositionSink());
+  RunEdit(surface->Context(), client, [&](TfEditCookie cookie) {
+    ComPtr<ITfRange> range;
+    HRESULT hr = SetWhole(surface->Context(), cookie, L"pending", 7, &range);
+    ComPtr<ITfContextComposition> owner;
+    if (SUCCEEDED(hr)) hr = surface->Context()->QueryInterface(IID_PPV_ARGS(&owner));
+    if (SUCCEEDED(hr)) hr = owner->StartComposition(cookie, range.Get(), sink.Get(), &composition);
+    return hr;
+  }, 295);
+  Hr(store->EndDispatch(), 298);
+  RunEdit(surface->Context(), client, [&](TfEditCookie) {
+    Check(surface->BeginContextRetirement(19) == Fault::NativeRetirementPending, 900);
+    Check(!store->CanDetach() && FAILED(surface->RetirementResult()), 901);
+    Check(!consumer->context_quiet && !consumer->revokes && !consumer->cancels, 902);
+    return S_OK;
+  }, 903);
+  ComPtr<TextStore> external_store(store);
+  // 原锁退出后在 UI Pump 重试；不把 TerminateComposition 返回当 quiet。
+  surface->Pump();
+  Check(sink->terminated == 1 && !store->Composing(), 906);
+  Check(!consumer->context_quiet, 907);
+  composition.Reset(); sink.Reset();
+  external_store.Reset();
+  for (unsigned i = 0; i < 16 && surface->State() != FocusState::Retired; ++i) surface->Pump();
+  Check(surface->State() == FocusState::Retired && consumer->context_quiet == 1, 908);
+  Check(!consumer->revokes && !consumer->cancels && !consumer->finishes, 909);
+  surface.Reset(); Check(pool.Collect() == 0, 910);
 }
 
 void QueueAndEpoch(HWND hwnd, ITfThreadMgr* manager, TfClientId client, int* live) {
@@ -554,9 +598,10 @@ void PendingUpgrade(HWND hwnd, int* live) {
   Check(granted_count == 4 && granted[0] == TS_LF_READ && granted[1] == TS_LF_READ &&
         granted[2] == TS_LF_READ && granted[3] == TS_LF_READWRITE && writes == 1, 809);
   Hr(store->EndDispatch(), 817);
-  Check(consumer->finishes == 1 && consumer->bytes == "w", 818);
+  Check(consumer->finishes == 0 && consumer->bytes.empty() && !store->Sealed(), 818);
   std::printf("STAT upgrade grants=%zu writes=%zu\n", granted_count, writes);
   Hr(store->UnadviseSink(sink.Get()), 810);
+  store->Retire();
 }
 
 void OversizedInput(HWND hwnd, int* live) {
@@ -834,6 +879,7 @@ int main(int argc, char** argv) {
         StoreContracts(hwnd, &live);
         ActualTsf(hwnd, manager.Get(), client, &live);
         ActualCancel(hwnd, manager.Get(), client, &live);
+        ContextLocalCancel(hwnd, manager.Get(), client, &live);
         ActualPlain(hwnd, manager.Get(), client, &live);
         NativeMessages(hwnd, manager.Get(), client, &live);
         QueueAndEpoch(hwnd, manager.Get(), client, &live);

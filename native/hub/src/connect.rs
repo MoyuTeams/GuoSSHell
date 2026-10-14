@@ -143,14 +143,28 @@ pub struct DesktopTarget {
     pub target: Target,
     pub settings: ResolvedTerminalProfile,
     pub quick_password: SecretString,
-    pub font: Option<crate::profile_fonts::ResolvedProfileFont>,
+    pub(crate) font: Option<RetainedFont>,
+}
+
+/// 字体与预约共同克隆；异步加载、运行、离线与关闭持同一资源责任。
+#[derive(Clone)]
+pub(crate) struct RetainedFont {
+    font: crate::profile_fonts::ResolvedProfileFont,
+    _lease: Option<crate::desktop_prepare::Lease>,
+}
+
+impl std::ops::Deref for RetainedFont {
+    type Target = crate::profile_fonts::ResolvedProfileFont;
+    fn deref(&self) -> &Self::Target {
+        &self.font
+    }
 }
 
 /// 准备持有只包含非秘密目标和配置；不保存带 password 字段的旧连接 DTO。
 pub(crate) struct PreparedTarget {
     pub target: Target,
     pub settings: ResolvedTerminalProfile,
-    pub font: crate::profile_fonts::ResolvedProfileFont,
+    pub font: RetainedFont,
 }
 
 /// 新协议只在桌面编译目标开放；即使移动端伪造信号，也无法进入目标解析或传输层。
@@ -323,13 +337,16 @@ async fn resolve_desktop_inner(
             .iter()
             .find(|profile| profile.id.0.to_string() == wanted)
             .ok_or((DesktopConnectError::ProfileNotFound, "profile_id"))?;
+        // 只持有所选有效配置；未知业务元数据仍完整留在 configuration 中。
+        let overrides = saved
+            .as_ref()
+            .map(|profile| profile.terminal_overrides.clone())
+            .unwrap_or_default();
+        let settings = profile
+            .settings
+            .resolve(&overrides)
+            .with_app_key_bindings(&snapshot.settings.key_bindings);
         let font = if capture_font {
-            // 元数据与字体分别有界，通用 family override 不改变字体绑定意图。
-            let metadata = serde_json::to_vec(&(&snapshot.settings, &snapshot.profiles, &saved))
-                .map_err(|_| (DesktopConnectError::Storage, "configuration"))?;
-            if metadata.len() > crate::desktop_prepare::METADATA_LIMIT {
-                return Err((DesktopConnectError::InvalidField, "snapshot_budget"));
-            }
             let root = task_context
                 .known_hosts
                 .parent()
@@ -343,17 +360,11 @@ async fn resolve_desktop_inner(
         } else {
             None
         };
-        Ok::<_, (DesktopConnectError, &'static str)>((
-            profile.settings.clone(),
-            snapshot.settings.key_bindings,
-            saved,
-            font,
-        ))
+        Ok::<_, (DesktopConnectError, &'static str)>((settings, saved, font))
     })
     .await
     .map_err(|_| (DesktopConnectError::Storage, "storage task".to_owned()))?;
-    let (settings, app_bindings, saved, font) =
-        loaded.map_err(|(error, field)| (error, field.to_owned()))?;
+    let (settings, saved, font) = loaded.map_err(|(error, field)| (error, field.to_owned()))?;
 
     let expected = match request.target {
         DesktopTargetKind::NativeSsh => TransportKind::NativeSsh,
@@ -406,17 +417,64 @@ async fn resolve_desktop_inner(
             )
         })?,
     };
-    // 与连接覆盖项、应用绑定从同一设置快照解析；profile 的同键绑定优先。
-    let settings = settings
-        .resolve(&target.profile.terminal_overrides)
-        .with_app_key_bindings(&app_bindings);
-    Ok(DesktopTarget {
+    let resolved = DesktopTarget {
         request: native,
         target,
         settings,
         quick_password,
-        font,
-    })
+        font: font.map(|font| RetainedFont {
+            font,
+            _lease: _io_lease,
+        }),
+    };
+    if capture_font {
+        let font = resolved
+            .font
+            .as_ref()
+            .ok_or((DesktopConnectError::Storage, "font_snapshot".to_owned()))?;
+        let projection =
+            crate::desktop_prepare::project(&resolved.settings, &font.projection.profile_id);
+        // 仅计所选冻结对象，不序列化整库；三份覆盖运行、attempt 及 Start/回复副本。
+        // 保留目录扩展的完整值，不因忽略未知字段低估实际持有的数据。
+        serde_json::to_writer(
+            MetadataBudget::default(),
+            &(
+                &projection,
+                &projection,
+                &projection,
+                &resolved.target.profile,
+                &resolved.target.profile,
+                &resolved.target.profile,
+                &font.projection,
+                &font.projection,
+                &font.projection,
+            ),
+        )
+        .map_err(|_| {
+            (
+                DesktopConnectError::InvalidField,
+                "snapshot_budget".to_owned(),
+            )
+        })?;
+    }
+    Ok(resolved)
+}
+
+/// 对实际输出计数，不为检查额度先分配一份 JSON 副本。
+#[derive(Default)]
+struct MetadataBudget(usize);
+
+impl std::io::Write for MetadataBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > crate::desktop_prepare::METADATA_LIMIT.saturating_sub(self.0) {
+            return Err(std::io::Error::other("snapshot_budget"));
+        }
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Target {

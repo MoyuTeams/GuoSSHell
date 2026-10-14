@@ -12,6 +12,17 @@ add_executable(${BINARY_NAME} WIN32
   "utils.cpp"
   "win32_window.cpp"
   "window_material.cpp"
+  "desktop_native_input/runtime_module.cpp"
+  "desktop_native_input/channel.cpp"
+  "desktop_native_input/raw_input.cpp"
+  "desktop_native_input/geometry.cpp"
+  "desktop_native_input/host.cpp"
+  "desktop_native_input/pane.cpp"
+  "desktop_native_input/pane_channel.cpp"
+  "desktop_native_input/pane_input.cpp"
+  "native_input_surface/native_surface.cpp"
+  "native_input_surface/text_store.cpp"
+  "native_input_surface/layout_metadata.cpp"
   "native_input_spike_sdk_channel.cpp"
   "native_input_spike_sdk/bootstrap_host.cpp"
   "native_input_spike_live_source/source_fixture_host.cpp"
@@ -47,7 +58,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "psapi.lib")
-target_link_libraries(${BINARY_NAME} PRIVATE "ole32.lib" "uuid.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "ole32.lib" "oleaut32.lib" "uuid.lib" "user32.lib" "gdi32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

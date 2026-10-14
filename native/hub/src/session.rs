@@ -51,6 +51,9 @@ use crate::signals::{
 #[path = "session_capabilities.rs"]
 mod capabilities;
 
+#[path = "session_input.rs"]
+mod native_input;
+
 const NO_CURSOR: i32 = -1;
 /// 远端 PTY 最小可行尺寸；Flutter 在极端布局下可能量出 0。
 const MIN_COLS: u16 = 2;
@@ -147,6 +150,11 @@ pub async fn supervisor(
     let start_rx = DesktopStart::get_dart_signal_receiver();
     let cancel_rx = DesktopCancel::get_dart_signal_receiver();
     let ordered_rx = DesktopOrdered::get_dart_signal_receiver();
+    let native_command_rx =
+        crate::signals::desktop_native_input::DesktopNativeCommand::get_dart_signal_receiver();
+    let native_lifecycle_query_rx =
+        crate::signals::desktop_native_input::DesktopNativeLifecycleQuery::get_dart_signal_receiver(
+        );
     let desktop_reply_rx = DesktopReply::get_dart_signal_receiver();
     let mut preparations = Preparations::default();
     let mut loading = tokio::task::JoinSet::new();
@@ -238,7 +246,7 @@ pub async fn supervisor(
             loaded = loading.join_next(), if !loading.is_empty() => {
                 match loaded {
                     Some(Ok(loaded)) => if let Some((reply, bytes)) = preparations.complete(loaded, Instant::now()) {
-                        reply.send_signal_to_dart(bytes);
+                        bytes.send(reply);
                     },
                     Some(Err(_)) => task_failures += 1,
                     None => {}
@@ -263,8 +271,18 @@ pub async fn supervisor(
                         request.prepare_request_id, request.identity, DesktopPreparationState::Failed, failure)),
                     Ok(launch) => {
                         let session_id = launch.source.session_id;
-                        let protocol = Protocol::new(launch.source.clone(), launch.identity.clone());
+                        let mut protocol = Protocol::new(launch.source.clone(), launch.identity.clone());
                         let source = protocol.source.clone();
+                        let registration = match crate::desktop_input_port::InputPort::register(source.clone(),
+                            Arc::new(launch.target.settings.clone()), protocol.mode.clone()) {
+                            Ok(registration) => registration,
+                            Err(_) => {
+                                desktop_prepare::publish(desktop_prepare::result(request.source, request.request_id,
+                                    request.prepare_request_id, request.identity, DesktopPreparationState::Failed, DesktopFailure::ByteBudget));
+                                continue;
+                            }
+                        };
+                        protocol.input = Some(registration.0.clone());
                         let (commands_tx, commands) = unbounded_channel();
                         let (replies_tx, replies) = unbounded_channel();
                         let (close, closing) = tokio::sync::watch::channel(false);
@@ -276,8 +294,10 @@ pub async fn supervisor(
                         let context = context.clone();
                         let finished = finished_tx.clone();
                         running.spawn(async move {
-                            let failures = desktop_runtime::SOURCE.scope(source, crate::transport_lifecycle::owner(closing,
-                                run_prepared_session(context, launch.target, commands, replies))).await;
+                            let failures = crate::desktop_input_port::CURRENT.scope(registration.0.clone(),
+                                desktop_runtime::SOURCE.scope(source, crate::transport_lifecycle::owner(closing,
+                                run_prepared_session(context, launch.target, commands, replies)))).await;
+                            drop(registration);
                             let _ = finished.send((session_id, generation));
                             failures
                         });
@@ -290,6 +310,20 @@ pub async fn supervisor(
                 let mut result = DesktopEventResult { source: request.source.clone(), identity: request.identity.clone(), seq: request.seq, failure: DesktopFailure::None, action: None };
                 result.failure = route_ordered(&mut sessions, request);
                 result.send_signal_to_dart();
+            }
+            pack = native_command_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let disconnect = matches!(pack.message.command, crate::signals::desktop_native_input::NativeCommand::Event(DesktopEvent::Disconnect));
+                let result = native_input::route_command(pack.message);
+                if disconnect && result.failure == crate::signals::desktop_native_input::NativeCommandFailure::None
+                    && let Some(handle) = sessions.get(&result.source.session_id) {
+                    handle.close.send_replace(true);
+                }
+                result.send_signal_to_dart();
+            }
+            pack = native_lifecycle_query_rx.recv() => {
+                let Some(pack) = pack else { break };
+                crate::desktop_input_port::query_lifecycle(pack.message).send_signal_to_dart();
             }
             pack = connect_rx.recv() => {
                 let Some(pack) = pack else { break };
@@ -552,7 +586,7 @@ fn route_ordered(sessions: &mut HashMap<u32, SessionHandle>, r: DesktopOrdered) 
             rectangular,
         }),
         DesktopEvent::Copy => SessionCommand::Copy,
-        // 4B-I 拥有完整绑定/Alt/默认候选决策；不能临时把 Super 或 release 错编成远端输入。
+        // 旧信号没有可信 raw/dual/text ownership；不能替原生宿主证明事件来源。
         DesktopEvent::Key { .. } => return DesktopFailure::PolicyUnavailable,
     };
     if handle
@@ -630,6 +664,7 @@ struct Screen {
     engine: DefaultTerminalEngine,
     /// 显示的窗口由 Dart 按滚动位置请求；打字、粘贴时回到屏幕。
     window: Window,
+    cols: u16,
     rows: u16,
     stats: PerfWindow,
     pacer: FramePacer,
@@ -646,6 +681,7 @@ impl Screen {
         Self {
             engine,
             window: Window::Bottom,
+            cols: size.cols,
             rows: size.rows,
             stats: PerfWindow::new(),
             pacer: FramePacer::new(),
@@ -665,6 +701,7 @@ impl Screen {
             &mut self.stats,
             &mut self.pacer,
         )?);
+        native_input::publish_projection(self);
         Ok(())
     }
 
@@ -716,6 +753,7 @@ impl Screen {
             .resize(size)
             .map_err(|error| format!("engine resize: {error:?}"))?;
         self.rows = size.rows;
+        self.cols = size.cols;
         self.changed(session_id)
     }
 
@@ -822,13 +860,14 @@ async fn run_session_inner(
     // 回答通道跨重连复用，提示编号也必须跨重连唯一，旧回答不能命中新提示。
     let mut prompts = PromptIds::default();
     let frozen_target = if desktop_runtime::SOURCE.try_with(|_| ()).is_ok() {
-        prepared_target.clone()
+        prepared_target.take()
     } else {
         None
     };
 
     loop {
         let first_attempt = quick_password.is_some();
+        let _ = crate::desktop_input_port::CURRENT.try_with(|port| port.begin_attempt());
         let password = quick_password
             .take()
             .unwrap_or_else(|| SecretString::from(String::new()));
@@ -878,6 +917,15 @@ async fn run_session_inner(
                 return;
             }
             Err((abort, host, port)) => {
+                let authentication = matches!(
+                    &abort,
+                    Abort::Failed {
+                        failure: FailureKind::Authentication,
+                        ..
+                    }
+                );
+                let _ = crate::desktop_input_port::CURRENT
+                    .try_with(|port| port.attempt_failed(authentication));
                 // 第一次连接就被取消（关了密码框等）：会话就此结束（Dart 关掉窗格）。
                 // 其余情况留在断开状态，等用户重试或关掉窗格。
                 if first_attempt && matches!(abort, Abort::Cancelled) {
@@ -905,6 +953,7 @@ async fn run_session_inner(
             }
         };
         debug_print!("[session {session_id}] connected");
+        let _ = crate::desktop_input_port::CURRENT.try_with(|port| port.connected());
         report(session_id, SessionState::Connected, described);
 
         let screen = match &mut terminal {
@@ -951,6 +1000,7 @@ async fn run_session_inner(
             &mut backlog,
         )
         .await;
+        let _ = crate::desktop_input_port::CURRENT.try_with(|port| port.disconnected());
         // 最后一屏的待发变化仍由离线循环按 ACK / 节拍发送；窗格关闭时直接释放。
         finish_transport(session_id, transport.as_mut(), end).await;
         // 离线只保留 screen/profile/font，不把已终止或关闭超时的 transport 留到重连。
@@ -986,6 +1036,7 @@ async fn run_connected(
     tokio::select! {
         biased;
         () = crate::transport_lifecycle::closing() => (SessionEnd::closed("disconnect_inflight_not_replayed"), true),
+        () = native_input::disconnect_requested() => (SessionEnd::closed("disconnect_inflight_not_replayed"), true),
         result = run_connected_loop(session_id, screen, transport, size, commands, backlog) => result,
     }
 }
@@ -1011,33 +1062,60 @@ async fn run_connected_loop(
     }
     send_selection_state(session_id, screen.selection);
 
+    let mut pending = None;
+    let mut deferred = native_input::DeferredOutput::default();
+    let mut rejected_output = None;
+    let result = async {
     loop {
+        if pending.is_none() {
+            if let Some(boundary) = deferred.boundary() {
+                if let Some(effect) = native_input::take_through(boundary) {
+                    pending = Some(native_input::begin(Some(screen), effect));
+                } else if let Some(bytes) = deferred.pop() {
+                    if let Err(end) = native_input::output(session_id, screen, transport, &bytes).await {
+                        return (end, false);
+                    }
+                    continue;
+                }
+            }
+            deferred.release_empty();
+        }
+        let can_read = pending.is_none() || deferred.can_read();
         let frame_deadline = screen.pacer.deadline();
         let sync_deadline = screen.sync_deadline();
         tokio::select! {
-            event = transport.next_event() => match event {
-                Ok(TransportEvent::Output(bytes)) => match screen.advance(&bytes) {
-                    Ok(delta) => {
-                        // 引擎对远端查询的应答（DA / 光标位置报告…）必须回写，
-                        // 否则对端会一直等。
-                        if !delta.outbound.is_empty()
-                            && let Err(error) = transport.write(&delta.outbound).await {
-                            return (SessionEnd::failed(lost(error.failure()), format!("engine write: {error:?}")), false);
+            // 应用额度来自其他来源时也会释放；等待额度不占用 transport 或 cursor。
+            () = tokio::time::sleep(Duration::from_millis(10)), if pending.is_some() && deferred.awaiting_budget() => {},
+            effect = native_input::next_effect(), if pending.is_none() => {
+                pending = Some(native_input::begin(Some(screen), effect));
+            }
+            ready = native_input::pending_ready(&mut pending) => {
+                pending = None;
+                match native_input::apply(session_id, screen, transport, size, ready).await {
+                    Ok(true) => return (SessionEnd::closed("disconnect"), true),
+                    Ok(false) => {},
+                    Err(end) => return (end, false),
+                }
+            }
+            effect = native_input::next_control(), if pending.is_some() => {
+                if let Err(end) = native_input::control(session_id, Some(screen), effect) { return (end, false); }
+            }
+            event = transport.next_event(), if can_read => match event {
+                Ok(TransportEvent::Output(bytes)) => {
+                    let (boundary, earlier_input) = native_input::output_boundary();
+                    if pending.is_some() || deferred.boundary().is_some() || earlier_input {
+                        if let Err((end, bytes)) = deferred.push(boundary, bytes) {
+                            rejected_output = Some(bytes);
+                            return (end, false);
                         }
-                        if delta.dirty
-                            && let Err(detail) = screen.changed(session_id)
-                        {
-                            return (SessionEnd::failed(FailureKind::Other, detail), false);
-                        }
-                    }
-                    Err(error) => {
-                        return (SessionEnd::failed(FailureKind::Other, format!("advance: {error:?}")), false);
-                    }
+                    } else if let Err(end) = native_input::output(session_id, screen, transport, &bytes).await { return (end, false); }
                 },
                 Ok(TransportEvent::Failure(failure)) => {
                     return (SessionEnd::failed(lost(failure.failure()), format!("session: {failure:?}")), false);
                 }
-                Ok(TransportEvent::Eof) => return (SessionEnd::closed("eof"), false),
+                Ok(TransportEvent::Eof) => {
+                    return (SessionEnd::closed("eof"), false);
+                },
                 Ok(TransportEvent::Exit(status)) => {
                     return (
                         SessionEnd::closed(format!("exit code={:?} success={}", status.code, status.success)),
@@ -1066,7 +1144,7 @@ async fn run_connected_loop(
                     Err(detail) => return (SessionEnd::failed(FailureKind::Other, detail), false),
                 }
             }
-            command = next_command(backlog, commands) => {
+            command = next_command(backlog, commands), if pending.is_none() => {
                 let command = match command {
                     Some(command) => command,
                     None => return (SessionEnd::closed("disconnect"), true),
@@ -1094,7 +1172,7 @@ async fn run_connected_loop(
                     SessionCommand::Input(input) => {
                         // 键编码（ETX/Kitty/CSI-u）在引擎里，这里只负责把编码结果写进
                         // transport。打字回到屏幕（Dart 同时滚到底）。
-                        screen.window = Window::Bottom;
+                        native_input::scroll_keypress(screen);
                         match screen.engine.encode_input(input) {
                             Ok(bytes) if !bytes.is_empty() => {
                                 if let Err(error) = transport.write(&bytes).await {
@@ -1110,7 +1188,7 @@ async fn run_connected_loop(
                     SessionCommand::Mouse(event) => {
                         // 远端没开对应的鼠标上报（shell 等）时 encode 返回 Err——
                         // 远端不要这类事件，静默忽略（M2a）。
-                        if screen.mouse_motion.admit(&event)
+                        if native_input::mouse_allowed() && screen.mouse_motion.admit(&event)
                             && let Ok(bytes) = screen.engine.encode_mouse(event)
                             && !bytes.is_empty()
                             && let Err(error) = transport.write(&bytes).await
@@ -1119,7 +1197,7 @@ async fn run_connected_loop(
                         }
                     }
                     SessionCommand::Paste(text) => {
-                        screen.window = Window::Bottom;
+                        native_input::scroll_keypress(screen);
                         let bytes = paste_bytes(&text, screen.engine.display_modes().bracketed_paste);
                         if !bytes.is_empty()
                             && let Err(error) = transport.write(&bytes).await
@@ -1140,11 +1218,41 @@ async fn run_connected_loop(
             }
         }
     }
+    }.await;
+    // 所有连接结束错误共用清理；次级解析/呈现错误不能替换原 transport 或 cursor 错误。
+    if let Err(cleanup) = native_input::end_deferred(
+        session_id,
+        screen,
+        &mut pending,
+        &mut deferred,
+        rejected_output.as_deref(),
+    ) {
+        debug_print!(
+            "[session {session_id}] deferred cleanup: {}",
+            cleanup.detail
+        );
+    }
+    result
 }
 
 /// 断开之后：滚回、选区、复制照常（引擎还在），尺寸变化记下来留给重连；等用户重连或关掉
 /// 窗格。连接期间攒下的输入已经没有去处，丢掉。
 async fn wait_offline(
+    session_id: u32,
+    screen: &mut Option<Screen>,
+    size: &mut TerminalSize,
+    commands: &mut UnboundedReceiver<SessionCommand>,
+    backlog: &mut VecDeque<SessionCommand>,
+) -> Next {
+    tokio::select! {
+        biased;
+        () = crate::transport_lifecycle::closing() => Next::Quit,
+        () = native_input::disconnect_requested() => Next::Quit,
+        next = wait_offline_loop(session_id, screen, size, commands, backlog) => next,
+    }
+}
+
+async fn wait_offline_loop(
     session_id: u32,
     screen: &mut Option<Screen>,
     size: &mut TerminalSize,
@@ -1160,11 +1268,42 @@ async fn wait_offline(
             *size = new_size;
         }
     }
+    let mut pending = None;
     loop {
         let frame_deadline = screen.as_ref().and_then(|screen| screen.pacer.deadline());
         // 断在一帧同步输出的中途（程序被杀、连接断开）：到点把攒着的输出画上去。
         let sync_deadline = screen.as_ref().and_then(Screen::sync_deadline);
         tokio::select! {
+            effect = native_input::next_effect(), if pending.is_none() => {
+                pending = Some(native_input::begin(screen.as_ref(), effect));
+            }
+            effect = native_input::next_control(), if pending.is_some() => {
+                let _ = native_input::control(session_id, screen.as_mut(), effect);
+            }
+            ready = native_input::pending_ready(&mut pending) => {
+                pending = None;
+                let native_input::Ready { effect, resolution, settlement: _settlement } = ready;
+                let port = crate::desktop_input_port::CURRENT.with(Arc::clone);
+                if !port.applicable_effect(effect.ticket, &effect.kind) { continue; }
+                match effect.kind {
+                    crate::desktop_input_port::EffectKind::Command(DesktopEvent::Reconnect) => return Next::Reconnect,
+                    crate::desktop_input_port::EffectKind::Command(DesktopEvent::Disconnect) => return Next::Quit,
+                    crate::desktop_input_port::EffectKind::Command(DesktopEvent::Resize { geometry }) => {
+                        if let Ok(new_size) = desktop_prepare::geometry(geometry) {
+                            *size = new_size;
+                            if let Some(screen) = screen.as_mut() { let _ = screen.resize(session_id, new_size); }
+                        }
+                    },
+                    crate::desktop_input_port::EffectKind::Command(event) => {
+                        if let Some(screen) = screen.as_mut() { let _ = native_input::local_event(session_id, screen, event); }
+                    },
+                    crate::desktop_input_port::EffectKind::Action(action) => {
+                        if let Some(screen) = screen.as_mut() { let _ = native_input::finish_action(&port, session_id, screen, None, effect.ticket, action, resolution).await; }
+                    },
+                    _ => {},
+                }
+                port.completed(effect.seq);
+            }
             () = sleep_until(frame_deadline.unwrap_or_else(Instant::now)), if frame_deadline.is_some() => {
                 if let Some(screen) = screen.as_mut()
                     && let Err(detail) = screen.flush(session_id)
@@ -1179,8 +1318,7 @@ async fn wait_offline(
                     debug_print!("[session {session_id}] offline sync: {detail}");
                 }
             }
-            () = crate::transport_lifecycle::closing() => return Next::Quit,
-            command = commands.recv() => match command.map(|command| match command { SessionCommand::Ordered(command, _) => *command, command => command }) {
+            command = commands.recv(), if pending.is_none() => match command.map(|command| match command { SessionCommand::Ordered(command, _) => *command, command => command }) {
                 Some(SessionCommand::Reconnect) => return Next::Reconnect,
                 Some(SessionCommand::Disconnect) | None => return Next::Quit,
                 Some(SessionCommand::Resize(new_size)) => {
@@ -2365,3 +2503,7 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "transport_lifecycle_tests.rs"]
 mod transport_tests;
+
+#[cfg(test)]
+#[path = "session_native_lifecycle_tests.rs"]
+mod native_lifecycle_tests;

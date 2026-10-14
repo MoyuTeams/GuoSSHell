@@ -28,12 +28,14 @@ pub(crate) struct VerifiedKeyCodes {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // 平台宿主完成真实事件归属后构造；Rinf 不签发这些证明。
 pub(crate) enum AltProvenance {
     Known { left: bool, right: bool },
     Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // 原生文本来源由受控宿主构造。
 pub(crate) enum TextOwnership {
     /// 已证明排他走终端键路径；Ctrl 不是尚未分类的 AltGr 合成部分。
     TerminalKey,
@@ -135,6 +137,19 @@ impl Default for InputPolicyState {
     }
 }
 
+impl InputPolicyState {
+    pub(crate) fn reject_cycle(&mut self, identity: NonZeroU64) {
+        if let Some(key) = self
+            .active
+            .iter_mut()
+            .flatten()
+            .find(|key| key.identity == identity)
+        {
+            key.route = Route::Rejected;
+        }
+    }
+}
+
 /// 不分配输出、不访问 engine；外层先在固定影子状态分类，预约成功后提交该状态。
 pub(crate) enum GatedIntent {
     Quiet(KeyOutcome),
@@ -163,6 +178,24 @@ pub(crate) fn gate_key(
     state: &mut InputPolicyState,
     profile: &ResolvedTerminalProfile,
     input: PolicyKeyInput,
+) -> GatedIntent {
+    gate_key_inner(state, profile, input, false)
+}
+
+/// 正常宿主门控先核验事件材料，不能借 profile/default 动作绕过 IME 归属。
+pub(crate) fn gate_native_key(
+    state: &mut InputPolicyState,
+    profile: &ResolvedTerminalProfile,
+    input: PolicyKeyInput,
+) -> GatedIntent {
+    gate_key_inner(state, profile, input, true)
+}
+
+fn gate_key_inner(
+    state: &mut InputPolicyState,
+    profile: &ResolvedTerminalProfile,
+    input: PolicyKeyInput,
+    native: bool,
 ) -> GatedIntent {
     let Some(identity) = input.physical_identity else {
         return GatedIntent::reject(InputReject::MissingPhysicalIdentity);
@@ -214,6 +247,31 @@ pub(crate) fn gate_key(
         return GatedIntent::reject(InputReject::InvalidRawChord);
     }
 
+    if native && input.phase != DesktopKeyPhase::Up {
+        if let AltProvenance::Known { left, right } = input.alt_provenance
+            && raw.modifiers.alt != (left || right)
+        {
+            return GatedIntent::reject(InputReject::InconsistentAlt);
+        }
+        match input.text_ownership {
+            TextOwnership::Unverified => {
+                return GatedIntent::reject(InputReject::UnverifiedTextOwnership);
+            }
+            TextOwnership::TerminalKey => {
+                let Some(dual) = &input.dual else {
+                    return GatedIntent::reject(InputReject::MissingDual);
+                };
+                if !valid_dual(dual) {
+                    return GatedIntent::reject(InputReject::InvalidDual);
+                }
+                if raw.modifiers.alt && input.alt_provenance == AltProvenance::Unknown {
+                    return GatedIntent::reject(InputReject::AmbiguousAltProvenance);
+                }
+            }
+            TextOwnership::NativeText => {}
+        }
+    }
+
     if input.phase != DesktopKeyPhase::Up {
         if let Some(binding) = profile
             .key_bindings
@@ -252,7 +310,7 @@ pub(crate) fn gate_key(
             };
             return GatedIntent::quiet(result);
         }
-        if matches!(route, Route::Consumed | Route::Native) {
+        if route == Route::Consumed || (!native && route == Route::Native) {
             return GatedIntent::quiet(KeyResult::NoSend(if route == Route::Native {
                 NoSendReason::NativeText
             } else {
@@ -260,6 +318,10 @@ pub(crate) fn gate_key(
             }));
         }
         if input.phase == DesktopKeyPhase::Down
+            && !(native
+                && input.text_ownership == TextOwnership::NativeText
+                && raw.modifiers.alt
+                && (raw.modifiers.control || input.alt_provenance == AltProvenance::Unknown))
             && let Some(action) = input.default_action
         {
             state.active[slot] = Some(ActiveKey {
@@ -305,13 +367,7 @@ pub(crate) fn gate_key(
     let Some(dual) = input.dual else {
         return GatedIntent::reject(InputReject::MissingDual);
     };
-    if !valid_code(&dual.code)
-        || !valid_code(&dual.legacy_code)
-        || !(matches!(
-            (&dual.code, &dual.legacy_code),
-            (KeyCode::Character(_), KeyCode::Character(_))
-        ) || dual.code == dual.legacy_code)
-    {
+    if !valid_dual(&dual) {
         return GatedIntent::reject(InputReject::InvalidDual);
     }
     let phase = match input.phase {
@@ -319,7 +375,7 @@ pub(crate) fn gate_key(
         DesktopKeyPhase::Repeat => KeyEventPhase::Repeat,
         DesktopKeyPhase::Up => KeyEventPhase::Release,
     };
-    if input.phase == DesktopKeyPhase::Down {
+    if input.phase == DesktopKeyPhase::Down || native && input.phase == DesktopKeyPhase::Repeat {
         state.active[slot] = Some(ActiveKey {
             identity,
             route: Route::Terminal,
@@ -369,7 +425,16 @@ fn valid_code(code: &KeyCode) -> bool {
     !matches!(code, KeyCode::F(number) if !(1..=24).contains(number))
 }
 
-// 非按键 effect 尚无原型消费者；真实接线前保留独立测试边界。
+fn valid_dual(dual: &VerifiedKeyCodes) -> bool {
+    valid_code(&dual.code)
+        && valid_code(&dual.legacy_code)
+        && (matches!(
+            (&dual.code, &dual.legacy_code),
+            (KeyCode::Character(_), KeyCode::Character(_))
+        ) || dual.code == dual.legacy_code)
+}
+
+// 非键策略矩阵的领域测试辅助；运行消费在原会话 actor。
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Activity {
@@ -419,7 +484,7 @@ pub(crate) struct ClearEffects {
     pub request_frame: bool,
 }
 
-/// 只有引擎清理成功才交付失效意图；Screen/Dart 的实际消费属于 4C。
+/// 只有引擎清理成功才交付滚回、选区与帧失效意图。
 pub(crate) fn clear_scrollback(
     engine: &mut dyn TerminalEngine,
 ) -> Result<ClearEffects, EngineError> {

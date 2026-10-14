@@ -129,6 +129,10 @@ Fault LayoutTable::Build(const ProfileIdentity& profile, const WorkerEvidence& e
 Fault LayoutTable::DiagnosticQuery(const ProfileIdentity& profile) noexcept {
   return Query(profile);
 }
+Fault LayoutTable::QueryCanonical(const ProfileIdentity& profile, DWORD ui_thread) noexcept {
+  if (!ui_thread || GetCurrentThreadId() == ui_thread) return Fault::LayoutStateNotIsolated;
+  return Query(profile);
+}
 Fault LayoutTable::Lookup(NativeKey* key) const noexcept {
   if (!key) return Fault::LayoutUnverified;
   if (!SameProfile(profile_, key->layout)) return Fault::LayoutStale;

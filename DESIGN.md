@@ -34,6 +34,39 @@ Fluent 控件的 hover、pressed、disabled 与成功／警告／错误语义色
 不以单独色块替代文字说明。高对比度主题将控件边界提升为白色。应用主题不改写终端
 `TerminalThemes`、帧配色或 profile。
 
+### 终端静态 profile tokens
+
+终端展示资源独立于 Fluent 壳颜色，RGB 数据唯一定义于
+`lib/src/terminal/desktop_terminal_theme.dart`。`themeForProfile` 按冻结的
+`Prepared.snapshot.profile.colorScheme` 精确选择不可变 `TerminalTheme`；不读取全局设置，
+不覆盖移动端或其他 pane。未知名称抛出 `ArgumentError`，由 pane 报告失败；此资源层
+不允许静默 fallback。重连保留原快照，新准备才重新选择。
+
+| Profile ID | GuoSSHell 展示资源色调 |
+|---|---|
+| `default` | 原样使用 `TerminalThemes.defaultTheme`，不复制 preset |
+| `one_dark` | 蓝灰底、浅灰正文，柔和红绿与天蓝 ANSI |
+| `solarized_dark` | 深青底、浅青灰正文，黄／橙／青色 ANSI |
+| `solarized_light` | 暖纸底、深青灰正文，与深色版本共用 Solarized 色调 |
+| `dracula` | 蓝黑底、近白正文，粉红／紫／荧绿 ANSI |
+| `monokai` | 暖炭底、暖白正文，玫红／酸绿／金黄 ANSI |
+| `nord` | 极地蓝灰底、冰白正文，低饱和蓝／青 ANSI |
+| `gruvbox_dark` | 暖炭底、奶油正文，土黄／砖红／橄榄 ANSI |
+| `tokyo_night` | 夜蓝底、淡蓝正文，蓝紫／青／桃红 ANSI |
+| `campbell_powershell` | 深海军蓝底、浅灰正文，明晰控制台 ANSI |
+
+`terminal.defaultForeground/defaultBackground` 对应 theme 的 `foreground/background`；
+`terminal.ansi[0..15]` 按黑、红、绿、黄、蓝、品红、青、白及其 bright 顺序对应完整
+16 色字段。`terminal.cursor/cursorAccent`、`selection/selectionForeground` 和
+`searchHitBackground/searchHitBackgroundCurrent/searchHitForeground` 也由同一资源提供。
+九套命名资源是应用自有 RGB 展示数据，不复制第三方实现或扩展 provider。
+
+画布底色与 `Color::Default` 使用同一 theme；ANSI 0–15 使用对应字段，扩展 ANSI
+沿 renderer 的现有规则，`Color::Rgb` 保留帧值。命名资源的默认正文及选区、搜索文字
+目标为至少 4.5:1；远端任意 ANSI/RGB 组合不保证该对比度，不通过自动改色破坏帧值。
+此处仅定义静态颜色，不证明动态 OSC 设置、复位或颜色查询同步；相关限制见
+`docs/followups/20260926_终端颜色查询一律答黑色.md`。
+
 ## 3. 字体
 
 正文字体为 `Microsoft YaHei UI`，按 `PingFang SC`、`Noto Sans CJK SC`、

@@ -124,12 +124,9 @@ bool SourceFixtureHost::ResolveVerified(const sdk::BootstrapHost& host,
   if (!module || !out) return false;
   MODULEINFO image{};
   if (!K32GetModuleInformation(GetCurrentProcess(), module, &image, sizeof(image))) return false;
-  const char* symbols[] = {abi::kOpenSymbol, abi::kKeySymbol, abi::kRevokeSymbol,
-      abi::kJoinSymbol, abi::kInspectSymbol, abi::kPeerModeSymbol,
-      abi::kPeerReadSymbol, abi::kSupportSymbol};
-  std::array<FARPROC, 8> exports{};
+  std::array<FARPROC, abi::kCoreSymbols.size()> exports{};
   for (std::size_t i = 0; i < exports.size(); ++i) {
-    exports[i] = GetProcAddress(module, symbols[i]);
+    exports[i] = GetProcAddress(module, abi::kCoreSymbols[i]);
     if (!MappedHere(module, image, exports[i])) return false;
   }
   *out = {reinterpret_cast<abi::OpenFn>(exports[0]),
@@ -140,6 +137,9 @@ bool SourceFixtureHost::ResolveVerified(const sdk::BootstrapHost& host,
       reinterpret_cast<abi::PeerModeFn>(exports[5]),
       reinterpret_cast<abi::PeerReadFn>(exports[6]),
       reinterpret_cast<abi::SupportFn>(exports[7]),
+      reinterpret_cast<abi::CommandFn>(exports[8]),
+      reinterpret_cast<abi::CopyFn>(exports[9]),
+      reinterpret_cast<abi::ProjectionFn>(exports[10]),
       bridge::TableEvidence::ParentVerifiedSameSdk};
   return true;
 }

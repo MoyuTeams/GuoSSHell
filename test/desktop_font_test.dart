@@ -289,6 +289,95 @@ void main() {
     expect(loaded!.usedLoadFallback, isFalse);
   });
 
+  for (final action in ['失效', '重选', '卸载']) {
+    test('registrar 同步$action后不恢复旧 pane 的加载状态或通知', () async {
+      final registration = Completer<void>();
+      final budget = DesktopFontBudget(maxResourceCount: 1, maxInputBytes: 2);
+      late DesktopFontController font;
+      final cache = DesktopFontCache(
+        budget: budget,
+        register: (_, _) {
+          switch (action) {
+            case '失效':
+              font.invalidate();
+            case '重选':
+              unawaited(
+                font.selectPrepared(
+                  _prepared(family: 'Consolas', identity: 'prepared-b'),
+                  Uint8List(0),
+                ),
+              );
+            case '卸载':
+              font.dispose();
+          }
+          return registration.future;
+        },
+      );
+      font = DesktopFontController(cache: cache);
+      if (action != '卸载') addTearDown(font.dispose);
+      var notifications = 0;
+      font.addListener(() => ++notifications);
+      final pending = font.selectPrepared(
+        _prepared(resource: _resource(), byteCount: 2),
+        Uint8List(2),
+      );
+      expect(font.isLoading, isFalse);
+      expect(font.current?.family, action == '重选' ? 'Consolas' : null);
+      expect(notifications, action == '卸载' ? 0 : 1);
+      expect(cache.activeResourceCount, 0);
+      expect(cache.retainedByteCount, 2);
+      expect(cache.retainedFutureCount, 1);
+      expect(budget.accountedInputByteCount, 2);
+      registration.complete();
+      expect(await pending, isNull);
+      expect(font.isLoading, isFalse);
+      expect(notifications, action == '卸载' ? 0 : 1);
+      expect(cache.registeredResourceCount, 1);
+      expect(cache.retainedByteCount, 0);
+      expect(cache.retainedFutureCount, 0);
+      expect(budget.accountedInputByteCount, 2);
+    });
+  }
+
+  test('registrar 同步重试也共享控制器 Future，通知失效不被迟到完成恢复', () async {
+    final registration = Completer<void>();
+    late DesktopFontController font;
+    Future<DesktopFontMaterial?>? reentrant;
+    var loadingDuringRegistration = false;
+    var attempts = 0;
+    final cache = DesktopFontCache(
+      register: (_, _) {
+        ++attempts;
+        loadingDuringRegistration = font.isLoading;
+        reentrant = font.retry();
+        return registration.future;
+      },
+    );
+    font = DesktopFontController(cache: cache);
+    addTearDown(font.dispose);
+    var notifications = 0;
+    font.addListener(() {
+      ++notifications;
+      if (font.isLoading) font.invalidate();
+    });
+    final pending = font.selectPrepared(
+      _prepared(resource: _resource(), byteCount: 2),
+      Uint8List(2),
+    );
+    expect(loadingDuringRegistration, isTrue);
+    expect(reentrant, same(pending));
+    expect(attempts, 1);
+    expect(font.isLoading, isFalse);
+    expect(font.current, isNull);
+    expect(notifications, 2);
+    registration.complete();
+    expect(await pending, isNull);
+    expect(await reentrant, isNull);
+    expect(notifications, 2);
+    expect(font.isLoading, isFalse);
+    expect(font.current, isNull);
+  });
+
   test('替换资源后旧 Future 不覆盖新选择；完整关联键才能失效当前材料', () async {
     final registrar = _Registrar();
     final cache = DesktopFontCache(register: registrar.register);
@@ -304,8 +393,8 @@ void main() {
     );
     final oldPending = font.selectPrepared(old, Uint8List(2));
     final nextPending = font.selectPrepared(next, Uint8List(3));
-    expect(cache.retainedByteCount, 3);
-    expect(cache.retainedFutureCount, 1);
+    expect(cache.retainedByteCount, 5);
+    expect(cache.retainedFutureCount, 2);
     final key = DesktopPreparedFontIdentity.fromResult(next);
     for (final wrong in [
       DesktopPreparedFontIdentity.fromResult(old),
@@ -344,7 +433,7 @@ void main() {
     expect(cache.activeResourceCount, 0);
   });
 
-  test('卸载释放 byte / Future 引用，迟到成功不能恢复已卸载 pane', () async {
+  test('卸载不退正在注册的 byte / Future，迟到成功不能恢复已卸载 pane', () async {
     final registrar = _Registrar();
     final cache = DesktopFontCache(register: registrar.register);
     final font = DesktopFontController(cache: cache);
@@ -354,18 +443,315 @@ void main() {
     );
     font.dispose();
     expect(cache.activeResourceCount, 0);
-    expect(cache.retainedByteCount, 0);
-    expect(cache.retainedFutureCount, 0);
+    expect(cache.retainedByteCount, 5);
+    expect(cache.retainedFutureCount, 1);
+    expect(cache.budget.accountedInputByteCount, 5);
+    expect(cache.budget.accountedResourceCount, 1);
     expect(font.isLoading, isFalse);
     registrar.calls.single.completion.complete();
     expect(await pending, isNull);
     expect(font.current, isNull);
     expect(cache.activeResourceCount, 0);
     expect(cache.registeredResourceCount, 1, reason: 'engine 注册不能假称被卸载');
+    expect(cache.retainedByteCount, 0);
+    expect(cache.retainedFutureCount, 0);
+    expect(cache.budget.accountedInputByteCount, 5);
+    expect(cache.budget.accountedResourceCount, 1);
     expect(font.retry, throwsStateError);
   });
 
-  test('失效后同资源的新 pane 不被旧失败 Future 污染，也不恢复旧材料', () async {
+  test('共享预算跨缓存保留未完成和成功注册，同 hash 重开不复制也不重复注册', () async {
+    final registrar = _Registrar();
+    final budget = DesktopFontBudget(maxResourceCount: 1, maxInputBytes: 3);
+    final cache = DesktopFontCache(
+      register: registrar.register,
+      budget: budget,
+    );
+    final first = DesktopFontController(cache: cache);
+    final result = _prepared(resource: _resource('共享hash'), byteCount: 3);
+    final pending = first.selectPrepared(result, Uint8List(3));
+    first.dispose();
+    final nextCache = DesktopFontCache(
+      register: registrar.register,
+      budget: budget,
+    );
+    final next = DesktopFontController(cache: nextCache);
+    addTearDown(next.dispose);
+    final nextResult = _prepared(
+      resource: _resource('共享hash'),
+      byteCount: 3,
+      identity: 'prepared-b',
+    );
+    final shared = next.selectPrepared(nextResult, Uint8List(3));
+    expect(registrar.calls, hasLength(1));
+    expect(nextCache.retainedByteCount, 3);
+    expect(budget.accountedResourceCount, 1);
+    registrar.calls.single.completion.complete();
+    expect(await pending, isNull);
+    final material = (await shared)!;
+    expect(
+      material.identity,
+      DesktopPreparedFontIdentity.fromResult(nextResult),
+    );
+    expect(material.projection, nextResult.snapshot!.fontProjection);
+    next.invalidate();
+    for (var i = 0; i < 40; ++i) {
+      final reopened = DesktopFontController(
+        cache: DesktopFontCache(register: registrar.register, budget: budget),
+      );
+      final loaded = await reopened.selectPrepared(result, Uint8List(3));
+      expect(loaded!.usedLoadFallback, isFalse);
+      reopened.dispose();
+    }
+    expect(registrar.calls, hasLength(1));
+    expect(budget.accountedInputByteCount, 3);
+    expect(budget.accountedResourceCount, 1);
+    expect(nextCache.activeResourceCount, 0);
+    expect(nextCache.registeredResourceCount, 1);
+    expect(nextCache.retainedByteCount, 0);
+    expect(nextCache.retainedFutureCount, 0);
+  });
+
+  for (final limit in DesktopFontBudgetLimit.values) {
+    test('额度 $limit 在复制和注册前拒绝，原身份回退投影可供几何协商', () async {
+      final registrar = _Registrar();
+      final budget = DesktopFontBudget(
+        maxResourceCount: limit == DesktopFontBudgetLimit.resourceCount ? 1 : 2,
+        maxInputBytes: limit == DesktopFontBudgetLimit.inputBytes ? 3 : 10,
+      );
+      final cache = DesktopFontCache(
+        register: registrar.register,
+        budget: budget,
+      );
+      final first = DesktopFontController(cache: cache);
+      final next = DesktopFontController(cache: cache);
+      addTearDown(first.dispose);
+      addTearDown(next.dispose);
+      final pending = first.selectPrepared(
+        _prepared(resource: _resource('已准入'), byteCount: 3),
+        Uint8List(3),
+      );
+      first.invalidate();
+      final result = _prepared(
+        resource: _resource('额度外'),
+        byteCount: 1,
+        identity: 'prepared-b',
+        mode: ProfileFontMode.explicitCachedTtf,
+      );
+      Future<DesktopFontMaterial> checkFallback() async {
+        final material = (await next.selectPrepared(result, Uint8List(1)))!;
+        expect(material.usedLoadFallback, isTrue);
+        expect(material.loadError, isA<DesktopFontBudgetFailure>());
+        expect((material.loadError! as DesktopFontBudgetFailure).limit, limit);
+        expect(
+          material.identity,
+          DesktopPreparedFontIdentity.fromResult(result),
+        );
+        expect(material.projection, result.snapshot!.fallbackProjection);
+        expect(material.family, result.snapshot!.fallbackFamily);
+        expect(material.fontSize, result.snapshot!.profile.fontSize);
+        expect((material.expectedCols, material.expectedRows), (91, 31));
+        expect(material.snapshotFallbackReason, isNull);
+        expect(result.snapshot!.font.actualFamily, _resource('额度外').family);
+        expect(
+          result.snapshot!.font.saved.mode,
+          ProfileFontMode.explicitCachedTtf,
+        );
+        expect(result.snapshot!.profile.fontFamily, '旧 raw family');
+        expect(next.isLoading, isFalse);
+        expect(
+          (await next.retry())!.projection,
+          result.snapshot!.fallbackProjection,
+        );
+        return material;
+      }
+
+      await checkFallback();
+      expect(cache.retainedByteCount, 3);
+      expect(cache.retainedFutureCount, 1);
+      expect(budget.accountedInputByteCount, 3);
+      registrar.calls.single.completion.complete();
+      expect(await pending, isNull);
+      await checkFallback();
+      expect(registrar.calls, hasLength(1));
+      expect(budget.accountedInputByteCount, 3);
+      expect(budget.accountedResourceCount, 1);
+      expect(cache.retainedByteCount, 0);
+      expect(cache.registeredResourceCount, 1);
+    });
+  }
+
+  for (final (count, bytes, boundary) in [
+    (1, 3, '数量及字节'),
+    (1, 10, '仅数量'),
+    (2, 3, '仅字节'),
+  ]) {
+    test('同 pane 替换失败字体释放 $boundary 额度后直接准入新 hash', () async {
+      final registrar = _Registrar();
+      final budget = DesktopFontBudget(
+        maxResourceCount: count,
+        maxInputBytes: bytes,
+      );
+      final cache = DesktopFontCache(
+        register: registrar.register,
+        budget: budget,
+      );
+      final font = DesktopFontController(cache: cache);
+      addTearDown(font.dispose);
+      final old = _prepared(resource: _resource('失败A'), byteCount: 3);
+      final pending = font.selectPrepared(old, Uint8List.fromList([1, 2, 3]));
+      registrar.calls.single.completion.completeError(StateError('A 注册失败'));
+      expect((await pending)!.usedLoadFallback, isTrue);
+      expect(cache.retainedFutureCount, 0);
+      expect(budget.accountedResourceCount, 1);
+      expect(budget.accountedInputByteCount, 3);
+
+      final next = _prepared(
+        resource: _resource('新B'),
+        byteCount: 2,
+        identity: 'prepared-b',
+      );
+      final binary = Uint8List.fromList([4, 5]);
+      final replacement = font.selectPrepared(next, binary);
+      expect(registrar.calls, hasLength(2));
+      expect(registrar.calls.last.family, next.snapshot!.font.actualFamily);
+      binary[0] = 99;
+      expect(registrar.calls.last.bytes, [4, 5]);
+      expect(font.isLoading, isTrue);
+      expect(font.current, isNull);
+      expect(
+        font.selectedIdentity,
+        DesktopPreparedFontIdentity.fromResult(next),
+      );
+      expect(cache.activeResourceCount, 1);
+      expect(cache.retainedByteCount, 2);
+      expect(cache.retainedFutureCount, 1);
+      expect(budget.accountedResourceCount, 1);
+      expect(budget.accountedInputByteCount, 2);
+      registrar.calls.last.completion.complete();
+      final material = (await replacement)!;
+      expect(material.usedLoadFallback, isFalse);
+      expect(material.loadError, isNull);
+      expect(material.identity, DesktopPreparedFontIdentity.fromResult(next));
+      expect(material.projection, next.snapshot!.fontProjection);
+      expect((await font.retry())!.projection, next.snapshot!.fontProjection);
+      expect(registrar.calls, hasLength(2));
+      expect(cache.registeredResourceCount, 1);
+      expect(cache.retainedByteCount, 0);
+    });
+  }
+
+  test('同 pane 释放失败材料后新字体仍超字节额度，保持回退且不注册', () async {
+    final registrar = _Registrar();
+    final budget = DesktopFontBudget(maxResourceCount: 1, maxInputBytes: 3);
+    final cache = DesktopFontCache(
+      register: registrar.register,
+      budget: budget,
+    );
+    final font = DesktopFontController(cache: cache);
+    addTearDown(font.dispose);
+    final pending = font.selectPrepared(
+      _prepared(resource: _resource('失败A'), byteCount: 3),
+      Uint8List(3),
+    );
+    registrar.calls.single.completion.completeError(StateError('A 注册失败'));
+    expect((await pending)!.usedLoadFallback, isTrue);
+    final next = _prepared(
+      resource: _resource('过大B'),
+      byteCount: 4,
+      identity: 'prepared-b',
+    );
+    final fallback = (await font.selectPrepared(next, Uint8List(4)))!;
+    expect(fallback.usedLoadFallback, isTrue);
+    expect(fallback.loadError, isA<DesktopFontBudgetFailure>());
+    expect(
+      (fallback.loadError! as DesktopFontBudgetFailure).limit,
+      DesktopFontBudgetLimit.inputBytes,
+    );
+    expect(fallback.identity, DesktopPreparedFontIdentity.fromResult(next));
+    expect(fallback.projection, next.snapshot!.fallbackProjection);
+    expect(fallback.family, next.snapshot!.fallbackFamily);
+    expect(font.isLoading, isFalse);
+    expect(budget.accountedResourceCount, 0);
+    expect(budget.accountedInputByteCount, 0);
+    expect(cache.retainedByteCount, 0);
+    expect(cache.retainedFutureCount, 0);
+    expect((await font.retry())!.projection, next.snapshot!.fallbackProjection);
+    expect(registrar.calls, hasLength(1));
+  });
+
+  test('额度包含仍持有的失败材料，最后释放后才退额；迟到失败不复活 pane', () async {
+    final registrar = _Registrar();
+    final budget = DesktopFontBudget(maxResourceCount: 1, maxInputBytes: 3);
+    final cache = DesktopFontCache(
+      register: registrar.register,
+      budget: budget,
+    );
+    final first = DesktopFontController(cache: cache);
+    final next = DesktopFontController(cache: cache);
+    addTearDown(first.dispose);
+    addTearDown(next.dispose);
+    final result = _prepared(resource: _resource('失败hash'), byteCount: 3);
+    final pending = first.selectPrepared(result, Uint8List(3));
+    registrar.calls.single.completion.completeError(StateError('失败'));
+    expect((await pending)!.usedLoadFallback, isTrue);
+    expect(budget.accountedInputByteCount, 3);
+    expect(budget.accountedResourceCount, 1);
+    final other = _prepared(resource: _resource('后续hash'), byteCount: 2);
+    expect(
+      (await next.selectPrepared(other, Uint8List(2)))!.loadError,
+      isA<DesktopFontBudgetFailure>(),
+    );
+    first.invalidate();
+    expect(budget.accountedResourceCount, 0);
+    expect(budget.accountedInputByteCount, 0);
+    final late = next.selectPrepared(other, Uint8List(2));
+    next.invalidate();
+    expect(budget.accountedInputByteCount, 2);
+    expect(cache.retainedByteCount, 2);
+    expect(cache.retainedFutureCount, 1);
+    registrar.calls.last.completion.completeError(StateError('迟到失败'));
+    expect(await late, isNull);
+    expect(next.current, isNull);
+    expect(budget.accountedResourceCount, 0);
+    expect(budget.accountedInputByteCount, 0);
+    expect(cache.retainedByteCount, 0);
+    expect(cache.retainedFutureCount, 0);
+    expect(cache.registeredResourceCount, 0);
+    final retried = next.selectPrepared(other, Uint8List(2));
+    expect(registrar.calls, hasLength(3));
+    registrar.calls.last.completion.complete();
+    expect((await retried)!.usedLoadFallback, isFalse);
+  });
+
+  test('独立注册域隔离预算，零额度仍可用无资源 family', () async {
+    final zero = DesktopFontBudget(maxResourceCount: 0, maxInputBytes: 0);
+    final first = DesktopFontController(
+      cache: DesktopFontCache(register: (_, _) async {}, budget: zero),
+    );
+    final second = DesktopFontController(
+      cache: DesktopFontCache(register: (_, _) async {}),
+    );
+    addTearDown(first.dispose);
+    addTearDown(second.dispose);
+    expect(
+      (await first.selectPrepared(_prepared(), Uint8List(0)))!.usedLoadFallback,
+      isFalse,
+    );
+    final result = _prepared(resource: _resource(), byteCount: 1);
+    expect(
+      (await first.selectPrepared(result, Uint8List(1)))!.loadError,
+      isA<DesktopFontBudgetFailure>(),
+    );
+    expect(
+      (await second.selectPrepared(result, Uint8List(1)))!.usedLoadFallback,
+      isFalse,
+    );
+    expect(zero.accountedResourceCount, 0);
+    expect(zero.accountedInputByteCount, 0);
+  });
+
+  test('失效后同 hash 的新 pane 共享未完成注册，失败不恢复旧材料且可重试', () async {
     final registrar = _Registrar();
     final cache = DesktopFontCache(register: registrar.register);
     final oldFont = DesktopFontController(cache: cache);
@@ -376,16 +762,52 @@ void main() {
     final oldPending = oldFont.selectPrepared(result, Uint8List(2));
     oldFont.invalidate();
     final newPending = newFont.selectPrepared(result, Uint8List(2));
-    expect(registrar.calls, hasLength(2));
+    expect(registrar.calls, hasLength(1));
     registrar.calls.first.completion.completeError(StateError('旧调用失败'));
     expect(await oldPending, isNull);
-    expect(newFont.current, isNull);
-    expect(newFont.isLoading, isTrue);
+    expect((await newPending)!.usedLoadFallback, isTrue);
+    expect(newFont.isLoading, isFalse);
+    expect(cache.retainedByteCount, 2);
+    expect(cache.retainedFutureCount, 0);
+    final retry = newFont.retry();
+    expect(registrar.calls, hasLength(2));
+    registrar.calls.last.completion.complete();
+    expect((await retry)!.usedLoadFallback, isFalse);
+    expect(oldFont.current, isNull);
+  });
+
+  test('重试期间最后 pane 释放仍保留额度，迟到失败才退额且不恢复材料', () async {
+    final registrar = _Registrar();
+    final budget = DesktopFontBudget(maxResourceCount: 1, maxInputBytes: 2);
+    final cache = DesktopFontCache(
+      register: registrar.register,
+      budget: budget,
+    );
+    final font = DesktopFontController(cache: cache);
+    addTearDown(font.dispose);
+    final result = _prepared(resource: _resource(), byteCount: 2);
+    final pending = font.selectPrepared(result, Uint8List.fromList([4, 5]));
+    registrar.calls.single.completion.completeError(StateError('初次失败'));
+    expect((await pending)!.usedLoadFallback, isTrue);
+    final retry = font.retry();
+    expect(registrar.calls.last.bytes, same(registrar.calls.first.bytes));
+    font.invalidate();
+    expect(cache.activeResourceCount, 0);
     expect(cache.retainedByteCount, 2);
     expect(cache.retainedFutureCount, 1);
-    registrar.calls.last.completion.complete();
-    expect((await newPending)!.usedLoadFallback, isFalse);
-    expect(oldFont.current, isNull);
+    expect(budget.accountedResourceCount, 1);
+    expect(budget.accountedInputByteCount, 2);
+    registrar.calls.last.completion.completeError(StateError('重试迟到失败'));
+    expect(await retry, isNull);
+    expect(font.current, isNull);
+    expect(font.selectedIdentity, isNull);
+    expect(font.isLoading, isFalse);
+    expect(await font.retry(), isNull);
+    expect(registrar.calls, hasLength(2));
+    expect(cache.retainedByteCount, 0);
+    expect(cache.retainedFutureCount, 0);
+    expect(budget.accountedResourceCount, 0);
+    expect(budget.accountedInputByteCount, 0);
   });
 
   test('无资源合法 family 与 Rust 已选内置 fallback 不调用 registrar', () async {
@@ -437,7 +859,7 @@ void main() {
   test('所有无 metadata 历史 family 均走 dev 即时槽；Prepared 不随槽变化', () async {
     final slot = _LegacySlot();
     final font = DesktopFontController(
-      cache: DesktopFontCache(),
+      cache: DesktopFontCache(budget: DesktopFontBudget()),
       legacyTypography: slot.typography,
     );
     addTearDown(font.dispose);
@@ -544,7 +966,9 @@ void main() {
   });
 
   test('边界材料不一致时拒绝，保留当前选择，不复制发送端字体验证器', () async {
-    final font = DesktopFontController(cache: DesktopFontCache());
+    final font = DesktopFontController(
+      cache: DesktopFontCache(budget: DesktopFontBudget()),
+    );
     addTearDown(font.dispose);
     final result = _prepared();
     final current = await font.selectPrepared(result, Uint8List(0));
@@ -616,7 +1040,7 @@ void main() {
   testWidgets('真实 TTF 经 FontLoader 注册，字号 / 缩放材料与 TerminalView 实际布局一致', (
     tester,
   ) async {
-    final cache = DesktopFontCache();
+    final cache = DesktopFontCache(budget: DesktopFontBudget());
     final font = DesktopFontController(cache: cache);
     addTearDown(font.dispose);
     DesktopFontMaterial? material;

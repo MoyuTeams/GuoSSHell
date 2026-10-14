@@ -21,6 +21,7 @@ class NativeSurface final : public ITfInputProcessorProfileActivationSink {
   HRESULT Open(ITfThreadMgr*, TfClientId) noexcept;
   HRESULT ActivateDocument() noexcept;
   DispatchResult Dispatch(const MSG&, const std::shared_ptr<const LayoutTable>&) noexcept;
+  DispatchResult DispatchCanonical(const NativeKey&, const std::shared_ptr<const LayoutTable>&) noexcept;
   // pointer 也在同一消息出队点冻结 modifier，不延迟到 WndProc 读取状态。
   bool DispatchPointer(const MSG&) noexcept;
   // own WndProc 在调用 DefWindowProc 前询问；没有第二个 IMM/char 提交出口。
@@ -28,7 +29,9 @@ class NativeSurface final : public ITfInputProcessorProfileActivationSink {
   Fault BeginRevoke() noexcept;
   Fault CoreFenceCompleted(uint64_t fence) noexcept;
   Fault TryConfirmRetired() noexcept;
+  Fault BeginContextRetirement(uint64_t end_fence) noexcept;
   FocusState State() const noexcept { return state_; }
+  HRESULT RetirementResult() const noexcept { return retirement_result_; }
   void SetGeometry(const SourceGeometry&) noexcept;
   HRESULT Pump() noexcept;
   TextStore* Store() const noexcept { return store_.Get(); }
@@ -51,6 +54,7 @@ class NativeSurface final : public ITfInputProcessorProfileActivationSink {
   NativeSurface(HWND, OwnerRef, std::shared_ptr<Callbacks>, std::shared_ptr<NativePermit>, NativeOrigin) noexcept;
   ~NativeSurface();
   bool DerivedQueued() noexcept;
+  DispatchResult DispatchImpl(const MSG&, const std::shared_ptr<const LayoutTable>&, const NativeKey*) noexcept;
   bool SourceActive(uint64_t event) const noexcept;
   bool DispatchActive(const TextDispatchScope&) const noexcept;
   HRESULT CheckDerived(const TextDispatchScope&, bool*) noexcept;
@@ -85,6 +89,8 @@ class NativeSurface final : public ITfInputProcessorProfileActivationSink {
   uint64_t event_{}, fence_{};
   bool opened_{}, associated_{}, pushed_{}, dispatching_{}, route_disabled_{}, detached_{};
   bool confirming_{}, detaching_{}, revoking_{}, opening_{};
+  bool context_only_{};
+  HRESULT retirement_result_{S_OK};
 #ifdef GUOSSH_NATIVE_FIXTURE
   BoundaryProbe probe_{};
   void* probe_data_{};

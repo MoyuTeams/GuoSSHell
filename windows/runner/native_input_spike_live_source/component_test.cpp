@@ -112,9 +112,18 @@ std::uint32_t __cdecl Read(const abi::SpikeOwner* owner, std::uint8_t* bytes,
 }
 
 std::uint32_t __cdecl Support(const abi::SpikeOwner*, std::uint32_t) { return abi::kUnsupported; }
+std::uint32_t __cdecl Command(const abi::SpikeOwner*, const abi::Command*, abi::Reply*) {
+  return abi::kUnsupported;
+}
+std::uint32_t __cdecl Copy(const abi::SpikeOwner*, const abi::ActionLease*, std::uint8_t*,
+    std::size_t, std::size_t*) { return abi::kUnsupported; }
+std::uint32_t __cdecl Projection(const abi::SpikeOwner*, abi::Projection*) {
+  return abi::kUnsupported;
+}
 
 bridge::FunctionsTable Table() noexcept {
-  return {Open, Key, Revoke, Join, Inspect, Mode, Read, Support, bridge::TableEvidence::InjectedSpy};
+  return {Open, Key, Revoke, Join, Inspect, Mode, Read, Support, Command, Copy, Projection,
+      bridge::TableEvidence::InjectedSpy};
 }
 
 LRESULT CALLBACK ParentProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) noexcept {

@@ -7,9 +7,11 @@
 
 namespace {
 constexpr UINT_PTR kSourceCloseTimer = 0x4e4953;
+constexpr UINT_PTR kNormalCloseTimer = 0x4e494e;
 }
 
 FlutterWindow* FlutterWindow::source_fixture_window_ = nullptr;
+FlutterWindow* FlutterWindow::normal_window_ = nullptr;
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project,
                              bool sdk_fixture_enabled, bool source_fixture_enabled,
@@ -19,7 +21,17 @@ FlutterWindow::FlutterWindow(const flutter::DartProject& project,
       source_exit_test_enabled_(source_fixture_enabled_ && source_exit_test_enabled) {}
 
 FlutterWindow::~FlutterWindow() {
+  if (normal_window_ == this) normal_window_ = nullptr;
   if (source_fixture_window_ == this) source_fixture_window_ = nullptr;
+}
+bool FlutterWindow::RouteNormalInput(const MSG& message) noexcept {
+  try { return normal_window_ && normal_window_->desktop_native_input_ && normal_window_->desktop_native_input_->BeforeTranslate(message); }
+  catch (...) { return true; }
+}
+bool FlutterWindow::FinishNormalInput() noexcept {
+  if (guosshell::desktop_native_input::Channel::RetainedAtExit()) return false;
+  try { return !normal_window_ || !normal_window_->desktop_native_input_ || normal_window_->desktop_native_input_->PrepareClose(); }
+  catch (...) { return false; }
 }
 
 guosshell::native_input_spike::LoopRoute FlutterWindow::RouteOptionalFixture(const MSG& message) noexcept {
@@ -62,6 +74,10 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   window_material_ = std::make_unique<WindowMaterial>(
       flutter_controller_->engine()->messenger(), GetHandle());
+  desktop_native_input_ =
+      std::make_unique<guosshell::desktop_native_input::Channel>(
+          flutter_controller_->engine()->messenger(), flutter_controller_->view()->GetNativeWindow());
+  normal_window_ = this;
   if (sdk_fixture_enabled_) {
     sdk_fixture_channel_ = std::make_unique<NativeInputSdkChannel>(
         flutter_controller_->engine()->messenger(), GetHandle(), source_fixture_enabled_,
@@ -83,9 +99,12 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (normal_close_waiting_) KillTimer(GetHandle(), kNormalCloseTimer);
+  if (normal_window_ == this) normal_window_ = nullptr;
   if (source_close_waiting_) KillTimer(GetHandle(), kSourceCloseTimer);
   if (source_fixture_window_ == this) source_fixture_window_ = nullptr;
   sdk_fixture_channel_ = nullptr;
+  desktop_native_input_ = nullptr;
   window_material_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -128,6 +147,21 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     }
   }
   // Give Flutter, including plugins, an opportunity to handle window messages.
+  if (desktop_native_input_ && ((message == WM_ACTIVATEAPP && !wparam) || message == WM_CANCELMODE)) {
+    desktop_native_input_->Deactivate();
+  }
+  if (desktop_native_input_ && (message == WM_MOVE || message == WM_SIZE || message == WM_DPICHANGED)) {
+    desktop_native_input_->InvalidateGeometry();
+  }
+  if (desktop_native_input_ && message == WM_TIMER && wparam == kNormalCloseTimer && normal_close_waiting_) {
+    if (desktop_native_input_->PrepareClose()) {
+      KillTimer(hwnd, kNormalCloseTimer); normal_close_waiting_ = false; PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    } else if (GetTickCount64() >= normal_close_deadline_) {
+      KillTimer(hwnd, kNormalCloseTimer); normal_close_waiting_ = false;
+      std::fprintf(stderr, "[normal-input] 关闭未完成，保留原 callback/claim/root，不销毁 COM\n");
+    }
+    return 0;
+  }
   if (flutter_controller_) {
     std::optional<LRESULT> result =
         flutter_controller_->HandleTopLevelWindowProc(hwnd, message, wparam,
@@ -135,6 +169,15 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     if (result) {
       return *result;
     }
+  }
+
+  // window_manager 的用户确认先执行；实际销毁必须等 nativequiet 与原 claim/root 结算。
+  if (message == WM_CLOSE && desktop_native_input_ && !desktop_native_input_->PrepareClose()) {
+    if (!normal_close_waiting_) {
+      normal_close_deadline_ = GetTickCount64() + 5000;
+      normal_close_waiting_ = SetTimer(hwnd, kNormalCloseTimer, 16, nullptr) != 0;
+    }
+    return 0;
   }
 
   switch (message) {

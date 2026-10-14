@@ -1,4 +1,4 @@
-//! 会话连接生命周期回归；所有凭证均为内存替身，不访问真实钥匙串或硬件。
+//! 会话连接生命周期回归；测试凭证仅在内存中，不访问真实钥匙串或硬件。
 
 #![allow(clippy::expect_used)]
 
@@ -30,20 +30,33 @@ use crate::signals::{
     DesktopConnectResult, DesktopTargetKind, FailureKind,
 };
 
+#[path = "session_native_tests.rs"]
+mod native;
+
 fn context(vault: Arc<dyn CredentialVault>) -> Arc<AppContext> {
+    context_at(
+        vault,
+        PathBuf::new(),
+        std::env::temp_dir().join(format!("guosh-session-tests-{}.json", uuid::Uuid::new_v4())),
+    )
+}
+
+fn context_at(
+    vault: Arc<dyn CredentialVault>,
+    known_hosts: PathBuf,
+    preferences: PathBuf,
+) -> Arc<AppContext> {
     let repository = Arc::new(SqliteRepository::open_in_memory().expect("内存目录"));
     repository.migrate().expect("目录迁移");
     Arc::new(AppContext {
         credentials: CredentialCoordinator::new(repository.clone(), vault),
         repository,
-        known_hosts: PathBuf::new(),
+        known_hosts,
         keys: Arc::new(MemoryKeyStore::new(false)),
         key_operations: Mutex::new(()),
         cards: Arc::new(CardContext::new(Arc::new(NoCards))),
         security_keys: Arc::new(crate::security_key::Unavailable),
-        preferences: PreferenceFile::open(
-            std::env::temp_dir().join(format!("guosh-session-tests-{}.json", uuid::Uuid::new_v4())),
-        ),
+        preferences: PreferenceFile::open(preferences),
         catalog_changed: Notify::new(),
         keys_changed: Notify::new(),
     })

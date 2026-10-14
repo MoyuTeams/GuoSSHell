@@ -1,8 +1,9 @@
 # Windows 原生文本与布局单元
 
-本目录是显式 opt-in 的应用私有单元，不自动注册窗口、线程、subscriber 或 TSF manager。
-它不包含共享 ABI、Rust matcher/encoder、Rinf hub loader、SSH transport、Dart consumer 或生产 root 接线。
-普通 runner 的 CMake、主循环与默认路径不引用本目录。
+本目录是应用私有文本单元，自身不自动注册窗口、线程、subscriber 或 TSF manager。
+正常 runner 通过相邻 `desktop_native_input/` 的原 pane/root、消息泵与同步 C ABI 接线使用它；
+共享 ABI 以 `native/hub/desktop_native_input.h` 为准。本目录不包含 Rust matcher/encoder、
+SSH transport 或 Dart consumer。生产输入资格仍由独立 guard 控制，不能由组件初始化成功开启。
 
 ## 父接线责任
 
@@ -12,25 +13,28 @@
 原生对象通过 `TextStore::Create`、`NativeSurface::Create`、`LayoutTable::Create`
 进行 fallible allocation；构造前必须已有 grant/`NativePermit`。`NativePermit::Memory`
 指向同授额 root 的 allocator，allocator 寿命必须由 permit 覆盖。Layout 的 shared
-control block 也经过该 allocator，按实际申请尺寸计费；Build/DiagnosticQuery 不替换
+control block 也经过该 allocator，按实际申请尺寸计费；布局查询不替换
 已有 permit。分配失败返回空对象，已占内存按原 allocator 释放并归还原 grant。
 
-1. 已授权 builder 先登记固定 source/context、授 native permit，再由
+1. 已授权 builder 先冻结原 source/context、授 native permit，再由
    `ContextPool::Create` 创建实例。默认来源为 `VerifiedNative`；只有独立受控
    fixture 明确指定 `DeclaredSynthetic`。登记本身不构成物理输入证明。
 2. 传入应用 UI 线程已激活的 `ITfThreadMgr` 和 `TfClientId`，调用 `Open`。
-   自有终端 HWND 的 Win32 焦点就绪后调用 `ActivateDocument`。
+   `Open` 必须先于自有终端 HWND 首次获得 Win32 焦点；焦点就绪后调用 `ActivateDocument`。
    本单元不抢前台、不替调用方设置 Win32 焦点。
 3. 在 own HWND 的每条键消息出队后、任何 TSF Test/Key、TranslateMessage、
-   DispatchMessage 之前调用 `Dispatch`。`owned=true` 的原键不得再交旧窗口路线。
+   DispatchMessage 之前调用 `DispatchCanonical`；`Dispatch(MSG)` 仅供 synthetic 组件场景。
+   `owned=true` 的原键不得再交旧窗口路线。
    Gate 唯一负责原 chord 绑定仲裁；未知 raw 即便错误获 `AllowNativeText` 也不调用
    TSF/Translate，并取消返回的同 context 票据。
-4. 同一出队点调用 `DispatchPointer`，不要在 WndProc 或 Flutter 回调中补读 modifiers。
+4. normal pointer 在同一出队点冻结已呈现几何，直接进入正常同步 C ABI；组件的
+   `DispatchPointer` 不是该协议的 encoder。不要在 WndProc 或 Flutter 回调补读 modifiers。
    `HandleOwnedMessage` 在 own WndProc 的 DefWindowProc 前调用，只截断第二 char/IMM/
    pointer 消费链并处理失焦、布局变化。父须在每次 native dispatch 完成后以及 TSF
    异步 edit session 完成的 UI 周期调用 `Pump`；不能让已有 async lock 无唤醒地挂起。
-5. `ReservePayload` 在 native buffer 接受文本前授整个有界事务；`Payload` 只填原票据，
-   offset 连续、UTF-8 chunk 不切 scalar，最后由 `Finish` 封口。回调不得在每个 chunk
+5. `ReservePayload` 在 native buffer 接受文本前授整个有界事务；finalizer 以实际 UTF-8
+   长度调用 `PreparePayload`，normal 适配器取得 Rust 精确授额后才开始 `Payload`。
+   `Payload` 只填原票据，offset 连续、UTF-8 chunk 不切 scalar，最后由 `Finish` 封口。回调不得在每个 chunk
    提前发送或复用 permit；B queued/inflight 各自仍保有原 grant charge。
 6. SourceGeometry 必须是 core 已确认的 frame/viewport/font/transform。编辑文本的
    glyph/ACP rect 通过 `SetTextLayout` 同 edit revision 提供；不能用固定 cell 宽度
@@ -53,17 +57,24 @@ context 上注册，profile activation sink 在 thread manager 上注册。
   `OnEndEdit` 枚举真实 TSF composition ranges，维护 frozen prefix 和可编辑区；
   preedit 不经过 payload 出口。最终只有 store finalizer 提交，重复 callback 不重复
   Finish，不按文本内容去重。
-- **封口后不能在这个 context 再 Bind 新 ticket。** 父须等待 core lifecycle/revoke
-  fence、native retirement，登记新 ContextId 并创建新 context。这个保守轮换规则避免
-  无事务标签的旧 TSF callback 被解释成新事务；不是已完成的主界面连续输入接线。
-  只平衡已封口 ticket 的 Up 可由 `lifecycle_only` 获 TSF KeyUp，不得开新事务。
-- 没有排他独立编辑证明的异步非 composition edit 被拒绝；本单元不伪造
-  `begin_independent_text`。父后续若需要该能力，须提供原 edit session 的可证来源。
+- **封口后不能在这个 context 再 Bind 新 ticket。** `BeginContextRetirement` 只退休
+  原 context，不调用 surface revoke；实际 nativequiet 后以 `ContextQuiet` 回送原票据
+  与 fence，新事务使用新 ContextId。press 前态由宿主独立持有，不等所有按键松开。
+  `lifecycle_only` 的旧 Up 只释放 Press，不调用旧或新 context 的 TSF KeyUp。
+- TSF 异步 edit 仅在原已绑定且未封口的事务内可写；没有 ticket 的异步输入不获得权限。
+  TSF 路线必须收到真实 `OnEndEdit` 后才由 Pump 完成文本，单次 dispatch 结束不能提交
+  尚未编辑的空事务。Translate 路线仍在原单次 dispatch 内收齐派生字符后完成。
 - `BeginRevoke` 先进入 CoreRevoking。回调返回 false 表示 Busy，UI 不等待；父在真实
   core fence 完成后送回 `CoreFenceCompleted`。只有 NativeRetiring 的 composition
   termination、focus/association/sinks 解除、外部 store COM 引用释放和派生队列清空后
   才 `ConfirmRetired`。超时不构成退休。新 dialog/password 的 editable 状态由父在
   此确认之后启用；本目录不采集这些控件。
+- `DispatchCanonical` 消费 normal RawInput 适配器冻结的单包语义与分离的 physical/TSF
+  键态；VerifiedNative 不接受 legacy MSG 作为第二条键来源。`Dispatch(MSG)` 仅服务于
+  明确标记的 synthetic 组件场景，不构成物理设备或 TIP 签收。
+- 退休时保留已接受的 pending lock，原锁退出后由 Pump 有界推进；composition end
+  仍待真实 `OnEndEdit`。`RetirementResult` 供外部调度器报告失败/挂起，不能据 HRESULT
+  代替 quiet。调度器负责重试期限和失败后的原 root 保留，不允许 UI 同步等待。
 - fixed pool 有 8 个槽；未退休、外部引用仍活的槽不能复用，ContextId 单调且不复用。
   池满拒绝新准入。native permit 随 store/context/tombstone 存活，不在提交时提前归还。
   最后 Release 将 permit 移到析构栈外，直到对象及其 backing allocation 真正释放才退款；
@@ -99,7 +110,7 @@ DefWindowProc 的第二提交链。
 `LayoutTable::Build` 由**既有**已授额管理 worker 调用，本单元不创建线程。
 输入为 UI 同 MSG 的 HKL/profile/epoch、worker clean/no-Translate/no-Attach/no-context
 生命周期证据，以及 documented kernel isolation 和 UI dead 前/中/后实验证据。
-任一缺失返回 `LayoutStateNotIsolated`，不能启用字符 raw。
+任一缺失返回 `LayoutStateNotIsolated`，不能通过该 legacy 配对路径启用字符 raw。
 
 表为固定 `512 scan × 8 Shift/Caps/AltGr states × 8 UTF-16 units`。
 用 MapVirtualKeyEx 往返核验 VK/scan，ToUnicodeEx 只使用 flag 4。
@@ -112,6 +123,12 @@ DefWindowProc 的第二提交链。
 profile 通知都先 revoke 原 context。父必须提供新的、完整 profile revision。
 队列态的 LeftCtrl 无法区分物理 Ctrl 和 AltGr 合成 Ctrl；该组合及右 Alt 目前返回
 `AltGrUnverified`，保留原 modifier，不猜测 meta 或删除 Ctrl。
+
+normal 的 `QueryCanonical` 由宿主自建的单个 clean worker 执行，只生成冻结 HKL 的键身份表，
+不填写 `WorkerEvidence`，也不改变 `Verified`。单包来源、原 epoch 与物理前态由
+`RawInputOwner` 独立核验；兼容 TSF 键态不能反向填充 physical modifier。Raw Ctrl+RightAlt
+存在来源歧义时拒绝准入。域内高位快照只增加初态 Unknown，不把域外已按住键制造为新 Down。
+这条查询路径不替代物理设备、TIP 或 dead 状态隔离的生产验收。
 
 文档依据：
 

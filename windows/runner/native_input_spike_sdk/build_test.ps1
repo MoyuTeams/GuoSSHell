@@ -1,6 +1,8 @@
 param(
     [Parameter(Mandatory = $true)][string]$VcVars64,
-    [Parameter(Mandatory = $true)][string]$OutputDirectory
+    [Parameter(Mandatory = $true)][string]$OutputDirectory,
+    [string]$NativeHubDll,
+    [string]$LegacyHubDll
 )
 
 $ErrorActionPreference = 'Stop'
@@ -14,8 +16,10 @@ if (!(Test-Path -LiteralPath $tempParent -PathType Container)) { throw '批准�
 $resolvedParent = (Resolve-Path -LiteralPath $parent).Path
 if ($resolvedParent -ne (Resolve-Path -LiteralPath $tempParent).Path) { throw '输出不在批准的临时父目录' }
 $output = Join-Path $resolvedParent ([System.IO.Path]::GetFileName($output))
+$variants = @('good', 'missing', 'missing_command', 'missing_copy', 'missing_projection', 'normal', 'dirty', 'dirty_tail', 'duplicate')
 $created = @('bootstrap_host.obj', 'host_test.obj', 'host_test.exe')
-foreach ($variant in @('good', 'missing', 'normal', 'dirty', 'duplicate')) {
+if ($NativeHubDll) { $created += @('real_abi_test.obj', 'real_abi_test.exe') }
+foreach ($variant in $variants) {
     foreach ($extension in @('dll', 'obj', 'lib', 'exp')) { $created += "$variant.$extension" }
 }
 New-Item -ItemType Directory -Path $output | Out-Null
@@ -29,11 +33,15 @@ foreach ($line in $environment) {
 }
 if (!(Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw '现有 MSVC 编译器不可用' }
 $source = Join-Path $PSScriptRoot 'test_fixture.cpp'
-foreach ($variant in @('good', 'missing', 'normal', 'dirty', 'duplicate')) {
+foreach ($variant in $variants) {
     $define = switch ($variant) {
         'missing' { '/DTEST_MISSING_EXPORT' }
+        'missing_command' { '/DTEST_MISSING_COMMAND' }
+        'missing_copy' { '/DTEST_MISSING_COPY' }
+        'missing_projection' { '/DTEST_MISSING_PROJECTION' }
         'normal' { '/DTEST_NORMAL_MODE' }
         'dirty' { '/DTEST_DIRTY_CORE' }
+        'dirty_tail' { '/DTEST_DIRTY_TAIL' }
         default { '/DTEST_FIXTURE' }
     }
     & cl.exe /nologo /utf-8 /std:c++17 /EHsc /W4 /WX /LD $define $source "/Fe:$output\$variant.dll" "/Fo:$output\$variant.obj" /link /INCREMENTAL:NO "/IMPLIB:$output\$variant.lib"
@@ -41,12 +49,23 @@ foreach ($variant in @('good', 'missing', 'normal', 'dirty', 'duplicate')) {
 }
 & cl.exe /nologo /utf-8 /std:c++17 /EHsc /W4 /WX (Join-Path $PSScriptRoot 'bootstrap_host.cpp') (Join-Path $PSScriptRoot 'host_test.cpp') "/Fe:$output\host_test.exe" "/Fo:$output\" /link /INCREMENTAL:NO
 if ($LASTEXITCODE -ne 0) { throw '宿主测试编译失败' }
-foreach ($scenario in @('off', 'good', 'missing', 'normal', 'dirty', 'duplicate', 'nonce', 'foreign')) {
-    $variant = if ($scenario -in @('missing', 'normal', 'dirty')) { $scenario } else { 'good' }
+foreach ($scenario in @('off', 'good', 'missing', 'missing_command', 'missing_copy', 'missing_projection', 'normal', 'dirty', 'dirty_tail', 'duplicate', 'nonce', 'foreign')) {
+    $variant = if ($scenario -like 'missing*' -or $scenario -in @('normal', 'dirty', 'dirty_tail')) { $scenario } else { 'good' }
     & (Join-Path $output 'host_test.exe') $scenario (Join-Path $output "$variant.dll") (Join-Path $output 'duplicate.dll')
     if ($LASTEXITCODE -ne 0) { throw "宿主测试失败：$scenario" }
 }
-'8 个 Windows loader/test-double 场景通过；不是 live SDK 证明。'
+'12 个 Windows loader/test-double 场景通过；不是 live SDK 证明。'
+if ($NativeHubDll) {
+    if (!(Test-Path -LiteralPath $NativeHubDll -PathType Leaf)) { throw '既有 ABI3 DLL 不存在；不构建 Rust' }
+    & cl.exe /nologo /utf-8 /std:c++17 /EHsc /W4 /WX (Join-Path $PSScriptRoot 'bootstrap_host.cpp') (Join-Path $PSScriptRoot 'real_abi_test.cpp') "/Fe:$output\real_abi_test.exe" "/Fo:$output\" /link /INCREMENTAL:NO
+    if ($LASTEXITCODE -ne 0) { throw '真实 ABI 测试编译失败' }
+    if ($LegacyHubDll) {
+        & (Join-Path $output 'real_abi_test.exe') $LegacyHubDll '--missing'
+        if ($LASTEXITCODE -ne 0) { throw '旧 DLL 缺失 ABI3 导出未安全拒绝' }
+    }
+    & (Join-Path $output 'real_abi_test.exe') $NativeHubDll
+    if ($LASTEXITCODE -ne 0) { throw '真实 Rust ABI3 调用失败' }
+}
 } finally {
     $cleanupTarget = (Resolve-Path -LiteralPath $output).Path
     if ([System.IO.Path]::GetFullPath($cleanupTarget) -ne [System.IO.Path]::GetFullPath($output)) { throw '清理目标不匹配' }

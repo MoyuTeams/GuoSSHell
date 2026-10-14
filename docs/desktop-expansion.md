@@ -74,7 +74,9 @@ Profile 参数（终端参数/协议/绑定/滚回）在新会话或显式重启
 - 独立输入策略（`native/hub/src/desktop_input_policy.rs`）：raw chord 优先匹配 profile/应用合并绑定、16 项默认候选、消费锁存至物理 Up、Repeat 不重复壳动作、未知来源 typed 拒绝。
 - 上游兼容键盘事件接缝（rsHell `TerminalKeyEvent` 双表示 + `encode_key_event`，Kitty flag 1/2 下 Super 与 press/repeat/release）已发布并 pin。
 - 输入架构采用「单一原生输入 surface + Rust 先仲裁」：Flutter 公共按键事件无原生事件 ID，不能与另一通道元数据配对；键盘/文本/指针统一进入应用私有 Windows 输入窗口（TSF 前门控、Translate 前仲裁），文本/IME 提交保持单一来源票据。原型由 `native-input-spike` feature 控制，默认关闭。
-- 已验证：同 SDK 隔离握手、合成按键精确编码字节、TSF/COM 生命周期与退休安全。未完成：物理键盘、非 US 布局、真实 IME/文本/指针、ABI 3 宿主联调。
+- 正常输入采用独立 NativePort ABI 1／19 个导出，绑定原会话 actor；Windows 宿主只关联 Rinf 已加载的同一 hub 模块，不另载运行时。HWND、TSF/COM 生命周期、文本终结、动作 claim 与退休已有组件验证，组件的 C ABI 替身不能替代实际 Rinf 输入联证。独立 spike ABI 3／11 个导出仍只用于隔离 fixture。
+- normal 键位条通过唯一 Dart writer 提交明确的 `GuiIntent`，不冒充物理键／原生文本来源。Ctrl/Alt 修饰快照与 revision 由 controller 持有，Rust 准入回执结算实际 latch 消费；单个待决请求不积压，5 秒超时或 `Unknown` 隔离 GUI 输入并停止重复，不自动重放。composition 结束与异步布局按原窗格／事务结算，旧回调不能清除或关闭较新的输入。
+- 实现检查点保留正常生产输入 guard 关闭。物理键盘、非 US 布局、真实 IME/TIP、文本／指针与完整 GUI 输入联证，以及阶段四完整矩阵仍待验收；组件测试通过不构成生产开放条件。
 
 **配置读取与应用资源控制**——待生产组合验收：
 

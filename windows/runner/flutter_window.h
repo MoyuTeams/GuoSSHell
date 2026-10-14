@@ -9,6 +9,7 @@
 #include "win32_window.h"
 #include "window_material.h"
 #include "native_input_spike_sdk_channel.h"
+#include "desktop_native_input/channel.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -22,6 +23,8 @@ class FlutterWindow : public Win32Window {
   // 只路由全 app 窗口对象的可选夹具，必须先于 TranslateMessage／Flutter 分发。
   static guosshell::native_input_spike::LoopRoute RouteOptionalFixture(const MSG&) noexcept;
   static HRESULT FinishOptionalFixture() noexcept;
+  static bool RouteNormalInput(const MSG&) noexcept;
+  static bool FinishNormalInput() noexcept;
 
  protected:
   // Win32Window:
@@ -39,6 +42,12 @@ class FlutterWindow : public Win32Window {
 
   // 应用自有的窗口材质通道，须先于 Flutter 实例销毁。
   std::unique_ptr<WindowMaterial> window_material_;
+
+  // 正常输入私有通道只关联 Rinf 已加载的模块，不启动另一份运行时。
+  std::unique_ptr<guosshell::desktop_native_input::Channel> desktop_native_input_;
+  static FlutterWindow* normal_window_;
+  bool normal_close_waiting_ = false;
+  ULONGLONG normal_close_deadline_ = 0;
 
   const bool sdk_fixture_enabled_;
   const bool source_fixture_enabled_;

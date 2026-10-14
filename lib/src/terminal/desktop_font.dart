@@ -28,6 +28,7 @@ class DesktopFontController extends ChangeNotifier {
   final InterfaceTypography _legacyTypography;
   _PreparedCapture? _capture;
   _FontEntry? _entry;
+  DesktopFontBudgetFailure? _admissionError;
   DesktopTerminalProfile? _legacyProfile;
   DesktopFontMaterial? _current;
   Future<DesktopFontMaterial?>? _pending;
@@ -48,10 +49,17 @@ class DesktopFontController extends ChangeNotifier {
     final capture = _PreparedCapture(result, binary);
     // 先 acquire 再释放旧选择，同一资源在同 pane 重选时也共享正在进行的加载。
     final resource = capture.capturedResource;
-    final entry = resource == null ? null : _cache._acquire(resource, binary);
+    var (entry, error) = resource == null
+        ? (null, null)
+        : _cache._acquire(resource, binary);
     _clearSelection();
+    // 旧失败材料可能刚退额；原 binary 仍有效，复制前重新准入本次选择。
+    if (resource != null && error != null) {
+      (entry, error) = _cache._acquire(resource, binary);
+    }
     _capture = capture;
     _entry = entry;
+    _admissionError = error;
     return _resolve();
   }
 
@@ -73,7 +81,8 @@ class DesktopFontController extends ChangeNotifier {
     return _current!;
   }
 
-  /// 仅重试当前捕获；失败时 entry 持有原始字节，绝不重新查询旧槽。
+  /// 仅重试当前捕获；注册失败时 entry 持有原始字节，绝不重新查询旧槽。
+  /// 准入拒绝未捕获字节，保留回退；重新选择 Prepared 才能再次申请额度。
   Future<DesktopFontMaterial?> retry() {
     _checkAlive();
     if (_pending != null) return _pending!;
@@ -86,23 +95,33 @@ class DesktopFontController extends ChangeNotifier {
     final entry = _entry;
     final revision = _revision;
     if (entry == null || entry.loaded) {
-      final material = capture.material();
+      final material = capture.material(error: _admissionError);
       _current = material;
       notifyListeners();
       return Future.microtask(
         () => _disposed || revision != _revision ? null : material,
       );
     }
-    final pending = _cache._load(entry).then((error) {
-      if (_disposed || revision != _revision) return null;
-      _pending = null;
-      final material = capture.material(error: error);
-      _current = material;
-      notifyListeners();
-      return _disposed || revision != _revision ? null : material;
-    });
+    final completion = Completer<DesktopFontMaterial?>();
+    final pending = completion.future;
+    // registrar 可同步重入；调用前登记控制器 Future，重试共享同一次选择。
     _pending = pending;
-    notifyListeners();
+    unawaited(
+      _cache._load(entry).then<void>((error) {
+        if (_disposed || revision != _revision) {
+          completion.complete(null);
+          return;
+        }
+        _pending = null;
+        final material = capture.material(error: error);
+        _current = material;
+        notifyListeners();
+        completion.complete(
+          _disposed || revision != _revision ? null : material,
+        );
+      }),
+    );
+    if (!_disposed && revision == _revision) notifyListeners();
     return pending;
   }
 
@@ -141,6 +160,7 @@ class DesktopFontController extends ChangeNotifier {
     final entry = _entry;
     if (entry != null) _cache._release(entry);
     _entry = null;
+    _admissionError = null;
     _capture = null;
     _current = null;
     _pending = null;

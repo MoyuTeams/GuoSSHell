@@ -443,6 +443,9 @@ fn runtime_shutdown_timeout_keeps_blocking_io_lease_until_the_real_worker_finish
         .expect("加载预约");
     let budget = preparations.budget.clone();
     let reserved = budget.usage();
+    assert_eq!(reserved.count, 1);
+    assert_eq!(reserved.inflight, 1);
+    assert!(reserved.bytes > 0);
     let result = runtime.block_on(crate::shutdown::run_until_with(
         async move { ready.await.expect("真实阻塞工作开始") },
         move |mut shutdown| async move {
@@ -482,7 +485,7 @@ fn runtime_shutdown_timeout_keeps_blocking_io_lease_until_the_real_worker_finish
     let after_runtime = budget.usage();
     let worker_still_blocked = matches!(done.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
 
-    // 先确保所有真实线程结束，再断言被捕获的失败状态，RED 阶段也不遗留工作。
+    // 先确保真实工作结束，再断言退出状态；断言失败时也不遗留阻塞工作。
     release.send(()).expect("放行真实阻塞工作");
     done.recv_timeout(std::time::Duration::from_secs(3))
         .expect("底层工作结束");
@@ -501,8 +504,12 @@ fn runtime_shutdown_timeout_keeps_blocking_io_lease_until_the_real_worker_finish
     );
     assert!(worker_still_blocked, "Runtime 超时不能冒充 thread kill");
     assert_eq!(
-        after_runtime, reserved,
-        "Runtime 销毁后、真实 I/O 结束前不能归还任何预约"
+        after_runtime,
+        crate::desktop_prepare::Usage {
+            count: 0,
+            ..reserved
+        },
+        "准备槽已撤销，真实 I/O 结束前仍须保留完整 bytes/inflight 预约"
     );
     assert_eq!(budget.usage(), crate::desktop_prepare::Usage::default());
 }

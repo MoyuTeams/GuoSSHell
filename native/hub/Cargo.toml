@@ -101,6 +101,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 # 暂停的时钟（连接时限的测试）。
 tokio = { version = "1.45.0", features = ["test-util"] }
 keyring-core = { version = "1.0.0", features = ["sample"] }
+# 受控 SSH 对端与正常 Native 使用同一公开提交，不引入另一套协议实现。
+russh = { version = "=0.62.5", git = "https://github.com/MoyuTeams/russh", rev = "392265d2b622fdce3fd57f836db134773c475950", default-features = false, features = ["ring", "rsa", "flate2"] }
 
 # Uncomment below to target the web.
 # tokio_with_wasm = { version = "0.8.5", features = ["rt", "macros", "time"] }

@@ -180,6 +180,21 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
 
   // ── 帧摄入 ──
 
+  /// 来源或 attempt 重置时丢弃旧行身份与展示缓存，不改实测几何。
+  void resetDisplay() {
+    _pool.clear();
+    _buffer.replaceWith([BufferLine(_cols)]);
+    _placeholder = null;
+    _firstStable = _screenTopStable = _windowTopStable = 0;
+    _windowLength = _originShift = 0;
+    _height = 1;
+    _cursorX = _cursorY = 0;
+    _cursorVisible = false;
+    _title = '';
+    _mouseReporting = _alternateScreen = false;
+    notifyListeners();
+  }
+
   void applyFrame(TerminalFrame frame) {
     if (frame.cols != _cols) _placeholder = null;
     _cols = frame.cols;

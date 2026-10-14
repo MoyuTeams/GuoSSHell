@@ -86,7 +86,7 @@ bool Modifiers(const source::NativeKeyEvent& event, abi::SpikeKey* key) noexcept
 }
 
 bool ValidResult(std::uint32_t returned, const abi::SpikeAdmission& result) noexcept {
-  if (returned > abi::kTransportFailure || result.version != abi::kVersion ||
+  if (returned > abi::kActiveKeyBudget || result.version != abi::kVersion ||
       result.size != sizeof(result) || result.status != returned ||
       result.action > 16 || result.byte_len > 32) return false;
   if (returned != abi::kOk) {
@@ -111,7 +111,7 @@ bool FunctionsTable::available() const noexcept {
       evidence == TableEvidence::StandaloneCheckedFixture ||
       evidence == TableEvidence::ParentVerifiedSameSdk;
   return evidence_ok && open && key && revoke && join && inspect && peer_mode &&
-         peer_read && support;
+         peer_read && support && command && copy && projection;
 }
 
 std::uint32_t Retirement::JoinOnManagementThread() const noexcept {
@@ -172,7 +172,8 @@ source::Admission NativeInputBridge::BindWindow(HWND hwnd,
   }
   const abi::SpikeOpen request{abi::kVersion, sizeof(abi::SpikeOpen), 1, 0,
       &window_, reinterpret_cast<const std::uint8_t*>(abi::kFixtureName),
-      sizeof(abi::kFixtureName) - 1};
+      sizeof(abi::kFixtureName) - 1, abi::kDeclaredSynthetic, abi::kFixturePlatform,
+      reinterpret_cast<std::uintptr_t>(&window_)};
   abi::SpikeOwner result{};
   last_status_ = functions_.open(&request, &result);
   if (last_status_ != abi::kOk) return MapStatus(last_status_);
@@ -209,6 +210,10 @@ source::GateReply NativeInputBridge::AdmitKey(
   abi::SpikeKey key{};
   key.version = abi::kVersion;
   key.size = sizeof(key);
+  key.native_event = event.native_event_id;
+  // 固定 fixture 协议 revision；不是把 HKL／PostMessage 签成生产来源。
+  key.layout_revision = 1;
+  key.same_event_state = static_cast<std::uint64_t>(event.key_bits);
   // 缺 scan 无法延续同一 physical；停 owner，不伪造 NonZero 或给 Rust 坏枚举。
   if (!event.scan_code || event.scan_code > 0xff || !Phase(event, &key.phase)) {
     RevokeContext(event.context);
@@ -309,7 +314,7 @@ bool NativeInputBridge::ValidateText(void* user, const source::NativeKeyEvent&,
     const source::TextPermit&) noexcept {
   auto& bridge = *static_cast<NativeInputBridge*>(user);
   bridge.last_status_ = bridge.TextSupport();
-  return false;  // ABI 2 此波没有 ticket；Unsupported 不得变成 fake S_OK。
+  return false;  // 尚未接入真实 text ticket；support 的 OK 不授予 native-text 许可。
 }
 
 bool NativeInputBridge::CancelText(void* user, const source::TextPermit&) noexcept {

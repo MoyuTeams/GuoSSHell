@@ -16,7 +16,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   // Initialize COM, so that it is available for use in the library and/or
   // plugins.
-  ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  if (FAILED(::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return EXIT_FAILURE;
+  struct Apartment {
+    ~Apartment() {
+      if (guosshell::desktop_native_input::Channel::RetainedAtExit()) ::ExitProcess(EXIT_FAILURE);
+      ::CoUninitialize();
+    }
+  } apartment;
 
   flutter::DartProject project(L"data");
 
@@ -44,11 +50,18 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   window.SetQuitOnClose(true);
 
   ::MSG msg;
-  while (::GetMessage(&msg, nullptr, 0, 0)) {
+  BOOL next_message = 0;
+  while ((next_message = ::GetMessage(&msg, nullptr, 0, 0)) > 0) {
+    if (FlutterWindow::RouteNormalInput(msg)) continue;
     const auto route = FlutterWindow::RouteOptionalFixture(msg);
     if (route == guosshell::native_input_spike::LoopRoute::Handled) continue;
     if (route == guosshell::native_input_spike::LoopRoute::ExistingRoute) ::TranslateMessage(&msg);
     ::DispatchMessage(&msg);
+  }
+
+  if (!FlutterWindow::FinishNormalInput()) {
+    // 未静默的 callback/worker/root 仍保有模块和 COM；不以进程退出伪造 released。
+    ::ExitProcess(EXIT_FAILURE);
   }
 
   const HRESULT finished = FlutterWindow::FinishOptionalFixture();
@@ -56,6 +69,5 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     // 未确认的 Root／HWND／COM 保留至进程退出；不卸载 COM、不触发栈析构。
     ::ExitProcess(EXIT_FAILURE);
   }
-  ::CoUninitialize();
-  return EXIT_SUCCESS;
+  return next_message < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
 }

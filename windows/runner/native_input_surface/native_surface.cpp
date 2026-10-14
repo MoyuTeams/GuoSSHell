@@ -11,6 +11,18 @@ struct FlagScope {
   ~FlagScope() { value = false; }
   bool& value;
 };
+struct KeyboardStateScope {
+  std::array<BYTE, 256> saved{};
+  bool changed{};
+  bool Set(const NativeKey& key) noexcept {
+    if (!key.canonical_raw) return true;
+    if (!GetKeyboardState(saved.data())) return false;
+    auto compatible = key.queue_state;
+    changed = SetKeyboardState(compatible.data()) != FALSE;
+    return changed;
+  }
+  ~KeyboardStateScope() { if (changed) SetKeyboardState(saved.data()); }
+};
 }
 
 NativeSurface::NativeSurface(HWND hwnd, OwnerRef owner, std::shared_ptr<Callbacks> callbacks,
@@ -167,6 +179,15 @@ void NativeSurface::FailRoute(Fault fault) noexcept {
   callbacks_->Faulted(owner_, fault);
 }
 DispatchResult NativeSurface::Dispatch(const MSG& msg, const std::shared_ptr<const LayoutTable>& layout) noexcept {
+  return DispatchImpl(msg, layout, nullptr);
+}
+DispatchResult NativeSurface::DispatchCanonical(const NativeKey& key,
+    const std::shared_ptr<const LayoutTable>& layout) noexcept {
+  if (!key.canonical_raw || !key.physical || !key.event_id) return {};
+  return DispatchImpl(key.message, layout, &key);
+}
+DispatchResult NativeSurface::DispatchImpl(const MSG& msg,
+    const std::shared_ptr<const LayoutTable>& layout, const NativeKey* canonical) noexcept {
   ComPtr<NativeSurface> self(this);
   DispatchResult result{};
   if (msg.hwnd != hwnd_ || (msg.message != WM_KEYDOWN && msg.message != WM_KEYUP &&
@@ -181,9 +202,14 @@ DispatchResult NativeSurface::Dispatch(const MSG& msg, const std::shared_ptr<con
     result.fault = Fault::TextContextUnverified;
     return result;
   }
+  if (origin_ == NativeOrigin::VerifiedNative && !canonical) {
+    result.fault = Fault::TextContextUnverified;
+    return result;
+  }
   if (event_ == UINT64_MAX) { result.fault = Fault::ContextBudget; return result; }
   FlagScope dispatch(dispatching_);
-  const uint64_t event = ++event_;
+  if (canonical && canonical->event_id <= event_) { result.fault = Fault::InvalidIdentity; return result; }
+  const uint64_t event = canonical ? (event_ = canonical->event_id) : ++event_;
   if (layout) {
     if ((layout_ && layout_.get() != layout.get()) || !SameProfile(layout->Profile(), profile_)) {
       InvalidateLayout();
@@ -203,7 +229,15 @@ DispatchResult NativeSurface::Dispatch(const MSG& msg, const std::shared_ptr<con
     result.fault = Fault::LayoutStale;
     return result;
   }
-  hr = FreezeKey(hwnd_, msg, event, profile_, &key);
+  if (canonical) {
+    key = *canonical;
+    hr = SameProfile(key.layout, profile_) ? S_OK : E_ACCESSDENIED;
+    if (SUCCEEDED(hr) && NamedKey(static_cast<UINT>(msg.wParam))) {
+      key.raw = key.legacy = {MetadataKind::Named, static_cast<uint32_t>(msg.wParam)};
+      key.trusted_raw = true;
+      key.metadata_fault = Fault::None;
+    }
+  } else hr = FreezeKey(hwnd_, msg, event, profile_, &key);
   if (!SourceActive(event)) { result.fault = Fault::TextContextUnverified; return result; }
   if (FAILED(hr)) { result.native_result = hr; result.fault = Fault::LayoutUnverified; return result; }
   if (layout_ && !key.trusted_raw) key.metadata_fault = layout_->Lookup(&key);
@@ -220,23 +254,12 @@ DispatchResult NativeSurface::Dispatch(const MSG& msg, const std::shared_ptr<con
     return result;
   }
   if (receipt.lifecycle_only) {
-    // 只有原已闭合 ticket 的 Up 可平衡 TSF 状态；store 已只读，不能开新事务。
-    if (!key.up || !store_->Sealed() || !store_->OriginalTicket() ||
-        store_->Failure() != Fault::None || !(receipt.ticket == *store_->OriginalTicket())) {
-      result.fault = Fault::InvalidIdentity;
-      return result;
-    }
-    BOOL eaten{};
-    result.native_result = keys->TestKeyUp(msg.wParam, msg.lParam, &eaten);
-    ++result.tsf_calls;
-    if (!SourceActive(event) || store_->Failure() != Fault::None) { result.fault = Fault::TextContextUnverified; return result; }
-    if (SUCCEEDED(result.native_result) && eaten) {
-      result.native_result = keys->KeyUp(msg.wParam, msg.lParam, &eaten);
-      ++result.tsf_calls;
-      if (!SourceActive(event) || store_->Failure() != Fault::None) { result.fault = Fault::TextContextUnverified; return result; }
-    }
+    // sealed context 的旧 Up 只由 gate 释放 Press，不能送给本 context 或新 context。
+    if (!key.up) result.fault = Fault::InvalidIdentity;
     return result;
   }
+  KeyboardStateScope keyboard_state;
+  if (!keyboard_state.Set(key)) { result.fault = Fault::TextContextUnverified; return result; }
   hr = store_->Bind(receipt.ticket);
   TextDispatchScope scope{receipt.ticket, owner_.context, key.event_id, TextRoute::TsfStore};
   if (!SourceActive(event)) return AbortDispatch(result);
@@ -474,6 +497,18 @@ Fault NativeSurface::CoreFenceCompleted(uint64_t fence) noexcept {
     return Fault::NativeRetirementPending;
   return TryConfirmRetired();
 }
+Fault NativeSurface::BeginContextRetirement(uint64_t fence) noexcept {
+  ComPtr<NativeSurface> self(this);
+  if (GetCurrentThreadId() != thread_) return Fault::TextContextUnverified;
+  if (context_only_ && fence_ == fence) return TryConfirmRetired();
+  if (state_ != FocusState::Active || !opened_) return Fault::InvalidIdentity;
+  if (!fence && store_ && store_->Bound() && !store_->Sealed()) return Fault::InvalidIdentity;
+  context_only_ = true;
+  fence_ = fence;
+  state_ = FocusState::NativeRetiring;
+  if (store_) store_->Retire(false);
+  return TryConfirmRetired();
+}
 HRESULT NativeSurface::DetachNative() noexcept {
   if (GetCurrentThreadId() != thread_) return RPC_E_WRONG_THREAD;
   if (detached_) return S_OK;
@@ -533,7 +568,10 @@ Fault NativeSurface::TryConfirmRetired() noexcept {
   if (state_ == FocusState::Retired) return Fault::None;
   if (state_ != FocusState::NativeRetiring || confirming_) return Fault::NativeRetirementPending;
   FlagScope confirming(confirming_);
-  if (FAILED(DetachNative()) || (store_ && (!store_->CanDetach() || store_->References() != 1)))
+  // 原 pending lock 在调用栈退出后继续完成；retire 不能丢弃 TSF 已获准的异步责任。
+  if (store_ && FAILED(store_->PumpNotifications())) return Fault::NativeRetirementPending;
+  retirement_result_ = DetachNative();
+  if (FAILED(retirement_result_) || (store_ && (!store_->CanDetach() || store_->References() != 1)))
     return Fault::NativeRetirementPending;
   const uint64_t original_source = owner_.source, original_context = owner_.context, original_fence = fence_;
   TextStore* const original_store = store_.Get();
@@ -544,7 +582,9 @@ Fault NativeSurface::TryConfirmRetired() noexcept {
       !detached_ || dispatching_ || detaching_ || opening_ ||
       (store_ && (!store_->Retired() || !store_->CanDetach() || store_->References() != 1)))
     return Fault::NativeRetirementPending;
-  if (!callbacks_->ConfirmRetired(owner_, fence_)) return Fault::Busy;
+  if (context_only_) {
+    if (!callbacks_->ContextQuiet(owner_, store_ ? store_->OriginalTicket() : nullptr, fence_)) return Fault::Busy;
+  } else if (!callbacks_->ConfirmRetired(owner_, fence_)) return Fault::Busy;
   state_ = FocusState::Retired;
   return Fault::None;
 }

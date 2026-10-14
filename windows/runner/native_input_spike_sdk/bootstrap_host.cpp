@@ -15,10 +15,6 @@ std::atomic<bool> process_attempted{false};
 constexpr const char* kRinfSymbols[] = {
     "rinf_prepare_isolate_extern", "rinf_start_rust_logic_extern",
     "rinf_stop_rust_logic_extern", "rinf_send_dart_signal_desktop_ordered"};
-constexpr const char* kCoreSymbols[] = {
-    abi::kOpenSymbol, abi::kKeySymbol, abi::kRevokeSymbol, abi::kJoinSymbol,
-    abi::kInspectSymbol, abi::kPeerModeSymbol, abi::kPeerReadSymbol,
-    abi::kSupportSymbol};
 
 std::uint32_t Read32(const std::uint8_t* bytes) noexcept {
   return std::uint32_t{bytes[0]} | (std::uint32_t{bytes[1]} << 8) |
@@ -126,12 +122,12 @@ bool BootstrapHost::ResolveAll() {
     if (!resolve(symbol)) return false;
     ++diagnostic_.rinf_exports;
   }
-  for (const auto symbol : kCoreSymbols) {
+  for (const auto symbol : abi::kCoreSymbols) {
     if (!resolve(symbol)) return false;
     ++diagnostic_.core_exports;
   }
   if (!resolve(kModeSymbol) || !resolve(kProbeSymbol)) return false;
-  // 使用父级共享头中的真实签名；其他七个 core 函数只解析，不调用。
+  // 使用共享头中的真实签名；其他 core 函数只解析，不调用。
   inspect_ = reinterpret_cast<abi::InspectFn>(
       GetProcAddress(module_, abi::kInspectSymbol));
   mode_ = reinterpret_cast<std::uint32_t(__cdecl*)()>(
@@ -170,7 +166,15 @@ bool BootstrapHost::InspectEmptyCore() {
       snapshot.charged_slots != 0 || snapshot.charged_bytes != 0 ||
       snapshot.inflight != 0 || snapshot.stopped != 0 ||
       snapshot.worker_done != 0 || snapshot.worker_joined != 0 ||
-      snapshot.last_written_seq != 0 || !MappedHere(snapshot.hub_instance) ||
+      snapshot.last_written_seq != 0 || snapshot.retained_bytes != 0 ||
+      snapshot.applied_effect != 0 || snapshot.frame_revision != 0 ||
+      snapshot.source_origin != 0 || snapshot.sync_state != 0 ||
+      snapshot.sync_epoch != 0 || snapshot.sync_wakes != 0 ||
+      snapshot.remote_received != 0 || snapshot.core_revoked != 0 ||
+      snapshot.native_retired != 0 || snapshot.scope_delta != 0 ||
+      snapshot.root_scope_delta != 0 || snapshot.profile_revision != 0 ||
+      snapshot.cell_width != 0 || snapshot.cell_height != 0 ||
+      !MappedHere(snapshot.hub_instance) ||
       (core_marker_ != 0 && core_marker_ != snapshot.hub_instance)) {
     return false;
   }

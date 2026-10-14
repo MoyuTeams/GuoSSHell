@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $OutputDirectory,
     [switch] $StandaloneFixture,
+    [string] $StandaloneFixtureDll,
     [ValidateSet('all', 'safety')]
     [string] $Cases = 'all'
 )
@@ -36,10 +37,9 @@ foreach ($path in ($includePaths + $libraryPaths)) {
 }
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
 $fixtureDirectory = Join-Path $projectRoot 'build\native_input_sdk_fixture\debug'
-$fixtureDll = Join-Path $fixtureDirectory 'hub.dll'
+$fixtureDll = if ($StandaloneFixtureDll) { [System.IO.Path]::GetFullPath($StandaloneFixtureDll) } else { Join-Path $fixtureDirectory 'hub.dll' }
 if ($StandaloneFixture) {
-    if (!(Test-Path -LiteralPath $fixtureDirectory -PathType Container) -or
-        !(Test-Path -LiteralPath $fixtureDll -PathType Leaf)) {
+    if (!(Test-Path -LiteralPath $fixtureDll -PathType Leaf)) {
         throw '父受控 fixture 产物不存在；不构建或安装 Rust'
     }
 }

@@ -33,7 +33,7 @@ bool TextStore::WriteLocked() const noexcept {
 bool TextStore::Editable() const noexcept {
   return bound_ && !sealed_ && !retired_ &&
          !(notifying_ && scope_.route == TextRoute::TranslateStore) &&
-         (in_dispatch_ || composition_ || end_composition_pending_);
+         (in_dispatch_ || scope_.route == TextRoute::TsfStore);
 }
 HRESULT TextStore::Bind(const TicketRef& ticket) noexcept {
   ComPtr<TextStore> self(this);
@@ -97,16 +97,16 @@ void TextStore::Cancel(Fault reason) noexcept {
     callbacks_->Cancel(ticket_, reason);
   }
 }
-void TextStore::Retire() noexcept {
+void TextStore::Retire(bool notify_core) noexcept {
   ComPtr<TextStore> self(this);
   if (!OnThread()) return;
   retired_ = true;
-  Cancel(Fault::TextContextUnverified);
-  pending_lock_ = 0;
+  if (notify_core) Cancel(Fault::TextContextUnverified);
+  else sealed_ = true;
 }
 bool TextStore::CanDetach() const noexcept {
   return OnThread() && !lock_ && !requesting_ && !notifying_ && !in_dispatch_ &&
-         !pending_lock_ && !composition_ && !dead_pending_;
+         !pending_lock_ && !composition_ && !end_composition_pending_ && !dead_pending_;
 }
 HRESULT TextStore::PublishPreedit() noexcept {
   if (sealed_ || retired_) return TS_E_READONLY;
@@ -124,6 +124,7 @@ HRESULT TextStore::Finalize() noexcept {
   if (!bound_ || sealed_) return S_FALSE;
   if (retired_ || composition_ || end_composition_pending_ || dead_pending_ || in_dispatch_ || requesting_ ||
       notifying_ || lock_ || pending_lock_) return TS_S_ASYNC;
+  if (scope_.route == TextRoute::TsfStore && !native_edit_complete_) return TS_S_ASYNC;
   if (!ValidUtf16(text_.data(), length_)) {
     Cancel(Fault::InvalidUtf16);
     return E_INVALIDARG;
@@ -134,6 +135,11 @@ HRESULT TextStore::Finalize() noexcept {
     Cancel(Fault::InvalidUtf16);
     return E_INVALIDARG;
   }
+  if (!callbacks_->PreparePayload(ticket_, static_cast<uint32_t>(bytes))) {
+    Cancel(Fault::PayloadRejected);
+    return E_FAIL;
+  }
+  if (retired_ || sealed_) return E_ABORT;
   // 先封口；回调重入与重复 OnEndEdit 不得再次提交。
   sealed_ = true;
   uint32_t offset = 0;
@@ -287,6 +293,7 @@ HRESULT TextStore::SetSelection(ULONG count, const TS_SELECTION_ACP* value) {
     return E_INVALIDARG;
   if (revision_ == UINT64_MAX) { Cancel(Fault::TextCapacity); return E_FAIL; }
   selection_ = *value;
+  native_edit_complete_ = false;
   ++revision_;
   ++side_effects_;
   return S_OK;
@@ -339,6 +346,7 @@ HRESULT TextStore::Replace(LONG a, LONG b, const WCHAR* value, ULONG count, TS_T
   ++revision_;
   ++side_effects_;
   layout_count_ = 0;
+  native_edit_complete_ = false;
   return S_OK;
 }
 HRESULT TextStore::SetText(DWORD flags, LONG a, LONG b, const WCHAR* text, ULONG n, TS_TEXTCHANGE* change) {
@@ -573,6 +581,7 @@ HRESULT TextStore::OnStartComposition(ITfCompositionView* view, BOOL* accept) {
   hr = ReadCompositionRange(range.Get());
   if (FAILED(hr)) return hr;
   composition_ = view;
+  native_edit_complete_ = false;
   end_composition_pending_ = false;
   ++side_effects_;
   *accept = TRUE;
@@ -596,15 +605,17 @@ HRESULT TextStore::OnEndComposition(ITfCompositionView* view) {
   if (view != composition_.Get()) return E_UNEXPECTED;
   composition_.Reset();
   end_composition_pending_ = true;
+  native_edit_complete_ = false;
   ++side_effects_;
   return S_OK;
 }
 HRESULT TextStore::OnEndEdit(ITfContext* context, TfEditCookie cookie, ITfEditRecord* record) {
   ComPtr<TextStore> self(this);
   if (!OnThread()) return RPC_E_WRONG_THREAD;
-  if (sealed_ || retired_ || !bound_) return S_OK;
+  if (!bound_) return S_OK;
+  if ((sealed_ || retired_) && !end_composition_pending_) return S_OK;
   if (!context || !record) return E_POINTER;
-  if (!in_dispatch_ && !composition_ && !end_composition_pending_) {
+  if (!sealed_ && !retired_ && scope_.route != TextRoute::TsfStore && !in_dispatch_) {
     Cancel(Fault::TextContextUnverified);
     return E_ACCESSDENIED;
   }
@@ -637,8 +648,9 @@ HRESULT TextStore::OnEndEdit(ITfContext* context, TfEditCookie cookie, ITfEditRe
   if (FAILED(hr)) return hr;
   (void)cookie;
   end_composition_pending_ = false;
+  native_edit_complete_ = true;
   // 此处仍可能在 ACP lock 内；只发布有界 preedit，finalizer 由解锁后的 pump 调用。
-  if (composition_) return PublishPreedit();
+  if (composition_ && !sealed_ && !retired_) return PublishPreedit();
   return S_OK;
 }
 

@@ -22,7 +22,7 @@ class TextStore final : public ITextStoreACP,
   HRESULT AppendTranslated(const WCHAR*, ULONG) noexcept;
   void SetDeadPending(bool value) noexcept { dead_pending_ = value; }
   void Cancel(Fault) noexcept;
-  void Retire() noexcept;
+  void Retire(bool notify_core = true) noexcept;
   bool CanDetach() const noexcept;
   ULONG References() const noexcept { return references_.load(); }
   bool Bound() const noexcept { return bound_; }
@@ -106,6 +106,7 @@ class TextStore final : public ITextStoreACP,
   DWORD sink_mask_{}, lock_{}, pending_lock_{};
   bool requesting_{}, notifying_{}, bound_{}, sealed_{}, retired_{}, in_dispatch_{};
   bool dead_pending_{}, end_composition_pending_{}, pending_text_{}, pending_selection_{}, pending_layout_{};
+  bool native_edit_complete_{};
   TicketRef ticket_{};
   TextDispatchScope scope_{};
   PayloadGrant grant_{};

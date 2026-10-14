@@ -7,6 +7,7 @@
 #include <cwchar>
 
 namespace sdk = guosshell::native_input_spike_sdk;
+namespace abi = guosshell::native_input_spike_abi;
 
 static void Write32(std::uint8_t* bytes, std::uint32_t value) {
   for (unsigned shift = 0; shift < 4; ++shift) {
@@ -31,7 +32,7 @@ int wmain(int argc, wchar_t** argv) {
   }
   const auto preflight = host.Preflight(argv[2], true, nonce);
   assert(host.verified_core_module() == nullptr);
-  if (std::wcscmp(argv[1], L"missing") == 0) {
+  if (std::wcsncmp(argv[1], L"missing", 7) == 0) {
     assert(preflight.status == sdk::Status::kMissingExports);
     return 0;
   }
@@ -44,13 +45,18 @@ int wmain(int argc, wchar_t** argv) {
     assert(preflight.owners == 1);
     return 0;
   }
+  if (std::wcscmp(argv[1], L"dirty_tail") == 0) {
+    assert(preflight.status == sdk::Status::kDirtyCore);
+    assert(preflight.owners == 0);
+    return 0;
+  }
   if (std::wcscmp(argv[1], L"duplicate") == 0) {
     assert(preflight.status == sdk::Status::kForeignModule);
     return 0;
   }
   assert(preflight.status == sdk::Status::kOk && !preflight.same_module);
   assert(preflight.fixture_only && preflight.owners == 0 &&
-         preflight.rinf_exports == 4 && preflight.core_exports == 8);
+         preflight.rinf_exports == 4 && preflight.core_exports == abi::kCoreSymbols.size());
   auto module = LoadLibraryW(host.compiled_lib_path().c_str());
   assert(module);
   const auto marker_fn = reinterpret_cast<std::uint64_t(__cdecl*)()>(
@@ -59,7 +65,7 @@ int wmain(int argc, wchar_t** argv) {
   std::array<std::uint8_t, sdk::kResponseBytes> bytes{};
   std::memcpy(bytes.data(), "GNSR", 4);
   bytes[4] = 1;
-  Write32(bytes.data() + 8, 2);
+  Write32(bytes.data() + 8, abi::kVersion);
   Write32(bytes.data() + 12, 64);
   std::copy(nonce.begin(), nonce.end(), bytes.begin() + 16);
   auto marker = marker_fn();
@@ -72,6 +78,9 @@ int wmain(int argc, wchar_t** argv) {
          sdk::Status::kInvalidReply);
   assert(sdk::DecodeReply(bytes.data(), 47, &decoded) ==
          sdk::Status::kInvalidReply);
+  Write32(bytes.data() + 8, 2);
+  assert(sdk::DecodeReply(bytes.data(), bytes.size(), &decoded) == sdk::Status::kInvalidReply);
+  Write32(bytes.data() + 8, abi::kVersion);
   if (std::wcscmp(argv[1], L"nonce") == 0) {
     bytes[16] = 8;
     assert(host.Verify(bytes.data(), bytes.size()).status ==

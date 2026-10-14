@@ -27,6 +27,9 @@ struct FunctionsTable {
   abi::PeerModeFn peer_mode = nullptr;
   abi::PeerReadFn peer_read = nullptr;
   abi::SupportFn support = nullptr;
+  abi::CommandFn command = nullptr;
+  abi::CopyFn copy = nullptr;
+  abi::ProjectionFn projection = nullptr;
   TableEvidence evidence = TableEvidence::Unavailable;
 
   bool available() const noexcept;

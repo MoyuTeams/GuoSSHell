@@ -8,8 +8,14 @@ const keyBarCellHeight = 40.0;
 class KeyBarGrid extends StatelessWidget {
   final List<List<Widget>> rows;
   final ScrollController? controller;
+  final double rowHeight;
 
-  const KeyBarGrid({super.key, required this.rows, this.controller});
+  const KeyBarGrid({
+    super.key,
+    required this.rows,
+    this.controller,
+    this.rowHeight = keyBarCellHeight,
+  });
 
   @override
   Widget build(BuildContext context) => SingleChildScrollView(
@@ -21,7 +27,7 @@ class KeyBarGrid extends StatelessWidget {
       children: [
         for (final row in rows)
           SizedBox(
-            height: keyBarCellHeight,
+            height: rowHeight,
             child: Row(mainAxisSize: MainAxisSize.min, children: row),
           ),
       ],

@@ -19,14 +19,9 @@ mod app;
 mod card;
 mod catalog;
 mod connect;
-#[cfg(any(
-    test,
-    all(
-        feature = "native-input-spike",
-        any(target_os = "windows", target_os = "macos", target_os = "linux")
-    )
-))]
 mod desktop_input_policy;
+mod desktop_input_port;
+mod desktop_native_binding;
 mod desktop_prepare;
 mod desktop_runtime;
 mod external_signer;

@@ -43,6 +43,7 @@ struct Reservation {
     budget: Budget,
     bytes: usize,
     loading: bool,
+    prepared: bool,
 }
 
 impl Budget {
@@ -68,6 +69,7 @@ impl Budget {
             budget: self.clone(),
             bytes: RESERVATION,
             loading: true,
+            prepared: true,
         }))))
     }
 }
@@ -79,6 +81,7 @@ impl Lease {
             budget,
             bytes: reserved,
             loading,
+            ..
         } = &mut *reservation;
         let mut u = budget.0.lock().unwrap_or_else(|e| e.into_inner());
         u.inflight -= usize::from(*loading);
@@ -88,12 +91,36 @@ impl Lease {
         u.bytes -= *reserved - retained;
         *reserved = retained;
     }
+
+    fn leave_preparation(&self) {
+        let mut reservation = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if reservation.prepared {
+            reservation
+                .budget
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .count -= 1;
+            reservation.prepared = false;
+        }
+    }
+
+    fn split_bytes(&self, bytes: usize) -> Lease {
+        let mut reservation = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        reservation.bytes -= bytes;
+        Lease(Arc::new(Mutex::new(Reservation {
+            budget: reservation.budget.clone(),
+            bytes,
+            loading: false,
+            prepared: false,
+        })))
+    }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
         let mut u = self.budget.0.lock().unwrap_or_else(|e| e.into_inner());
-        u.count -= 1;
+        u.count -= usize::from(self.prepared);
         u.bytes -= self.bytes;
         u.inflight -= usize::from(self.loading);
     }
@@ -104,6 +131,34 @@ struct Entry {
     identity: String,
     deadline: Instant,
     ready: Option<(PreparedTarget, Lease)>,
+    lease: Lease,
+}
+
+/// 计量应用持有的二进制副本；交付后由 Rinf 管理其外部缓冲区所有权。
+pub(crate) struct PreparedBinary {
+    bytes: Vec<u8>,
+    lease: Option<Lease>,
+}
+
+impl PreparedBinary {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub(crate) fn send(self, reply: DesktopPreparationResult) {
+        let Self { bytes, lease } = self;
+        // Rinf 接管 Vec，失败时销毁；外部缓冲区不计入应用持有额度。
+        // 运行字体仍持原租约，Dart 注册另计不可卸载字体；不据此证明 VM heap 上界。
+        reply.send_signal_to_dart(bytes);
+        drop(lease);
+    }
+}
+
+impl std::ops::Deref for PreparedBinary {
+    type Target = [u8];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
 }
 
 struct Ended {
@@ -127,8 +182,8 @@ pub(crate) struct Launch {
 
 #[derive(Default)]
 pub(crate) struct Preparations {
-    // 生产实例保持关闭；只有测试 fixture 可显式启用 V2 准备机制。
-    prototype_enabled: bool,
+    // 用户入口在输入/工作区汇合验收前关闭；受控入口使用同一生产实现。
+    native_enabled: bool,
     entries: HashMap<u32, Entry>,
     history: VecDeque<Ended>,
     pub budget: Budget,
@@ -178,12 +233,18 @@ pub(crate) fn result(
 }
 
 impl Preparations {
+    /// 受控验证使用同一准备实现，不开放尚未汇合输入/工作区的用户入口。
     #[cfg(test)]
-    pub(crate) fn enabled_for_test() -> Self {
+    pub(crate) fn native() -> Self {
         Self {
-            prototype_enabled: true,
+            native_enabled: connect::desktop_supported(),
             ..Self::default()
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enabled_for_test() -> Self {
+        Self::native()
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
@@ -207,6 +268,7 @@ impl Preparations {
 
     fn end(&mut self, session: u32, failure: Failure) -> Option<DesktopPreparationResult> {
         let entry = self.entries.remove(&session)?;
+        entry.lease.leave_preparation();
         self.remember(&entry, failure);
         Some(result(
             entry.request.source,
@@ -258,7 +320,7 @@ impl Preparations {
         if request.target != crate::signals::DesktopTargetKind::NativeSsh {
             return Err(Failure::TransportUnavailable);
         }
-        if !self.prototype_enabled {
+        if !self.native_enabled {
             return Err(Failure::PolicyUnavailable);
         }
         if request.request_id == 0 || request.source.generation == 0 {
@@ -308,6 +370,7 @@ impl Preparations {
                 identity: identity.clone(),
                 deadline: now + TTL,
                 ready: None,
+                lease: lease.clone(),
             },
         );
         Ok((identity, lease, replaced))
@@ -317,16 +380,22 @@ impl Preparations {
         &mut self,
         mut loaded: Loaded,
         now: Instant,
-    ) -> Option<(DesktopPreparationResult, Vec<u8>)> {
+    ) -> Option<(DesktopPreparationResult, PreparedBinary)> {
         let session = self
             .entries
             .iter()
             .find(|(_, e)| e.identity == loaded.identity)
             .map(|(id, _)| *id)?;
         if now >= self.entries.get(&session)?.deadline {
-            return self
-                .end(session, Failure::Expired)
-                .map(|reply| (reply, vec![]));
+            return self.end(session, Failure::Expired).map(|reply| {
+                (
+                    reply,
+                    PreparedBinary {
+                        bytes: vec![],
+                        lease: None,
+                    },
+                )
+            });
         }
         let target = match loaded.result {
             Ok(target) => target,
@@ -343,7 +412,15 @@ impl Preparations {
                         _ => Failure::InvalidTarget,
                     }
                 };
-                return self.end(session, failure).map(|reply| (reply, vec![]));
+                return self.end(session, failure).map(|reply| {
+                    (
+                        reply,
+                        PreparedBinary {
+                            bytes: vec![],
+                            lease: None,
+                        },
+                    )
+                });
             }
         };
         let entry = self.entries.get_mut(&session)?;
@@ -354,6 +431,7 @@ impl Preparations {
             .map(|r| r.bytes().to_vec())
             .unwrap_or_default();
         loaded.lease.loaded(bytes.len());
+        let binary_lease = loaded.lease.split_bytes(bytes.len());
         let profile = project(&target.settings, &font.projection.profile_id);
         let mut adjustments = Vec::new();
         if target.settings.font_family != font.projection.actual_family {
@@ -382,7 +460,13 @@ impl Preparations {
         reply.remaining_ms = entry.deadline.saturating_duration_since(now).as_millis() as u32;
         reply.snapshot = Some(snapshot);
         entry.ready = Some((target, loaded.lease));
-        Some((reply, bytes))
+        Some((
+            reply,
+            PreparedBinary {
+                bytes,
+                lease: Some(binary_lease),
+            },
+        ))
     }
 
     fn match_entry(
@@ -459,7 +543,7 @@ impl Preparations {
         if request.version != VERSION {
             return Err(Failure::UnsupportedVersion);
         }
-        if !self.prototype_enabled {
+        if !self.native_enabled {
             return Err(Failure::PolicyUnavailable);
         }
         let entry = self.match_entry(
@@ -527,8 +611,8 @@ impl Preparations {
             quick_password: password,
             font: Some(target.font),
         };
-        // 字体实际引用随 target 进入运行态，不再占未消费准备预算。
-        drop(lease);
+        // 槽位与运行字节职责分离；字体内的共享租约直到最后使用者退出才退款。
+        lease.leave_preparation();
         Ok(Launch {
             source: request.source.clone(),
             identity: entry.identity,
@@ -537,6 +621,9 @@ impl Preparations {
     }
 
     pub(crate) fn clear(&mut self) {
+        for entry in self.entries.values() {
+            entry.lease.leave_preparation();
+        }
         self.entries.clear();
         self.history.clear();
     }
@@ -564,7 +651,7 @@ pub(crate) fn geometry(
     })
 }
 
-fn project(
+pub(crate) fn project(
     s: &rshell_m0::rshell_core::ResolvedTerminalProfile,
     id: &str,
 ) -> DesktopTerminalProfile {

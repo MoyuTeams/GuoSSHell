@@ -11,6 +11,7 @@ import '../settings/key_bar_editor.dart';
 import '../terminal/key_bar_layout.dart';
 import '../terminal/session_target.dart';
 import '../terminal/terminal_key_bar.dart';
+import '../terminal/desktop_terminal_key_bar.dart';
 import '../terminal/terminal_pane.dart';
 import '../workspace/workspace.dart';
 import 'catalog/desktop_catalog_gateway.dart';
@@ -71,6 +72,8 @@ class _WindowsShellState extends State<WindowsShell> {
   bool _sidebar = true;
   double _sidebarWidth = 256;
   bool _dialogOpen = false;
+  bool _terminalFocusAllowed = true;
+  int _focusIntent = 0;
   final _orderedInput = <TerminalPaneController>{};
   late final DesktopTargetOptionsGateway _targetOptions;
 
@@ -125,6 +128,11 @@ class _WindowsShellState extends State<WindowsShell> {
         (pane) => identical(pane.controller, controller),
       ),
     );
+    for (final pane in _workspace.panes) {
+      if (pane != _workspace.activePane && pane.controller.ownsNativeInput) {
+        unawaited(pane.controller.quietNativeInput());
+      }
+    }
   }
 
   @override
@@ -142,22 +150,77 @@ class _WindowsShellState extends State<WindowsShell> {
     super.dispose();
   }
 
-  void _focusActive({TerminalPaneController? origin}) {
+  Future<bool> _focusActive({TerminalPaneController? origin}) async {
+    final intent = ++_focusIntent;
+    _terminalFocusAllowed = false;
     final expected = origin ?? _workspace.activePane?.controller;
+    for (final pane in _workspace.panes.toList()) {
+      if (pane.controller != expected &&
+          !await pane.controller.quietNativeInput()) {
+        return false;
+      }
+    }
+    if (!mounted || intent != _focusIntent || _dialogOpen) return false;
+    _terminalFocusAllowed = true;
+    final focused = Completer<bool>();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted ||
           _dialogOpen ||
+          intent != _focusIntent ||
           !(ModalRoute.of(context)?.isCurrent ?? true)) {
+        focused.complete(false);
         return;
       }
       if (expected != null) {
         if (_originAttachedAndActive(expected)) {
-          expected.focusNode.requestFocus();
+          focused.complete(expected.requestTerminalFocus());
+        } else {
+          focused.complete(false);
         }
       } else if (_workspace.panes.isEmpty) {
         _shellFocus.requestFocus();
+        focused.complete(true);
+      } else {
+        focused.complete(false);
       }
     });
+    WidgetsBinding.instance.scheduleFrame();
+    return focused.future;
+  }
+
+  Future<bool> _quietAll() async {
+    ++_focusIntent;
+    _terminalFocusAllowed = false;
+    final results = await Future.wait([
+      for (final pane in _workspace.panes) pane.controller.quietNativeInput(),
+    ]);
+    if (results.any((quiet) => !quiet)) {
+      if (mounted) setState(() => _error = '终端输入尚未静默，操作未完成。');
+      return false;
+    }
+    return mounted;
+  }
+
+  Future<void> _editNormalKeyBar(TerminalPaneController origin) async {
+    if (_dialogOpen) return;
+    _dialogOpen = true;
+    bool opened = false;
+    try {
+      if (!await _quietAll() || !mounted || !_originAttachedAndActive(origin)) {
+        return;
+      }
+      opened = true;
+      await showDesktopPage<void>(
+        context,
+        KeyBarEditor(
+          initialRows: _settings?.keyBarRows ?? defaultKeyBarRows,
+          onSave: saveKeyBarLayout,
+        ),
+      );
+    } finally {
+      _dialogOpen = false;
+      if (opened && mounted) await _focusActive(origin: origin);
+    }
   }
 
   // 必须是壳本身的主焦点，不能把搜索、目录行或按钮的子焦点当欢迎命令权限。
@@ -193,6 +256,7 @@ class _WindowsShellState extends State<WindowsShell> {
     if (_dialogOpen) return;
     _dialogOpen = true;
     try {
+      if (!await _quietAll()) return;
       final options = await _queryTargetOptions();
       if (!mounted || options == null) return;
       var profile = '';
@@ -236,27 +300,34 @@ class _WindowsShellState extends State<WindowsShell> {
     }
   }
 
-  Future<void> _editor({
+  Future<DesktopActionOutcome> _editor({
     ConnectionSummary? existing,
     bool quick = false,
     TerminalPaneController? origin,
     bool emptyShellOrigin = false,
   }) async {
-    if (_dialogOpen) return;
+    if (_dialogOpen) return DesktopActionOutcome.unavailable;
     _dialogOpen = true;
     SessionTarget? target;
     var profile = '';
     try {
       final options = quick ? await _queryTargetOptions() : null;
-      if (!mounted || (quick && options == null)) return;
+      if (!mounted || (quick && options == null)) {
+        return DesktopActionOutcome.unavailable;
+      }
       if (origin != null &&
           (!_originAttachedAndActive(origin) ||
-              !origin.focusNode.hasFocus ||
+              !(origin.ownsNativeInput
+                  ? origin.nativeActive
+                  : origin.focusNode.hasFocus) ||
               !(ModalRoute.of(context)?.isCurrent ?? true))) {
-        return;
+        return DesktopActionOutcome.staleOrigin;
       }
       if (emptyShellOrigin && !_isEmptyShellOrigin()) {
-        return;
+        return DesktopActionOutcome.staleOrigin;
+      }
+      if (!await _quietAll() || !mounted) {
+        return DesktopActionOutcome.unavailable;
       }
       target = await f.showDialog<SessionTarget>(
         context: context,
@@ -292,24 +363,39 @@ class _WindowsShellState extends State<WindowsShell> {
     } finally {
       _dialogOpen = false;
     }
-    if (!mounted) return;
-    if (origin != null && !_originAttachedAndActive(origin)) return;
-    if (emptyShellOrigin && _workspace.panes.isNotEmpty) return;
+    if (!mounted) return DesktopActionOutcome.unavailable;
+    if (origin != null && !_originAttachedAndActive(origin)) {
+      return DesktopActionOutcome.staleOrigin;
+    }
+    if (emptyShellOrigin && _workspace.panes.isNotEmpty) {
+      return DesktopActionOutcome.staleOrigin;
+    }
     if (target != null) {
       _workspace.openTab(desktopTargetWithProfile(target, profile));
     }
     _query();
     _focusActive();
+    if (origin?.ownsNativeInput == true) {
+      await WidgetsBinding.instance.endOfFrame;
+    }
+    return target != null
+        ? DesktopActionOutcome.executed
+        : DesktopActionOutcome.unavailable;
   }
 
-  Future<void> _settingsDialog({
+  Future<DesktopActionOutcome> _settingsDialog({
     TerminalPaneController? origin,
     bool emptyShellOrigin = false,
   }) async {
-    if (origin != null && !_isCurrentOrigin(origin)) return;
-    if (_dialogOpen) return;
+    if (origin != null && !_isCurrentOrigin(origin)) {
+      return DesktopActionOutcome.staleOrigin;
+    }
+    if (_dialogOpen) return DesktopActionOutcome.unavailable;
     _dialogOpen = true;
     try {
+      if (!await _quietAll() || !mounted) {
+        return DesktopActionOutcome.unavailable;
+      }
       await f.showDialog<void>(
         context: context,
         builder: (_) => isWindowsDesktop
@@ -319,14 +405,19 @@ class _WindowsShellState extends State<WindowsShell> {
     } finally {
       _dialogOpen = false;
     }
-    if (emptyShellOrigin && _workspace.panes.isNotEmpty) return;
-    _focusActive(origin: origin);
+    if (emptyShellOrigin && _workspace.panes.isNotEmpty) {
+      return DesktopActionOutcome.staleOrigin;
+    }
+    final focused = _focusActive(origin: origin);
+    if (origin?.ownsNativeInput == true) await focused;
+    return DesktopActionOutcome.executed;
   }
 
   Future<void> _keys() async {
     if (_dialogOpen) return;
     _dialogOpen = true;
     try {
+      if (!await _quietAll() || !mounted) return;
       await f.showDialog<void>(
         context: context,
         builder: (dialogContext) => _managementPanel(
@@ -382,23 +473,36 @@ class _WindowsShellState extends State<WindowsShell> {
               pane.controller.state != SessionState.failed,
         )
         .length;
-    if (count == 0) return true;
+    if (count == 0) {
+      if (!await _quietAll() || !mounted) return false;
+      return _closeAllSessions();
+    }
     _dialogOpen = true;
     try {
-      return await desktopConfirm(
+      if (!await _quietAll() || !mounted) return false;
+      final confirmed = await desktopConfirm(
         context,
         '关闭 GuoSSHell？',
         '这将断开工作区中的 $count 个会话。',
         action: '断开并关闭',
       );
+      return confirmed && await _closeAllSessions();
     } finally {
       _dialogOpen = false;
       _focusActive();
     }
   }
 
+  Future<bool> _closeAllSessions() async {
+    final results = await Future.wait([
+      for (final pane in _workspace.panes) pane.controller.closeSession(),
+    ]);
+    return results.every((closed) => closed);
+  }
+
   Future<void> _closeTab(WorkspaceTab tab) async {
     if (_dialogOpen) return;
+    if (!await _quietAll() || !mounted) return;
     if (tab.panes.any(
       (pane) =>
           pane.controller.state != SessionState.closed &&
@@ -422,17 +526,22 @@ class _WindowsShellState extends State<WindowsShell> {
       }
     }
     if (!mounted || !_workspace.tabs.contains(tab)) return;
+    final closed = await Future.wait([
+      for (final pane in tab.panes) pane.controller.closeSession(),
+    ]);
+    if (closed.any((value) => !value) || !mounted) return;
     _workspace.closeTab(tab);
     _focusActive();
   }
 
-  Future<void> _closePane([
+  Future<bool> _closePane([
     WorkspacePane? requested,
     TerminalPaneController? origin,
   ]) async {
-    if (_dialogOpen) return;
+    if (_dialogOpen) return false;
     final pane = requested ?? _workspace.activePane;
-    if (pane == null) return;
+    if (pane == null) return false;
+    if (!await _quietAll() || !mounted) return false;
     if (pane.controller.state != SessionState.closed &&
         pane.controller.state != SessionState.failed) {
       _dialogOpen = true;
@@ -451,15 +560,20 @@ class _WindowsShellState extends State<WindowsShell> {
         if (origin == null || _originAttachedAndActive(origin)) {
           _focusActive(origin: origin);
         }
-        return;
+        return false;
       }
     }
     if (mounted &&
         _workspace.panes.contains(pane) &&
         (origin == null || _originAttachedAndActive(origin))) {
+      // claim 的 root 独立于被移除 widget；原 ClosePane 不等自己的最终 ACK。
+      if (origin == null && !await pane.controller.closeSession()) return false;
+      if (!mounted || !_workspace.panes.contains(pane)) return false;
       _workspace.close(pane);
       _focusActive();
+      return true;
     }
+    return false;
   }
 
   void _split(Axis axis) {
@@ -471,7 +585,10 @@ class _WindowsShellState extends State<WindowsShell> {
 
   Future<void> _catalogAction(ConnectionSummary item, String action) async {
     if (action == 'profile') return _openWithProfile(item);
-    if (action == 'edit') return _editor(existing: item);
+    if (action == 'edit') {
+      await _editor(existing: item);
+      return;
+    }
     if (action == 'open') {
       _open(item);
       return;
@@ -508,9 +625,7 @@ class _WindowsShellState extends State<WindowsShell> {
     }
     final origin = _workspace.activePane?.controller;
     // 终端 V2 由 4C 同步门控；本壳不发送输入或替 Rust 作绑定判断。
-    if (origin != null &&
-        origin.focusNode.hasFocus &&
-        _orderedInput.contains(origin)) {
+    if (origin != null && _orderedInput.contains(origin)) {
       return KeyEventResult.ignored;
     }
     // 非空工作区仍须真实终端来源；空工作区只开放壳自身持焦的欢迎命令。
@@ -606,6 +721,11 @@ class _WindowsShellState extends State<WindowsShell> {
         }
       },
       isCurrentOrigin: _isCurrentOrigin,
+      canRequestFocus: (origin) =>
+          _originAttachedAndActive(origin) &&
+          _terminalFocusAllowed &&
+          !_dialogOpen &&
+          (ModalRoute.of(context)?.isCurrent ?? true),
       child: Focus(
         focusNode: _shellFocus,
         autofocus: true,
@@ -784,37 +904,84 @@ class _WindowsShellState extends State<WindowsShell> {
                                       ),
                                       if (active != null &&
                                           (_settings?.showKeyBar ?? false))
-                                        TerminalKeyBar(
-                                          key: ObjectKey(active),
-                                          terminal: active.controller.terminal,
-                                          extraListen:
-                                              active.controller.selection,
-                                          canCopy: () =>
-                                              active.controller.canCopy,
-                                          onCopy: active.controller.copy,
-                                          onPaste: active.controller.paste,
-                                          onToggleKeyboard:
-                                              active.controller.toggleKeyboard,
-                                          onDisconnect: _closePane,
-                                          rows:
-                                              _settings?.keyBarRows ??
-                                              defaultKeyBarRows,
-                                          onEdit: () => showDesktopPage<void>(
-                                            context,
-                                            KeyBarEditor(
-                                              initialRows:
-                                                  _settings?.keyBarRows ??
-                                                  defaultKeyBarRows,
-                                              onSave: saveKeyBarLayout,
+                                        if (active.controller.normalSession
+                                            case final normal?)
+                                          DesktopTerminalKeyBar(
+                                            key: ObjectKey(active),
+                                            session: normal,
+                                            rows:
+                                                _settings?.keyBarRows ??
+                                                defaultKeyBarRows,
+                                            extraListen:
+                                                active.controller.selection,
+                                            canCopy: () =>
+                                                active.controller.canCopy,
+                                            onEdit: () => _editNormalKeyBar(
+                                              active.controller,
                                             ),
+                                            onAction: (id) {
+                                              switch (id) {
+                                                case 'copy':
+                                                  active.controller.copy();
+                                                case 'paste':
+                                                  unawaited(
+                                                    active.controller.paste(),
+                                                  );
+                                                case 'keyboard':
+                                                  active.controller
+                                                      .toggleKeyboard();
+                                                case 'disconnect':
+                                                  unawaited(_closePane());
+                                                case 'zoomIn':
+                                                  active.controller.zoom?.step(
+                                                    1,
+                                                  );
+                                                case 'zoomOut':
+                                                  active.controller.zoom?.step(
+                                                    -1,
+                                                  );
+                                                case 'zoomReset':
+                                                  active.controller.zoom
+                                                      ?.reset();
+                                              }
+                                            },
+                                          )
+                                        else
+                                          TerminalKeyBar(
+                                            key: ObjectKey(active),
+                                            terminal:
+                                                active.controller.terminal,
+                                            extraListen:
+                                                active.controller.selection,
+                                            canCopy: () =>
+                                                active.controller.canCopy,
+                                            onCopy: active.controller.copy,
+                                            onPaste: active.controller.paste,
+                                            onToggleKeyboard: active
+                                                .controller
+                                                .toggleKeyboard,
+                                            onDisconnect: _closePane,
+                                            rows:
+                                                _settings?.keyBarRows ??
+                                                defaultKeyBarRows,
+                                            onEdit: () => showDesktopPage<void>(
+                                              context,
+                                              KeyBarEditor(
+                                                initialRows:
+                                                    _settings?.keyBarRows ??
+                                                    defaultKeyBarRows,
+                                                onSave: saveKeyBarLayout,
+                                              ),
+                                            ),
+                                            onZoomIn: () =>
+                                                active.controller.zoom?.step(1),
+                                            onZoomOut: () => active
+                                                .controller
+                                                .zoom
+                                                ?.step(-1),
+                                            onZoomReset: () =>
+                                                active.controller.zoom?.reset(),
                                           ),
-                                          onZoomIn: () =>
-                                              active.controller.zoom?.step(1),
-                                          onZoomOut: () =>
-                                              active.controller.zoom?.step(-1),
-                                          onZoomReset: () =>
-                                              active.controller.zoom?.reset(),
-                                        ),
                                     ],
                                   ],
                                 ),
@@ -848,21 +1015,62 @@ class _WindowsShellState extends State<WindowsShell> {
     );
   }
 
-  Widget _sidebarView() => WindowsSidebar(
-    search: _search,
-    focusNode: _searchFocus,
-    connections: _connections,
-    selectedId: _selectedId,
-    onSelect: (item) => setState(() => _selectedId = item.id),
-    onOpen: (item) {
-      _open(item);
-      if (MediaQuery.sizeOf(context).width < DesktopMetrics.narrowWidth) {
-        setState(() => _sidebar = false);
-      }
-    },
-    onNew: () => _editor(),
-    onAction: _catalogAction,
-  );
+  Widget _sidebarView() {
+    final sidebar = WindowsSidebar(
+      search: _search,
+      focusNode: _searchFocus,
+      connections: _connections,
+      selectedId: _selectedId,
+      onSelect: (item) => setState(() => _selectedId = item.id),
+      onOpen: (item) {
+        _open(item);
+        if (MediaQuery.sizeOf(context).width < DesktopMetrics.narrowWidth) {
+          setState(() => _sidebar = false);
+        }
+      },
+      onNew: () => _editor(),
+      onAction: _catalogAction,
+    );
+    if (!_workspace.panes.any((pane) => pane.controller.ownsNativeInput)) {
+      return sidebar;
+    }
+    return FocusScope(
+      canRequestFocus: !_workspace.panes.any(
+        (pane) => !pane.controller.nativeEditableSafe,
+      ),
+      child: Listener(
+        onPointerDown: (event) async {
+          if (!_workspace.panes.any(
+            (pane) => !pane.controller.nativeEditableSafe,
+          )) {
+            return;
+          }
+          final searchBox = _searchFocus.context?.findRenderObject();
+          final searchHit =
+              searchBox is RenderBox &&
+              searchBox.hasSize &&
+              (searchBox.localToGlobal(Offset.zero) & searchBox.size).contains(
+                event.position,
+              );
+          final origin = _workspace.activePane?.controller;
+          if (!await _quietAll() || !mounted) return;
+          final intent = _focusIntent;
+          setState(() {});
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (searchHit &&
+                mounted &&
+                !_dialogOpen &&
+                intent == _focusIntent &&
+                _workspace.activePane?.controller == origin &&
+                (ModalRoute.of(context)?.isCurrent ?? true)) {
+              _searchFocus.requestFocus();
+            }
+          });
+        },
+        child: sidebar,
+      ),
+    );
+  }
 
   bool _originAttachedAndActive(TerminalPaneController origin) =>
       mounted &&
@@ -872,7 +1080,9 @@ class _WindowsShellState extends State<WindowsShell> {
 
   bool _isCurrentOrigin(TerminalPaneController origin) =>
       _originAttachedAndActive(origin) &&
-      origin.focusNode.hasFocus &&
+      (origin.ownsNativeInput
+          ? origin.nativeActive
+          : origin.focusNode.hasFocus) &&
       !_dialogOpen &&
       (ModalRoute.of(context)?.isCurrent ?? true);
 
@@ -881,38 +1091,83 @@ class _WindowsShellState extends State<WindowsShell> {
     required TerminalPaneController origin,
   }) async {
     if (!_isCurrentOrigin(origin)) return DesktopActionOutcome.staleOrigin;
+    final nativeAction = origin.ownsNativeInput;
     switch (action) {
       case DesktopAction.newTab:
-        await _editor(quick: true, origin: origin);
+        return _editor(quick: true, origin: origin);
       case DesktopAction.splitRight:
         _split(Axis.horizontal);
+        if (nativeAction) await WidgetsBinding.instance.endOfFrame;
       case DesktopAction.splitDown:
         _split(Axis.vertical);
+        if (nativeAction) await WidgetsBinding.instance.endOfFrame;
       case DesktopAction.closePane:
-        await _closePane(_workspace.activePane, origin);
+        final closed = await _closePane(_workspace.activePane, origin);
+        if (closed && nativeAction) {
+          await WidgetsBinding.instance.endOfFrame;
+        }
+        return closed
+            ? DesktopActionOutcome.executed
+            : DesktopActionOutcome.unavailable;
       case DesktopAction.nextTab:
       case DesktopAction.previousTab:
+        if (!await _quietAll() ||
+            !mounted ||
+            !_originAttachedAndActive(origin)) {
+          return DesktopActionOutcome.staleOrigin;
+        }
         _workspace.selectTab(
           (_workspace.activeIndex +
                   (action == DesktopAction.nextTab ? 1 : -1)) %
               _workspace.tabs.length,
         );
-        _focusActive();
+        final focused = _focusActive();
+        if (nativeAction && !await focused) {
+          return DesktopActionOutcome.unavailable;
+        }
       case DesktopAction.nextPane:
+        if (!await _quietAll() ||
+            !mounted ||
+            !_originAttachedAndActive(origin)) {
+          return DesktopActionOutcome.staleOrigin;
+        }
         _workspace.cyclePane(1);
-        _focusActive();
+        final focused = _focusActive();
+        if (nativeAction && !await focused) {
+          return DesktopActionOutcome.unavailable;
+        }
       case DesktopAction.search:
+        if (!await _quietAll() ||
+            !mounted ||
+            !_originAttachedAndActive(origin)) {
+          return DesktopActionOutcome.staleOrigin;
+        }
         setState(() => _sidebar = true);
+        final focused = Completer<bool>();
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (_isCurrentOrigin(origin)) {
+          if (mounted &&
+              !_dialogOpen &&
+              _originAttachedAndActive(origin) &&
+              (ModalRoute.of(context)?.isCurrent ?? true)) {
             _searchFocus.requestFocus();
+            WidgetsBinding.instance.endOfFrame.then((_) {
+              focused.complete(
+                mounted && !_dialogOpen && _searchFocus.hasFocus,
+              );
+            });
+          } else {
+            focused.complete(false);
           }
         });
+        if (nativeAction && !await focused.future) {
+          return DesktopActionOutcome.unavailable;
+        }
       case DesktopAction.settings:
-        await _settingsDialog(origin: origin);
+        return _settingsDialog(origin: origin);
       case DesktopAction.toggleSidebar:
         setState(() => _sidebar = !_sidebar);
       case DesktopAction.copy:
+        if (nativeAction) return DesktopActionOutcome.unavailable;
         if (origin.sessionId == 0 || !origin.canCopy) {
           return DesktopActionOutcome.unavailable;
         }
@@ -930,6 +1185,10 @@ class _WindowsShellState extends State<WindowsShell> {
           zoom.reset();
         } else {
           zoom.step(action == DesktopAction.zoomIn ? 1 : -1);
+        }
+        if (nativeAction) await WidgetsBinding.instance.endOfFrame;
+        if (!mounted || !_originAttachedAndActive(origin)) {
+          return DesktopActionOutcome.staleOrigin;
         }
     }
     return DesktopActionOutcome.executed;

@@ -14,6 +14,7 @@ class DesktopWorkspaceScope extends InheritedWidget {
     required this.execute,
     required this.ownsTerminalInput,
     required this.isCurrentOrigin,
+    this.canRequestFocus,
     required super.child,
   });
 
@@ -28,6 +29,7 @@ class DesktopWorkspaceScope extends InheritedWidget {
   final void Function(TerminalPaneController controller, bool enabled)
   ownsTerminalInput;
   final bool Function(TerminalPaneController controller) isCurrentOrigin;
+  final bool Function(TerminalPaneController controller)? canRequestFocus;
 
   /// 共用窗格在移动入口找不到本 scope，继续保留移动旧输入路径。
   static DesktopWorkspaceScope? maybeOf(BuildContext context) =>

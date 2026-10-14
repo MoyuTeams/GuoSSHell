@@ -1,13 +1,29 @@
 import 'package:fluent_ui/fluent_ui.dart' as fluent;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart' as material;
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guosh_shell/src/bindings/bindings.dart';
 import 'package:guosh_shell/src/desktop/desktop_theme.dart';
 import 'package:guosh_shell/src/desktop/interaction/desktop_prompt_dialogs.dart';
+import 'package:guosh_shell/src/desktop/native_input/desktop_native_host.dart';
 import 'package:guosh_shell/src/terminal/prompt_dialogs.dart' show PromptAnswer;
 import 'package:guosh_shell/src/terminal/session_target.dart';
 import 'package:guosh_shell/src/terminal/terminal_pane.dart';
+
+/// 销毁回归使用真实 legacy 提示链，不依赖测试宿主是否具备 normal 输入能力。
+class _LegacyPromptHost extends DesktopNativeHost {
+  static const channel = MethodChannel('test/legacy-prompt-native');
+  _LegacyPromptHost() : super(channel: channel);
+
+  @override
+  Future<DesktopNativeCapability> attachRuntime() async =>
+      const DesktopNativeCapability(
+        moduleAttached: false,
+        inputSourceAvailable: false,
+        productionEnabled: false,
+      );
+}
 
 InteractionPrompt _prompt(
   PromptKind kind, {
@@ -98,6 +114,8 @@ Future<void> _removePaneWithActivePrompt(
     InteractionPrompt.latestRustSignal = null;
   });
   final showing = ValueNotifier(true);
+  final legacyHost = _LegacyPromptHost();
+  addTearDown(() => _LegacyPromptHost.channel.setMethodCallHandler(null));
   final controller = TerminalPaneController(
     const SessionTarget.quick(host: 'nas.lan', port: 22, username: 'probe'),
   );
@@ -116,6 +134,7 @@ Future<void> _removePaneWithActivePrompt(
                     width: 1,
                     child: TerminalPane(
                       controller: controller,
+                      desktopHost: legacyHost,
                       onActivate: () {},
                       onClose: () {},
                     ),
@@ -127,6 +146,8 @@ Future<void> _removePaneWithActivePrompt(
     ),
   );
   await tester.pump();
+  expect(controller.sessionId, greaterThan(0));
+  expect(controller.ownsNativeInput, isFalse);
   assignRustSignal['InteractionPrompt']!(
     _prompt(
       changedHostKey ? PromptKind.hostKey : PromptKind.password,

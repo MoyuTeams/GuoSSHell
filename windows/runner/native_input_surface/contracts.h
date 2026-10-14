@@ -58,6 +58,10 @@ struct NativeKey {
   ScalarMetadata raw{}, legacy{};
   Fault metadata_fault{Fault::LayoutUnverified};
   bool trusted_raw{};
+  // canonical_raw 仅由 normal HRAWINPUT 适配器赋值；metadata 另行校验。
+  bool canonical_raw{}, e1{};
+  uint64_t physical{}, source_epoch{};
+  std::array<BYTE, 256> physical_state{};
 };
 struct GateReceipt {
   Disposition disposition{Disposition::Rejected};
@@ -125,7 +129,8 @@ class Callbacks {
   virtual GateReceipt Gate(const OwnerRef&, const NativeKey&,
                            const TicketRef* original) noexcept = 0;
   virtual bool ReservePayload(const TicketRef&, uint32_t bound,
-                              PayloadGrant*) noexcept = 0;
+                               PayloadGrant*) noexcept = 0;
+  virtual bool PreparePayload(const TicketRef&, uint32_t) noexcept { return true; }
   virtual bool Preedit(const TicketRef&, uint64_t revision, const WCHAR*, ULONG,
                        LONG composing_start, LONG composing_end) noexcept = 0;
   virtual bool Payload(const TicketRef&, const PayloadGrant&, uint32_t offset,
@@ -135,6 +140,8 @@ class Callbacks {
   virtual void Faulted(const OwnerRef&, Fault) noexcept = 0;
   virtual bool CoreRevoke(const OwnerRef&, uint64_t* fence) noexcept = 0;
   virtual bool ConfirmRetired(const OwnerRef&, uint64_t fence) noexcept = 0;
+  // context-local 结束不撤权 surface；回执只结算原事务，不等待 GUI claim。
+  virtual bool ContextQuiet(const OwnerRef&, const TicketRef*, uint64_t) noexcept { return false; }
   virtual void Pointer(const OwnerRef&, const PointerEvent&) noexcept = 0;
 };
 

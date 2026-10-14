@@ -26,6 +26,10 @@ class LayoutTable {
   Fault Build(const ProfileIdentity&, const WorkerEvidence&) noexcept;
   // 仅供受控 fixture 在尚无输入队列的线程查询；结果永远不能用于准入。
   Fault DiagnosticQuery(const ProfileIdentity&) noexcept;
+  // normal 的单包来源另由 RawInputOwner 证明；此入口只生成该 HKL 的非变更键身份表。
+  // 调用线程须为宿主自建且从未 Translate/AttachThreadInput/建立 TSF context 的 worker。
+  // 不签发 WorkerEvidence，也不把此表升级为 legacy 配对路径的 Verified。
+  Fault QueryCanonical(const ProfileIdentity&, DWORD ui_thread) noexcept;
   Fault Lookup(NativeKey*) const noexcept;
   bool Verified() const noexcept { return verified_; }
   const LayoutCell& Cell(size_t scan, size_t state) const noexcept { return cells_[scan * kLayoutStates + state]; }
