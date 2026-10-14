@@ -10,6 +10,7 @@ import '../desktop_theme.dart';
 import '../keys/desktop_key_actions.dart';
 import '../keys/desktop_key_dialogs.dart';
 import '../keys/desktop_key_sync_state.dart';
+import '../workspace/desktop_target_options.dart';
 import 'desktop_catalog_gateway.dart';
 
 /// 桌面连接编辑器；快速连接只返回会话目标，不写入目录。
@@ -62,6 +63,12 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
   bool _busy = false;
   String? _error;
 
+  // 终端 profile 引用：空串为应用默认；null 表示已有连接的当前值尚未读到。
+  late String? _profileId = widget.existing == null ? '' : null;
+  List<DesktopProfileOption> _profiles = const [];
+  bool _profilesFailed = false;
+  bool _profileIdFailed = false;
+
   @override
   void initState() {
     super.initState();
@@ -71,6 +78,32 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
         if (mounted) setState(() => _keys = state.keys);
       });
       widget.gateway.queryKeys();
+      _loadProfiles();
+    }
+  }
+
+  Future<void> _loadProfiles() async {
+    final existing = widget.existing;
+    if (existing != null) {
+      widget.gateway
+          .connectionProfileId(existing.id)
+          .then(
+            (id) {
+              // 用户已显式选择则不覆盖。
+              if (mounted && _profileId == null) {
+                setState(() => _profileId = id);
+              }
+            },
+            onError: (_) {
+              if (mounted) setState(() => _profileIdFailed = true);
+            },
+          );
+    }
+    try {
+      final profiles = await widget.gateway.terminalProfiles();
+      if (mounted) setState(() => _profiles = profiles);
+    } catch (_) {
+      if (mounted) setState(() => _profilesFailed = true);
     }
   }
 
@@ -159,11 +192,14 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
               : _password.text,
           keyId: _auth == AuthMethod.publicKey ? _keyId : '',
           command: _command.text,
+          profileId: _profileId ?? '',
         ),
       );
       if (result.error != CatalogError.none) {
         error = catalogErrorText(result.error);
       }
+    } on DesktopCatalogRejected catch (rejected) {
+      error = rejected.message;
     } on TimeoutException {
       error = '保存超时';
     } catch (_) {
@@ -212,11 +248,47 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
         : widget.existing == null
         ? '添加连接'
         : '编辑连接';
+    // 错误与操作按钮常驻页脚，表单再高也不会滚出可视区。
+    final footer = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (_error != null) ...[
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              _error!,
+              style: FluentTheme.of(context).typography.body,
+            ),
+          ),
+          const SizedBox(height: DesktopSpacing.md),
+        ],
+        Wrap(
+          spacing: DesktopSpacing.md,
+          runSpacing: DesktopSpacing.md,
+          children: [
+            FilledButton(
+              // 已有连接的 profile 引用未读到前不保存，避免误清空。
+              onPressed: _busy || (!widget.quick && _profileId == null)
+                  ? null
+                  : _submit,
+              child: Text(widget.quick ? '连接' : '保存'),
+            ),
+            Button(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('取消'),
+            ),
+            if (_busy) const ProgressRing(),
+          ],
+        ),
+      ],
+    );
     return DesktopPage(
       title: title,
       description: widget.quick
           ? '只用于本次连接，不保存到目录；主机密钥仍须在连接时核对。'
           : '沿用现有 SSH 目录字段；连接时仍会核验主机密钥。',
+      footer: footer,
       children: [
         if (!widget.quick) ...[
           _field(_name, '名称', hint: '可选，默认显示 用户名@主机'),
@@ -350,32 +422,44 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
           const SizedBox(height: DesktopSpacing.md),
         ],
         _field(_command, '命令（可选）', hint: '留空进入 shell'),
-        if (_error != null) ...[
-          const SizedBox(height: DesktopSpacing.lg),
-          Semantics(
-            liveRegion: true,
-            child: Text(
-              _error!,
-              style: FluentTheme.of(context).typography.body,
-            ),
+        if (!widget.quick) ...[
+          const SizedBox(height: DesktopSpacing.md),
+          Text('终端配置', style: FluentTheme.of(context).typography.body),
+          const SizedBox(height: DesktopSpacing.sm),
+          ComboBox<String>(
+            key: const Key('catalog-profile'),
+            isExpanded: true,
+            placeholder: Text(_profileIdFailed ? '未读取到' : '读取中…'),
+            value: _profileId,
+            items: [
+              const ComboBoxItem(value: '', child: Text('使用默认配置')),
+              for (final profile in _profiles)
+                ComboBoxItem(value: profile.id, child: Text(profile.name)),
+              if (_profileId != null &&
+                  _profileId!.isNotEmpty &&
+                  !_profiles.any((profile) => profile.id == _profileId))
+                ComboBoxItem(value: _profileId!, child: const Text('当前配置')),
+            ],
+            onChanged: _busy
+                ? null
+                : (value) {
+                    if (value != null) setState(() => _profileId = value);
+                  },
           ),
-        ],
-        const SizedBox(height: DesktopSpacing.xl),
-        Wrap(
-          spacing: DesktopSpacing.md,
-          runSpacing: DesktopSpacing.md,
-          children: [
-            FilledButton(
-              onPressed: _busy ? null : _submit,
-              child: Text(widget.quick ? '连接' : '保存'),
+          if (_profileIdFailed && _profileId == null) ...[
+            const SizedBox(height: DesktopSpacing.sm),
+            Text(
+              '无法读取该连接当前的终端配置；请重新选择后再保存。',
+              style: FluentTheme.of(context).typography.caption,
             ),
-            Button(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('取消'),
+          ] else if (_profilesFailed) ...[
+            const SizedBox(height: DesktopSpacing.sm),
+            Text(
+              '无法读取终端配置列表，保存时保留当前选择。',
+              style: FluentTheme.of(context).typography.caption,
             ),
-            if (_busy) const ProgressRing(),
           ],
-        ),
+        ],
       ],
     );
   }

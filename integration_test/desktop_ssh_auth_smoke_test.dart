@@ -256,6 +256,8 @@ void main() {
         const fluent.Key('catalog-save-password'),
       );
       await tester.ensureVisible(savePassword);
+      // 滚动要落帧后命中测试才用新位置。
+      await tester.pumpAndSettle();
       expect(tester.widget<fluent.ToggleSwitch>(savePassword).checked, isTrue);
       await tester.tapAt(
         tester.getTopLeft(savePassword) +

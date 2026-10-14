@@ -60,11 +60,15 @@ class DesktopPage extends StatelessWidget {
   final String description;
   final List<Widget> children;
 
+  /// 常驻在可滚动内容之外的页脚（如保存／取消），小窗口也始终可见。
+  final Widget? footer;
+
   const DesktopPage({
     super.key,
     required this.title,
     required this.description,
     required this.children,
+    this.footer,
   });
 
   @override
@@ -74,38 +78,63 @@ class DesktopPage extends StatelessWidget {
         final inset = constraints.maxWidth < DesktopMetrics.narrowWidth
             ? DesktopSpacing.lg
             : DesktopSpacing.xl;
-        return ColoredBox(
-          color: FluentTheme.of(context).scaffoldBackgroundColor,
-          child: SingleChildScrollView(
-            child: Align(
-              alignment: Alignment.topLeft,
-              child: Padding(
-                padding: EdgeInsets.all(inset),
-                child: ConstrainedBox(
-                  key: const Key('desktop-page-content'),
-                  constraints: const BoxConstraints(
-                    maxWidth: DesktopMetrics.contentWidth,
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title,
-                        style: FluentTheme.of(context).typography.display,
-                      ),
-                      const SizedBox(height: DesktopSpacing.sm),
-                      Text(
-                        description,
-                        style: FluentTheme.of(context).typography.body,
-                      ),
-                      const SizedBox(height: DesktopSpacing.xxl),
-                      ...children,
-                    ],
-                  ),
+        final footer = this.footer;
+        final scroll = SingleChildScrollView(
+          child: Align(
+            alignment: Alignment.topLeft,
+            child: Padding(
+              padding: EdgeInsets.all(inset),
+              child: ConstrainedBox(
+                key: const Key('desktop-page-content'),
+                constraints: const BoxConstraints(
+                  maxWidth: DesktopMetrics.contentWidth,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: FluentTheme.of(context).typography.display,
+                    ),
+                    const SizedBox(height: DesktopSpacing.sm),
+                    Text(
+                      description,
+                      style: FluentTheme.of(context).typography.body,
+                    ),
+                    const SizedBox(height: DesktopSpacing.xxl),
+                    ...children,
+                  ],
                 ),
               ),
             ),
           ),
+        );
+        return ColoredBox(
+          color: FluentTheme.of(context).scaffoldBackgroundColor,
+          child: footer == null
+              ? scroll
+              : Column(
+                  children: [
+                    Expanded(child: scroll),
+                    Align(
+                      alignment: Alignment.topLeft,
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          inset,
+                          DesktopSpacing.md,
+                          inset,
+                          inset,
+                        ),
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(
+                            maxWidth: DesktopMetrics.contentWidth,
+                          ),
+                          child: footer,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
         );
       },
     );

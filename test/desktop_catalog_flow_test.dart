@@ -12,6 +12,7 @@ import 'package:guosh_shell/src/desktop/desktop_theme.dart';
 import 'package:guosh_shell/src/desktop/keys/desktop_key_actions.dart';
 import 'package:guosh_shell/src/desktop/keys/desktop_key_sync_state.dart';
 import 'package:guosh_shell/src/desktop/legacy_material_surface.dart';
+import 'package:guosh_shell/src/desktop/workspace/desktop_target_options.dart';
 import 'package:guosh_shell/src/terminal/session_target.dart';
 
 const saved = ConnectionSummary(
@@ -58,6 +59,22 @@ class FakeCatalog implements DesktopCatalogGateway {
   bool holdSave = false;
   Completer<CatalogResult>? pendingSave;
   int keyQueries = 0;
+  List<DesktopProfileOption> profiles = const [];
+  bool profilesFail = false;
+  String currentProfileId = '';
+  bool profileIdFail = false;
+
+  @override
+  Future<String> connectionProfileId(String id) async {
+    if (profileIdFail) throw StateError('读取失败');
+    return currentProfileId;
+  }
+
+  @override
+  Future<List<DesktopProfileOption>> terminalProfiles() async {
+    if (profilesFail) throw StateError('读取失败');
+    return profiles;
+  }
 
   CatalogResult result(CatalogError error) =>
       CatalogResult(requestId: 1, error: error, connectionId: '');
@@ -110,6 +127,14 @@ Future<void> field(WidgetTester tester, String label, String text) async {
   final finder = find.byKey(fluent.ValueKey('catalog-field-$label'));
   await tester.ensureVisible(finder);
   await tester.enterText(finder, text);
+}
+
+/// 先让输入框失焦并稳定，再滚动到目标；否则焦点会把滚动位置拉回去，命中测试落空。
+Future<void> reveal(WidgetTester tester, Finder finder) async {
+  tester.binding.focusManager.primaryFocus?.unfocus();
+  await tester.pumpAndSettle();
+  await tester.ensureVisible(finder);
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -240,6 +265,8 @@ void main() {
         ),
       ),
     );
+    // 已有连接须等当前 profile 引用读回后才可保存。
+    await tester.pump();
     await tester.ensureVisible(find.text('保存'));
     await tester.tap(find.text('保存'));
     await tester.pump();
@@ -451,6 +478,7 @@ void main() {
       ),
     );
     await field(tester, '主机', 'draft.example');
+    await reveal(tester, find.byKey(const fluent.Key('catalog-auth')));
     await tester.tap(find.byKey(const fluent.Key('catalog-auth')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('私钥').last);
@@ -537,5 +565,113 @@ void main() {
     await tester.pumpAndSettle();
     expect(fake.drafts.last.keyId, 'card-key');
     expect(fake.drafts.last.username, 'draft-user');
+  });
+
+  const profiles = [
+    DesktopProfileOption('p1', '终端甲'),
+    DesktopProfileOption('p2', '终端乙'),
+  ];
+
+  Future<void> pumpEditor(
+    WidgetTester tester,
+    FakeCatalog fake, {
+    ConnectionSummary? existing,
+  }) async {
+    addTearDown(fake.close);
+    await tester.pumpWidget(
+      app(
+        fluent.NavigationView(
+          content: DesktopConnectionEditor(gateway: fake, existing: existing),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> pickProfile(WidgetTester tester, String label) async {
+    final combo = find.byKey(const fluent.Key('catalog-profile'));
+    await reveal(tester, combo);
+    await tester.tap(combo);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text(label).last);
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> save(WidgetTester tester) async {
+    await tester.ensureVisible(find.text('保存'));
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('新建连接默认不引用 profile（提交空串）', (tester) async {
+    final fake = FakeCatalog()..profiles = profiles;
+    await pumpEditor(tester, fake);
+    expect(find.text('终端配置'), findsOneWidget);
+    expect(find.text('使用默认配置'), findsOneWidget);
+    await field(tester, '主机', 'example.test');
+    await field(tester, '用户名', 'tester');
+    await field(tester, '密码', 'secret');
+    await save(tester);
+    expect(fake.drafts.single.profileId, isEmpty);
+  });
+
+  testWidgets('新建连接选择 profile 后保存请求携带该 profile id', (tester) async {
+    final fake = FakeCatalog()
+      ..profiles = profiles
+      ..saveError = CatalogError.storage;
+    await pumpEditor(tester, fake);
+    await field(tester, '主机', 'example.test');
+    await field(tester, '用户名', 'tester');
+    await field(tester, '密码', 'secret');
+    await pickProfile(tester, '终端乙');
+    await save(tester);
+    expect(fake.drafts.last.profileId, 'p2');
+  });
+
+  testWidgets('编辑已有连接预填当前 profile，改回默认时提交空串', (tester) async {
+    final fake = FakeCatalog()
+      ..profiles = profiles
+      ..currentProfileId = 'p1'
+      ..saveError = CatalogError.storage;
+    await pumpEditor(tester, fake, existing: saved);
+    expect(find.text('终端甲'), findsOneWidget);
+    await save(tester);
+    expect(fake.drafts.last.id, 'saved-1');
+    expect(fake.drafts.last.profileId, 'p1');
+    await pickProfile(tester, '使用默认配置');
+    await save(tester);
+    expect(fake.drafts.last.profileId, isEmpty);
+  });
+
+  testWidgets('profile 列表读取失败时提示且保留原值保存', (tester) async {
+    final fake = FakeCatalog()
+      ..profilesFail = true
+      ..currentProfileId = 'p2'
+      ..saveError = CatalogError.storage;
+    await pumpEditor(tester, fake, existing: saved);
+    expect(find.textContaining('无法读取终端配置列表'), findsOneWidget);
+    await save(tester);
+    expect(fake.drafts.single.profileId, 'p2');
+  });
+
+  testWidgets('读不到已有连接的 profile 时不允许直接保存，显式选择后才可保存', (tester) async {
+    final fake = FakeCatalog()
+      ..profiles = profiles
+      ..profileIdFail = true
+      ..saveError = CatalogError.storage;
+    await pumpEditor(tester, fake, existing: saved);
+    expect(find.textContaining('无法读取该连接当前的终端配置'), findsOneWidget);
+    await tester.ensureVisible(find.text('保存'));
+    expect(
+      tester
+          .widget<fluent.FilledButton>(
+            find.widgetWithText(fluent.FilledButton, '保存'),
+          )
+          .onPressed,
+      isNull,
+    );
+    await pickProfile(tester, '终端甲');
+    await save(tester);
+    expect(fake.drafts.single.profileId, 'p1');
   });
 }
