@@ -1,11 +1,11 @@
 # GuoSSHell
 
 一个跨平台终端客户端：iPhone / iPad 与 Android 仅提供远端 SSH；macOS、Windows、
-Linux 的产品范围包括远端 SSH 与桌面本地 shell。桌面 System OpenSSH 采用应用隔离的
-配置与主机信任边界，不能读取用户 SSH 配置、agent 或 known_hosts。
-桌面连接目录、连接编辑、密钥管理与认证提示使用 Fluent 界面；Windows 管理面板覆盖常驻工作区，
-macOS/Linux 的终端工作区与字体设置仍通过明确标识的兼容入口使用。
-桌面本地 shell、System OpenSSH 及配置全集尚不可用，不能把 UI 入口视为传输能力。
+Linux 的产品范围包括远端 SSH、桌面本地 shell 与 System OpenSSH（在本地终端中运行系统
+`ssh`，使用用户自己的 ssh 配置、agent 与 known_hosts）。
+桌面使用统一的 Fluent 工作区；终端 profile（TERM、字体、配色、滚回、按键绑定、左右 Alt、
+鼠标上报等）已可用，连接可选择 profile。桌面本地 shell 与 System OpenSSH 尚未开放，
+不能把 UI 入口视为传输能力。
 业务与终端语义跑在 **Rust**
 （上游 [rsHell](https://github.com/hugefiver/rsHell) 的内核，直接作为固定提交的 git 依赖），
 只有渲染与交互用 **Flutter** 重写。Dart 不写业务逻辑。
@@ -22,7 +22,7 @@ GuoSSHell/
 │   ├── main.dart        入口：initializeRust + 许可登记 + 平台 UI 分流
 │   └── src/
 │       ├── bindings/    rinf gen 生成的 Dart 绑定（**不手改**；rinf 默认不入库）
-│       ├── desktop/     Fluent 目录／密钥／认证、Windows 常驻工作区与跨桌面兼容入口
+│       ├── desktop/     Fluent 目录／密钥／认证、终端设置与三桌面统一工作区
 │       ├── catalog/     连接目录与编辑
 │       ├── keys/        私钥、OpenPGP 卡、安全密钥
 │       ├── settings/    设置与开源许可页
