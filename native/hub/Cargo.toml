@@ -15,6 +15,73 @@ crate-type = ["lib", "cdylib", "staticlib"]
 
 [features]
 native-input-spike = []
+# 实验候选测试（selected_p1 资源证书/allocator 审计，及依赖它的 local_shell owner、
+# system_ssh scope/helper）。不进入默认 `cargo test --workspace`，由 CI 独立步骤运行。
+experimental-candidates = []
+
+[[test]]
+name = "selected_p1_allocator_audit"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_control_runtime"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_decode_shape"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_domain_decode"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_font_provider"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_font_source"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_foundation"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_helper_artifact"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_helper_runtime"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_native_network"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_reply_port"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_session_owner"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "desktop_local_shell"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "desktop_local_shell_production"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "desktop_system_ssh_helper"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "desktop_system_ssh_scope"
+required-features = ["experimental-candidates"]
 
 [lints.clippy]
 unwrap_used = "deny"

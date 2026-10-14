@@ -75,6 +75,19 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Cargo 单元测试
         run: cargo test --workspace --locked
+      # 实验候选测试不计入桌面功能门禁：失败不阻断作业，结果写入作业摘要。
+      - name: Cargo 实验候选测试（不计入门禁）
+        id: experimental-candidates
+        continue-on-error: true
+        run: cargo test -p hub --features experimental-candidates --locked --no-fail-fast
+      - name: 标注实验候选测试结果
+        if: always()
+        env:
+          OUTCOME: ${{ steps.experimental-candidates.outcome }}
+        run: |
+          printf '%s\n' \
+            '### 实验候选测试 / ${{ matrix.os }}' \
+            "结果：${OUTCOME:-未运行}。实验候选，不计入桌面功能门禁。" >> "$GITHUB_STEP_SUMMARY"
       - name: Flutter 静态检查
         run: flutter analyze --no-pub
       - name: Flutter 单元测试
