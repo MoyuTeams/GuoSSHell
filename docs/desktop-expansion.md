@@ -7,7 +7,7 @@
 - 技术栈维持 Flutter + Rust/rinf。Rust 是业务、配置、终端状态、输入编码与 viewport 的唯一权威；Dart 只维护表单草稿、焦点、布局与渲染投影，不引入第二套配置规则、SSH 业务或 ANSI 解析器。
 - 旧移动 `ConnectRequest`/`InputRequest` 与桌面 V1 `DesktopConnectRequest/Result` 的信号布局、必填字段、队列与语义不变；新能力以带版本的独立扩展入口并存，不提升版本号拒绝旧客户端。
 - 系统文件选择器与系统硬件认证提示继续使用系统界面；不降低 host key fail-closed 保证；密码、PIN、私钥、passphrase 不写入日志、数据库、命令行、环境或测试报告。
-- 每阶段完整验收后独立提交到 `feat-desktop`；不把局部交付当阶段完成，最终范围不缩水为 MVP。
+- 实现检查点可以独立提交到 `feat-desktop`，但必须标明未完成的接线与验收；阶段完成仍以完整验收为准，不把局部交付当阶段完成，最终范围不缩水为 MVP。
 - Windows 为原生实跑收敛平台；macOS/Linux 以三平台 CI 的检查/测试/构建保证可移植性，GUI 与沙箱未实跑时明确标注未验证，不冒充通过。
 
 ### 本分支安全与可靠性边界
@@ -58,7 +58,7 @@ Profile 参数（终端参数/协议/绑定/滚回）在新会话或显式重启
 | 二 | Rust 桌面契约：版本化设置/profile 协议、完整配置 CAS 存储、会话目标模型、能力信号、字体绑定接缝 | `100ba353` |
 | 三 | Fluent 目录、连接编辑、密钥管理、认证对话框接入常驻工作区；Windows 原生认证/管理往返验收；三平台 CI `37183281852` 通过 | `e2ae0a44` |
 
-### 阶段四（进行中）：工作区、终端外壳与完整输入策略
+### 阶段四（输入实现检查点已交付，完整验收未完成）：工作区、终端外壳与完整输入策略
 
 范围：沿 `WindowsShell → Workspace → 常驻 TerminalPane` 扩展共用工作区，Native SSH 完整消费 profile；macOS/Linux 收敛到同一状态模型；补全连接选择器、终端工具栏、会话状态、选择菜单、关闭/重连等 Fluent 操作。Local/System 本阶段不可用。
 
@@ -145,6 +145,37 @@ Windows 原生验收入口：`scripts/ci/windows_auth_check.ps1`（隔离 Native
 
 ## 当前检查点状态
 
-- 正式构建的依赖身份以 `UPSTREAM.md` 与 manifest／lock 为准；独立发布库和未整合实验候选不自动进入应用。
-- 已验证（Windows 本机）：Guo all-targets check、Rust 库测试、Flutter 全套 418 与 analyze、rsHell core/session/storage 回归、helper 各 target、scoped russh 双 SDK 测试与 RSA 擦除审计、本地 Shell 43 项、System scope/helper、C++ 输入组件 415 断言。
-- 正常新 V2、Local/System 生产入口尚未开放；恢复条件是正常接线、应用安全可靠性与功能验收，见[桌面检查点待完成验收](followups/20261012_桌面检查点待完成验收.md)。高保证资源候选按风险条目延后，不代替或阻塞这些功能。
+输入实现检查点为 `81c3a00`，已提交并推送。正常 NativePort、Windows 宿主、Dart
+`GuiIntent` 键位条、修饰回执、焦点／帧关联及 composition 生命周期已接线；冻结
+profile、字体与静态配色按窗格持有。这个检查点不是阶段四完整交付，也不是生产开放。
+
+### 验证范围
+
+| 验证面 | 当前证据 | 限制 |
+|---|---|---|
+| Rust | 精确暂存树的 fmt、workspace all-targets check、Clippy 通过；hub 库 324 项通过 | 全 workspace 测试未通过，不能用库测试替代全套结论 |
+| Flutter | 全项目 analyze 通过，全套 512 项通过；键位条 Widget QA 覆盖 375／768／1280 宽及辅助模式 | 不替代真实原生窗口、屏幕阅读器或设备输入验收 |
+| Windows 宿主 | 有效前台条件下 541 项通过，涵盖 HWND／COM／TSF、文本终结、动作 claim 与退休 | C ABI 后端仍为替身，不证明真实物理 Raw Input 或 TIP／IME |
+| Windows 主应用 | debug 构建通过 | 不证明正常输入生产链已开放 |
+| 真实 runner／Rinf | 同 hub 模块关联、Prepare／Start 的 `PolicyUnavailable`、三类 `GuiIntent` 完整关联拒绝回执通过 | 不覆盖已认证 active pane 的实际输入与远端字节 |
+| 三平台 CI | 工作流检查及三平台 Cargo fmt／check／Clippy 已通过；Windows、macOS 的 Cargo 单元测试失败，Linux 测试作业尚未完成 | 当前不全绿；失败日志待定位，后续 Flutter／构建步骤不能算通过 |
+
+全套 Rust 测试的已知产物前件与并行审计限制见
+[helper 产物前件](followups/20261014_Rust全套测试的helper产物前件.md)。三平台 CI
+状态与下一步见[桌面 CI 待收敛](followups/20261014_桌面三平台CI待收敛.md)。CI 状态
+应以对应提交的实时作业结果为准，不沿用旧提交的通过记录。
+
+### 后续任务顺序
+
+1. 核对当前提交的 CI 首个失败，区分正常功能回归、实验验收前件和并行共享状态问题；不忽略测试或放宽安全断言取得通过。
+2. 继续阶段四正常 Prepare／Start、认证后输入与关闭／重连的生产组合，补实际 profile、字体、PTY、滚动及绑定矩阵证据。
+3. 补真实物理键、非 US 布局、死键、AltGr、IME／TIP、指针及适用平台验收；满足开放条件后才调整 production guard。
+4. 按依赖推进阶段五完整设置、阶段六本地 Shell、阶段七隔离 System OpenSSH，再汇合阶段八。
+
+独立 Local Shell production 与 `selected_p1` 网络／session owner 候选仍有未提交工作，
+不属于 `81c3a00`。继续任务须先核对工作树，不丢弃这些改动，也不未经核验把它们带入
+正常生产路径。正式依赖身份仍以 `UPSTREAM.md` 与 manifest／lock 为准。
+
+正常新 V2、Local/System 生产入口尚未开放；恢复条件见
+[桌面检查点待完成验收](followups/20261012_桌面检查点待完成验收.md)。高保证资源候选
+按风险条目延后，不代替或阻塞正常功能接线。
