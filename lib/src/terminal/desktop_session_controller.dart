@@ -432,7 +432,9 @@ class DesktopSessionController extends ChangeNotifier {
         version: 2,
         requestId: _prepareRequest,
         source: source,
-        target: DesktopTargetKind.nativeSsh,
+        target: target.isLocal
+            ? DesktopTargetKind.localShell
+            : DesktopTargetKind.nativeSsh,
         profileId: target.profileId,
         connectionId: target.connectionId,
         host: target.host,

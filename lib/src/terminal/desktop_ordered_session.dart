@@ -174,7 +174,7 @@ class DesktopOrderedSession extends ChangeNotifier {
         version: 2,
         requestId: _prepareRequest,
         source: source,
-        target: DesktopTargetKind.nativeSsh,
+        target: desktopTargetKind(target),
         profileId: target.profileId,
         connectionId: target.connectionId,
         host: target.host,
@@ -599,6 +599,21 @@ class DesktopOrderedSession extends ChangeNotifier {
   static Uint64 _u64(int value) => Uint64(BigInt.from(value));
 }
 
+/// Prepare 的目标种类：本地终端走 LocalShell，其余走 Native SSH。
+DesktopTargetKind desktopTargetKind(SessionTarget target) =>
+    target.isLocal ? DesktopTargetKind.localShell : DesktopTargetKind.nativeSsh;
+
+final _localExit = RegExp(
+  r'^exit code=Some\((-?\d+)\) success=(?:true|false)$',
+);
+
+/// 本地 shell 退出后 Rust 状态 detail 的固定格式 `exit code=Some(N) success=…`
+/// 中的退出码；其他格式（含 `None`）返回 null。
+int? localShellExitCode(String detail) {
+  final match = _localExit.firstMatch(detail);
+  return match == null ? null : int.parse(match.group(1)!);
+}
+
 /// 由 fork 转来的按键（或窗格收到的 KeyUp）构造有序 Key 事件。
 /// [source] 为空表示软件合成（键位条等）：无物理键、Alt 来源未知、无默认动作。
 DesktopEventKey desktopKeyEvent({
@@ -658,6 +673,8 @@ DesktopAction? desktopDefaultAction(
       DesktopCommand.search => DesktopAction.search,
       DesktopCommand.settings => DesktopAction.settings,
       DesktopCommand.toggleSidebar => DesktopAction.toggleSidebar,
+      // Rust 没有对应动作：按键照常交给终端。
+      DesktopCommand.localTerminal => null,
     };
   }
   // 与 TerminalZoom.handleKey 相同：Ctrl（不含 Alt）加 =/+/-/0。

@@ -374,6 +374,12 @@ class _TerminalPaneState extends State<TerminalPane> {
   }
 
   void _startLegacy() {
+    // 旧路径（移动端）没有本地 shell；不向 Rust 发空主机的连接请求。
+    if (_controller.target.isLocal) {
+      _state = SessionState.failed;
+      _detail = '本地终端仅在桌面端可用';
+      return;
+    }
     _branchReady = true;
     _statusSub = SessionStatus.rustSignalStream.listen(_onStatus);
     _frameSub = FrameUpdate.rustSignalStream.listen(_onFrame);
@@ -474,11 +480,28 @@ class _TerminalPaneState extends State<TerminalPane> {
       _detail = normal.error.isNotEmpty ? normal.error : state?.detail ?? '';
       _hint = state?.hint ?? ConnectHint.none;
     });
+    // 本地 shell 以退出码 0 结束：与常见终端一致直接关窗格；非 0 保留并提供重新启动。
+    // 离开 closed（重新启动）后允许下一次退出再关闭。
+    if (_state != SessionState.closed) _exitClosing = false;
+    if (_controller.target.isLocal &&
+        !_exitClosing &&
+        !normal.closing &&
+        normal.error.isEmpty &&
+        _state == SessionState.closed &&
+        localShellExitCode(_detail) == 0) {
+      _exitClosing = true;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.onClose();
+      });
+    }
     SchedulerBinding.instance.addPostFrameCallback((_) {
       if (frameChanged && presented != null) _syncNormalScroll(presented);
       _measureNormal();
     });
   }
+
+  /// 本次 closed 已请求关窗格，避免状态重发时重复关闭。
+  bool _exitClosing = false;
 
   double? _normalScrollOffset(DesktopPresentedFrame original) {
     if (!_scroll.hasClients || !_scroll.position.hasContentDimensions) {
@@ -1114,7 +1137,9 @@ class _TerminalPaneState extends State<TerminalPane> {
     TerminalMouseButton.right => 'right',
     TerminalMouseButton.wheelUp => 'wheel_up',
     TerminalMouseButton.wheelDown => 'wheel_down',
-    TerminalMouseButton.wheelLeft || TerminalMouseButton.wheelRight || null => '',
+    TerminalMouseButton.wheelLeft ||
+    TerminalMouseButton.wheelRight ||
+    null => '',
   };
 
   /// fork 的 render 在布局期报几何（只在变化时）→ Rust（度量的权威在 Flutter）。
@@ -1353,7 +1378,13 @@ class _TerminalPaneState extends State<TerminalPane> {
     final bannerState = _normal?.error.isNotEmpty == true
         ? SessionState.failed
         : _state;
+    final local = _controller.target.isLocal;
+    final exitCode = local ? localShellExitCode(_detail) : null;
     final banner = switch (bannerState) {
+      SessionState.connecting when local => _Banner(
+        icon: Icons.sync,
+        text: '正在启动 $title…',
+      ),
       SessionState.connecting => switch (_hint) {
         ConnectHint.touchCard => _Banner(
           icon: Icons.touch_app_outlined,
@@ -1383,13 +1414,22 @@ class _TerminalPaneState extends State<TerminalPane> {
               onPressed: () => _openSettings(_localNetworkSettingsUrl),
               child: const Text('打开设置'),
             ),
-          if (_normal == null || _normal!.started)
+          if ((_normal == null && _sessionId != 0) || _normal?.started == true)
             TextButton(onPressed: _reconnect, child: const Text('重试')),
           TextButton(onPressed: widget.onClose, child: const Text('关闭')),
         ],
         hint: _localNetworkSettingsUrl.isEmpty
             ? null
             : '服务器在局域网内时，需要允许 GuoSSHell 访问本地网络。',
+      ),
+      SessionState.closed when local => _Banner(
+        icon: Icons.link_off,
+        text: exitCode == null ? '进程已退出' : '进程已退出（代码 $exitCode）',
+        detail: exitCode == null ? _detail : '',
+        actions: [
+          TextButton(onPressed: _reconnect, child: const Text('重新启动')),
+          TextButton(onPressed: widget.onClose, child: const Text('关闭')),
+        ],
       ),
       SessionState.closed => _Banner(
         icon: Icons.link_off,

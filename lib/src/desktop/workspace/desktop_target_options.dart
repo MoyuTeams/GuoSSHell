@@ -17,12 +17,14 @@ class DesktopTargetOptions {
   const DesktopTargetOptions({
     required this.profiles,
     required this.nativeAvailable,
+    this.localAvailable = false,
     this.nativeReason = '',
     this.systemReason = 'System OpenSSH 尚未开放，不能启动连接。',
     this.localReason = '本地 shell 尚未开放，不能启动会话。',
   });
   final List<DesktopProfileOption> profiles;
   final bool nativeAvailable;
+  final bool localAvailable;
   final String nativeReason;
   final String systemReason;
   final String localReason;
@@ -93,16 +95,17 @@ class RustDesktopTargetOptionsGateway implements DesktopTargetOptionsGateway {
         return fallback;
       }
 
+      bool available(DesktopTargetKind kind) => capability.transports.any(
+        (item) => item.target == kind && item.backendAvailable,
+      );
+
       return DesktopTargetOptions(
         profiles: [
           for (final profile in config.snapshot!.profiles)
             DesktopProfileOption(profile.id, profile.name),
         ],
-        nativeAvailable: capability.transports.any(
-          (item) =>
-              item.target == DesktopTargetKind.nativeSsh &&
-              item.backendAvailable,
-        ),
+        nativeAvailable: available(DesktopTargetKind.nativeSsh),
+        localAvailable: available(DesktopTargetKind.localShell),
         nativeReason: reason(DesktopTargetKind.nativeSsh, 'Native SSH 当前不可用。'),
         systemReason: reason(
           DesktopTargetKind.systemOpenSsh,
@@ -121,7 +124,9 @@ class RustDesktopTargetOptionsGateway implements DesktopTargetOptionsGateway {
 SessionTarget desktopTargetWithProfile(
   SessionTarget target,
   String profileId,
-) => target.connectionId.isNotEmpty
+) => target.isLocal
+    ? SessionTarget.local(profileId: profileId)
+    : target.connectionId.isNotEmpty
     ? SessionTarget.saved(
         connectionId: target.connectionId,
         title: target.title,
@@ -149,6 +154,9 @@ class DesktopProfilePicker extends StatelessWidget {
   final ValueChanged<String> onChanged;
   final bool saved;
 
+  String get _local =>
+      options.localAvailable ? '可用，从侧栏「本地终端」打开' : options.localReason;
+
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -162,10 +170,7 @@ class DesktopProfilePicker extends StatelessWidget {
             text: Text('System OpenSSH：${options.systemReason}'),
             onPressed: null,
           ),
-          MenuFlyoutItem(
-            text: Text('本地 shell：${options.localReason}'),
-            onPressed: null,
-          ),
+          MenuFlyoutItem(text: Text('本地 shell：$_local'), onPressed: null),
         ],
       ),
       const SizedBox(height: DesktopSpacing.md),
@@ -189,7 +194,7 @@ class DesktopProfilePicker extends StatelessWidget {
       const SizedBox(height: DesktopSpacing.md),
       Text('System OpenSSH：${options.systemReason}'),
       const SizedBox(height: DesktopSpacing.sm),
-      Text('本地 shell：${options.localReason}'),
+      Text('本地 shell：$_local'),
     ],
   );
 }

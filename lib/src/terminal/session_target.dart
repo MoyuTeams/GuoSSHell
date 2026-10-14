@@ -1,9 +1,14 @@
 import 'package:flutter/foundation.dart';
 
-/// 会话要连的目标：目录里的一条连接，或快速连接（不存目录）。
+/// 会话目标种类：SSH（目录连接或快速连接）或本机 shell（仅桌面）。
+enum SessionTargetKind { ssh, local }
+
+/// 会话要连的目标：目录里的一条连接、快速连接（不存目录），或本地终端。
 @immutable
 class SessionTarget {
-  /// 目录里的连接 id；快速连接为空。
+  final SessionTargetKind kind;
+
+  /// 目录里的连接 id；快速连接与本地终端为空。
   final String connectionId;
 
   /// 目录里的连接显示的名字。
@@ -25,7 +30,8 @@ class SessionTarget {
     required this.connectionId,
     required String title,
     this.profileId = '',
-  }) : _name = title,
+  }) : kind = SessionTargetKind.ssh,
+       _name = title,
        host = '',
        port = 0,
        username = '',
@@ -39,9 +45,28 @@ class SessionTarget {
     this.password = '',
     this.command = '',
     this.profileId = '',
-  }) : connectionId = '',
+  }) : kind = SessionTargetKind.ssh,
+       connectionId = '',
        _name = '';
 
+  /// 本机默认 shell；不认证，无主机、端口、用户名与密码。
+  const SessionTarget.local({String? profileId})
+    : kind = SessionTargetKind.local,
+      profileId = profileId ?? '',
+      connectionId = '',
+      _name = '',
+      host = '',
+      port = 0,
+      username = '',
+      password = '',
+      command = '';
+
+  bool get isLocal => kind == SessionTargetKind.local;
+
   /// 页面与提示里显示的名字。
-  String get title => connectionId.isEmpty ? '$username@$host' : _name;
+  String get title => isLocal
+      ? '本地终端'
+      : connectionId.isEmpty
+      ? '$username@$host'
+      : _name;
 }

@@ -1,12 +1,14 @@
 import 'dart:async';
 
 import 'package:fluent_ui/fluent_ui.dart' as f;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:multi_split_view/multi_split_view.dart';
 
 import '../bindings/bindings.dart';
 import '../catalog/catalog_requests.dart';
+import '../platform_target.dart';
 import '../terminal/key_bar_layout.dart';
 import '../terminal/session_target.dart';
 import '../terminal/terminal_key_bar.dart';
@@ -74,6 +76,10 @@ class _WindowsShellState extends State<WindowsShell> {
   int _focusIntent = 0;
   final _orderedInput = <TerminalPaneController>{};
   late final DesktopTargetOptionsGateway _targetOptions;
+
+  /// 能力查询报告本地 shell 不可用后入口禁用，并以此原因提示。
+  String? _localUnavailable;
+  bool _localQuerying = false;
 
   @override
   void initState() {
@@ -199,6 +205,18 @@ class _WindowsShellState extends State<WindowsShell> {
     return mounted;
   }
 
+  /// 本地终端只在桌面目标提供；移动端不显示任何本地入口。
+  bool get _localEntry =>
+      appTargetFor(defaultTargetPlatform) == AppTarget.desktop;
+
+  /// 入口按钮的回调：不可用时为 null（禁用）。
+  VoidCallback? get _localPressed =>
+      _localUnavailable == null ? () => unawaited(_openLocal()) : null;
+
+  String get _localLabel => _localUnavailable == null
+      ? '本地终端 · Ctrl+Shift+L'
+      : '本地终端不可用：$_localUnavailable';
+
   // 必须是壳本身的主焦点，不能把搜索、目录行或按钮的子焦点当欢迎命令权限。
   bool _isEmptyShellOrigin() =>
       mounted &&
@@ -226,6 +244,27 @@ class _WindowsShellState extends State<WindowsShell> {
       if (mounted) setState(() => _error = '无法读取 profile 或传输能力，请重试。');
       return null;
     }
+  }
+
+  /// 本地终端用应用默认 profile；先查能力，不可用时禁用入口并提示原因。
+  Future<void> _openLocal() async {
+    if (_dialogOpen || _localQuerying || _localUnavailable != null) return;
+    _localQuerying = true;
+    try {
+      final options = await _targetOptions.query();
+      if (!mounted) return;
+      if (!options.localAvailable) {
+        setState(() => _localUnavailable = _error = options.localReason);
+        return;
+      }
+    } catch (_) {
+      if (mounted) setState(() => _error = '无法读取本地终端能力，请重试。');
+      return;
+    } finally {
+      _localQuerying = false;
+    }
+    _workspace.openTab(const SessionTarget.local());
+    _focusActive();
   }
 
   Future<void> _openWithProfile(ConnectionSummary item) async {
@@ -616,6 +655,9 @@ class _WindowsShellState extends State<WindowsShell> {
       control: keyboard.isControlPressed,
       shift: keyboard.isShiftPressed,
       alt: keyboard.isAltPressed,
+      meta:
+          defaultTargetPlatform == TargetPlatform.macOS &&
+          keyboard.isMetaPressed,
     );
     if (command == null) {
       if (_workspace.activePane?.controller.focusNode.hasFocus ?? false) {
@@ -633,7 +675,11 @@ class _WindowsShellState extends State<WindowsShell> {
         command != DesktopCommand.newTab &&
         command != DesktopCommand.search &&
         command != DesktopCommand.settings &&
-        command != DesktopCommand.toggleSidebar) {
+        command != DesktopCommand.toggleSidebar &&
+        command != DesktopCommand.localTerminal) {
+      return KeyEventResult.ignored;
+    }
+    if (command == DesktopCommand.localTerminal && !_localEntry) {
       return KeyEventResult.ignored;
     }
     if (event is! KeyDownEvent) return KeyEventResult.handled;
@@ -677,6 +723,8 @@ class _WindowsShellState extends State<WindowsShell> {
         _settingsDialog(origin: origin, emptyShellOrigin: emptyShellOrigin);
       case DesktopCommand.toggleSidebar:
         setState(() => _sidebar = !_sidebar);
+      case DesktopCommand.localTerminal:
+        unawaited(_openLocal());
     }
     return KeyEventResult.handled;
   }
@@ -733,6 +781,13 @@ class _WindowsShellState extends State<WindowsShell> {
                                 label: '快速连接 · Ctrl+Shift+T',
                                 onPressed: () => _editor(quick: true),
                               ),
+                              if (_localEntry)
+                                DesktopIconButton(
+                                  key: const ValueKey('workspace-local'),
+                                  icon: f.FluentIcons.command_prompt,
+                                  label: _localLabel,
+                                  onPressed: _localPressed,
+                                ),
                               const Spacer(),
                               DesktopIconButton(
                                 icon: f.FluentIcons.permissions,
@@ -1295,6 +1350,21 @@ class _WindowsShellState extends State<WindowsShell> {
                     child: Text('添加连接'),
                   ),
                 ),
+                if (_localEntry)
+                  f.Tooltip(
+                    message: _localLabel,
+                    child: f.Button(
+                      key: const ValueKey('welcome-local'),
+                      onPressed: _localPressed,
+                      child: const Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
+                        child: Text('本地终端'),
+                      ),
+                    ),
+                  ),
               ],
             ),
             const Padding(
@@ -1302,13 +1372,15 @@ class _WindowsShellState extends State<WindowsShell> {
               child: Divider(color: Colors.white10),
             ),
             if (MediaQuery.sizeOf(context).width >= DesktopMetrics.narrowWidth)
-              const Wrap(
+              Wrap(
                 spacing: 28,
                 children: [
-                  ShortcutHint('新建会话', 'Ctrl + Shift + T'),
-                  ShortcutHint('切换标签', 'Ctrl + Tab'),
-                  ShortcutHint('左右分屏', 'Ctrl + Shift + D'),
-                  ShortcutHint('搜索连接', 'Ctrl + Shift + F'),
+                  const ShortcutHint('新建会话', 'Ctrl + Shift + T'),
+                  const ShortcutHint('切换标签', 'Ctrl + Tab'),
+                  const ShortcutHint('左右分屏', 'Ctrl + Shift + D'),
+                  const ShortcutHint('搜索连接', 'Ctrl + Shift + F'),
+                  if (_localEntry)
+                    const ShortcutHint('本地终端', 'Ctrl + Shift + L'),
                 ],
               ),
           ],

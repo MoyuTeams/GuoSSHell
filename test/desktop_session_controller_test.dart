@@ -165,6 +165,7 @@ class DesktopSessionTestGateway implements DesktopSessionGateway {
       );
     }
   }
+
   @override
   Stream<RustSignalPack<DesktopSelection>> get selections =>
       const Stream.empty();
