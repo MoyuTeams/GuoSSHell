@@ -3,9 +3,10 @@
 一个跨平台终端客户端：iPhone / iPad 与 Android 仅提供远端 SSH；macOS、Windows、
 Linux 的产品范围包括远端 SSH、桌面本地 shell 与 System OpenSSH（在本地终端中运行系统
 `ssh`，使用用户自己的 ssh 配置、agent 与 known_hosts）。
-桌面使用统一的 Fluent 工作区；终端 profile（TERM、字体、配色、滚回、按键绑定、左右 Alt、
-鼠标上报等）已可用，连接可选择 profile。桌面本地 shell 与 System OpenSSH 尚未开放，
-不能把 UI 入口视为传输能力。
+桌面使用统一的 Fluent 工作区与设置页；终端 profile（TERM、字体、配色、滚回、按键绑定、左右 Alt、
+鼠标上报等）已可用，连接可选择 profile。桌面本地 shell（Ctrl+Shift+L 或侧栏打开）与 System OpenSSH
+（连接编辑器与快速连接中选择「连接方式」）均已可用。macOS/Linux 的 GUI 尚未实跑，范围见
+[桌面扩展](docs/desktop-expansion.md)。
 业务与终端语义跑在 **Rust**
 （上游 [rsHell](https://github.com/hugefiver/rsHell) 的内核，直接作为固定提交的 git 依赖），
 只有渲染与交互用 **Flutter** 重写。Dart 不写业务逻辑。
@@ -109,7 +110,7 @@ Linux 需要 Secret Service；Windows 私钥使用 DPAPI，Android 使用 Keysto
 
 ## 缩放与功能按钮
 
-Windows 的 Fluent 工作区、常驻管理面板、沉浸标题栏、桌面快捷键和亚克力设置见 [Windows 桌面界面](docs/windows-desktop.md)。窗口插件与材质仅在 Windows 初始化；移动端保留原有导航。
+Windows 的 Fluent 工作区、常驻管理面板、沉浸标题栏、桌面快捷键和统一设置页（亚克力在「外观与字体」页）见 [Windows 桌面界面](docs/windows-desktop.md)。窗口插件与材质仅在 Windows 初始化；移动端保留原有导航。
 
 终端支持屏幕或触控板双指捏合；Apple 平台使用 `⌘+` / `⌘−` / `⌘0` 缩放和恢复字号，Windows 使用 `Ctrl` 对应组合。
 下方编辑图标打开可视化双排预览：直接拖动排序、跨排移动、从目录拖入按钮或拖出删除，保存后立即生效。

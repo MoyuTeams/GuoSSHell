@@ -11,8 +11,8 @@
 
 Windows 2025、macOS 15 与 Ubuntu 24.04 各自使用既有 setup action 准备工具链，
 运行 Cargo fmt/check/clippy/test 与 Flutter analyze/test，然后在本机宿主构建对应的
-debug 桌面应用。`hub` 的实验候选测试（selected_p1 及依赖它的 local_shell、
-system_ssh 测试）由 `experimental-candidates` feature 门控，不在默认
+debug 桌面应用。`hub` 的实验候选测试（selected_p1 及依赖它的应用侧 local_shell、
+system_ssh 原型测试，不属于产品本地终端与 System OpenSSH 路径）由 `experimental-candidates` feature 门控，不在默认
 `cargo test --workspace` 中；各平台另以 `continue-on-error` 的独立步骤运行
 `cargo test -p hub --features experimental-candidates --locked --no-fail-fast`，结果写入作业摘要，
 不计入桌面功能门禁。macOS 使用构建目录下的临时配置关闭代码签名，不改沙箱权限；所有

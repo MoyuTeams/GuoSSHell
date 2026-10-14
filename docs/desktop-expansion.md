@@ -52,10 +52,10 @@ Profile 参数（终端参数/协议/绑定/滚回）在新会话或显式重启
 | 二 | Rust 桌面契约：版本化设置/profile 协议、完整配置 CAS 存储、会话目标模型、能力信号、字体绑定接缝 | 完成 |
 | 三 | Fluent 目录、连接编辑、密钥管理、认证对话框接入常驻工作区 | 完成 |
 | 四 | 统一工作区、V2 会话与终端输入、终端 profile 生效、连接选择 profile | 主体完成，输入缺口见下 |
-| 五 | 应用级设置、profile 管理、桌面键位条接线 | 进行中 |
-| 六 | 本地 Shell 标签 | 待做 |
-| 七 | System OpenSSH | 待做 |
-| 八 | 三平台汇合验收 | 待做 |
+| 五 | 应用级设置、profile 管理、桌面键位条接线 | 完成 |
+| 六 | 本地 Shell 标签 | 完成 |
+| 七 | System OpenSSH | 完成 |
+| 八 | 三平台汇合验收 | 进行中 |
 
 ### 阶段四：工作区、V2 会话与输入
 
@@ -66,20 +66,33 @@ Profile 参数（终端参数/协议/绑定/滚回）在新会话或显式重启
 
 ### 阶段五：应用级设置与 profile
 
-控制器与草稿（`lib/src/desktop/settings/`）、App/Profile 表单、结构化绑定编辑器、字体资源区与键位条编辑器的组件已备。进行中：接入共享设置入口，完成 profile CRUD/默认、应用配色与键位条的 Rinf/SQLite 往返及焦点验收。
+三桌面统一的 Fluent 设置页（Ctrl+, 或侧栏进入），分五页：应用、配置文件、外观与字体、键位条、关于。
+
+- profile 与应用配置经 Rust 事务保存并读回；字体与外观写入经核实；键位条仅有单一写入口与显示开关；关闭前合并未保存修改并确认。
+- 应用配色即时驱动 Fluent 壳；`default` 与高对比度保持原样。Material 对话框与终端画布不随应用配色变浅，见[浅色应用配色下 Material 对话框与终端画布仍为深色](followups/20261015_浅色配色下Material对话框与终端画布仍为深色.md)。
+- Profile 参数在新会话生效，界面明示；旧 Windows 设置中的字号与滚回已移至配置文件页，快捷键提示未迁移，见[新设置页未提供快捷键提示](followups/20261015_新设置页未提供快捷键提示.md)。
 
 ### 阶段六：本地 Shell
 
-复用上游 rsHell 的 `LocalPtyTransport`；团队 fork `MoyuTeams/rsHell` 分支 `feat/local-pty-writer` 为本地 PTY 写入增加专用写线程与有界队列，待接线，为下一节点。应用侧 `native/hub/src/local_shell/` 与 `system_ssh/` 原型保留在实验门控下，不进入产品路径。
+侧栏、欢迎页与 Ctrl+Shift+L（终端持焦也可用）打开本地终端标签，使用默认 profile 与平台默认 shell，工作目录为用户主目录。Windows 的选择顺序为 `RSHELL_SHELL`、`pwsh`、`powershell`、`COMSPEC`。退出码 0 关闭窗格；非 0 显示退出码并可重新启动。
+
+实现复用上游 rsHell 的 `LocalPtyTransport`。团队 fork `MoyuTeams/rsHell` 为本地 PTY 写入提供专用写线程与有界队列；Unix 上以非阻塞描述符与唤醒管道保证关闭时回收写线程，已在 Linux 环境实测。
 
 ### 阶段七：System OpenSSH
 
-与其他终端工具一致，在本地 PTY 中运行系统 `ssh`，使用用户自己的 ssh 配置、agent 与 known_hosts；主机密钥确认与密码由 ssh 在终端内交互。应用不自行读取或转存这些凭据。待实现；原「隔离 System SSH / 三角色 helper」设计不再采用。
+连接编辑器与快速连接可选「连接方式」。System OpenSSH 在本地终端中运行系统 `ssh`，使用用户自己的 ssh 配置、agent 与 known_hosts；主机密钥确认与认证由 ssh 在终端内交互，应用不读取或转存这些凭据。可选私钥文件；找不到 `ssh` 时该方式不可用；退出码处理同本地终端。端到端测试经仅 debug 构建读取的 `GUOSH_SYSTEM_SSH_CONFIG` 指定隔离的 `-F` 配置，不触碰用户的 ssh 配置。
 
 ### 阶段八：汇合验收
 
-合并各阶段证据：Native/本地/System 三类会话的协议、TUI 与退出矩阵，移动关键集回归，标准/窄窗口、缩放、分屏、焦点与高对比度验收，移除可见 Material 回退。逐平台区分「原生运行通过/CI 构建通过/CI 测试通过/失败/未验证」；macOS/Linux GUI 未实跑须如实标注，macOS 沙箱对本地进程与系统 ssh 的影响须实测后再声明。
+Windows 原生端到端已覆盖本地终端、System OpenSSH、设置与 profile（见下文验收入口）。macOS/Linux 由三平台 CI 构建与测试，GUI 未实跑，不视为验证；macOS 沙箱对本地进程与系统 ssh 的影响须实测后再声明。剩余事项：
 
+- macOS/Linux GUI 实跑（含本地终端与 System OpenSSH）。
+- 真实 IME、非 US 布局与 AltGr，见[桌面 V2 输入剩余缺口](followups/20261014_桌面V2输入剩余缺口.md)。
+- 浅色应用配色下 Material 对话框与终端画布。
+- 新设置页的快捷键提示。
+- 三平台 CI 以对应提交的实时作业结果为准，见[桌面 CI 待收敛](followups/20261014_桌面三平台CI待收敛.md)。
+
+逐平台区分「原生运行通过/CI 构建通过/CI 测试通过/失败/未验证」。
 ## 验证命令
 
 ```powershell
@@ -91,28 +104,23 @@ flutter analyze --no-pub
 flutter test --no-pub
 ```
 
-Windows 原生验收入口：`scripts/ci/windows_auth_check.ps1`。
+Windows 原生验收入口：
 
-- 默认 `auth` 目标：目录 → Fluent 首见认证 → V2 Native SSH 回显 → 管理往返。
-- `-Target profile`：经设置协议建 profile 后，验证 `TERM=vt220`、answerback、F5 绑定 `send DEL`、左 Alt 作 Meta/右 Alt 不作 Meta，并与默认 profile 对照。
+- `scripts/ci/windows_auth_check.ps1`：默认 `auth` 目标为目录 → Fluent 首见认证 → V2 Native SSH 回显 → 管理往返；`-Target profile` 经设置协议建 profile 后验证 `TERM=vt220`、answerback、F5 绑定 `send DEL`、左 Alt 作 Meta/右 Alt 不作 Meta，并与默认 profile 对照；`-Target system` 验证 System OpenSSH。
+- `integration_test/desktop_local_shell_smoke_test.dart`：本地终端。
+- `integration_test/desktop_settings_e2e_test.dart`：设置页（须以 `GUOSH_DESKTOP_TEST_DATA` 指定隔离数据目录）。
+- `integration_test/desktop_catalog_smoke_test.dart`、`integration_test/windows_desktop_test.dart`：目录与窗口。
+- `scripts/ci/windows_input_check.py`：原生键盘输入回归。
 
-另有 `integration_test/desktop_catalog_smoke_test.dart`。三平台 CI 由 `.github/workflows/desktop-validation.yml` 承载。
-
-## 当前状态
+三平台 CI 由 `.github/workflows/desktop-validation.yml` 承载。
+## 当前状态与后续任务
 
 | 验证面 | 证据 |
 |---|---|
-| Windows 原生 | `windows_auth_check.ps1` 两个目标与 `desktop_catalog_smoke_test` 通过 |
+| Windows 原生 | `windows_auth_check.ps1` 的 auth、profile、system 目标，以及本地终端、设置、目录、窗口的 integration_test 与原生键盘输入回归 |
 | Flutter / Rust | Flutter 全套、Rust workspace 测试通过 |
-| macOS / Linux | 由三平台 CI 构建与测试；GUI 未实跑，不视为验证 |
+| macOS / Linux | 由三平台 CI 构建与测试；GUI 未实跑，不视为验证。Linux 本地 PTY 关闭回收已在 Linux 环境实测 |
 
 CI 状态以对应提交的实时作业结果为准，见[桌面 CI 待收敛](followups/20261014_桌面三平台CI待收敛.md)。
 
-### 后续任务顺序
-
-1. 阶段五设置接线。
-2. 本地 Shell：接线 `feat/local-pty-writer` 与 `LocalPtyTransport`，开放本地标签。
-3. System OpenSSH：本地 PTY 运行系统 `ssh`。
-4. 阶段八三平台汇合验收。
-
-待完成事项清单见[桌面检查点待完成验收](followups/20261012_桌面检查点待完成验收.md)。
+后续任务即阶段八剩余事项，清单见[桌面检查点待完成验收](followups/20261012_桌面检查点待完成验收.md)。

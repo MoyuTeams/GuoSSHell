@@ -49,8 +49,7 @@
 
 移动端不提供本地 shell 面板，仍只显示 SSH 入口；桌面端本地 shell 与 System OpenSSH
 （在本地 PTY 中运行系统 `ssh`，使用用户自己的 ssh 配置、agent 与 known_hosts）属于桌面专项
-范围，尚未开放，须经 Rust 能力与真实宿主验证才可开放，范围与进度见
-`docs/desktop-expansion.md`。移动现有认证与交互保持不变。
+范围，已在桌面可用，范围与进度见 `docs/desktop-expansion.md`。移动现有认证与交互保持不变。
 
 上游是 MIT，fork 与改名合规，但**必须保留原始版权与许可声明**。
 
@@ -814,7 +813,7 @@ LoginGraceTime 把关，与 OpenSSH 客户端一致；交给传输层的连接�
 |---|---|
 | 桥用 **rinf**，不用 flutter_rust_bridge | 统一信号规约；单向信号流天然防止业务滑向 Dart。注意 rinf v8 已改用 serde + bincode（不再是 protobuf）；需要 protobuf 语义时用 `prost` 编码后塞进 `RustSignalBinary.binary` |
 | 边界类型**沿用** `rshell-core::protocol` | 上游已有完整可序列化协议，重建等于在 Dart 写业务模型（违反铁律 1） |
-| **移动端不做本地 shell 面板；桌面端纳入专项范围** | 移动保持纯 SSH；桌面本地 Shell 与 System OpenSSH（本地 PTY 运行系统 ssh）经宿主验证后开放 |
+| **移动端不做本地 shell 面板；桌面端纳入专项范围** | 移动保持纯 SSH；桌面本地 Shell 与 System OpenSSH（本地 PTY 运行系统 ssh）已在桌面可用 |
 | 帧格式：**结构化帧 + run 压缩 + 脏行增量** | §4.3 实测 |
 | **帧流控：Dart 处理完回 `FrameAck`，同一时刻至多一帧在途** | rinf 的队列无界，逐块出帧会在高输出下积压；在途期间的变化只保留最新状态。两帧渲染起点至少相隔 8 ms（不合并 60 Hz 刷新），ACK 缺失 250 ms 后照发；选区、尺寸变化与断线后的末帧共用同一节拍，关闭窗格直接释放会话 |
 | 度量权威归 **Flutter** | 字体度量只有一个权威，就是实际画字的那一方。`TerminalSize{cols,rows,pixel_width,pixel_height,dpi}` 由 Flutter 测完回传 |
