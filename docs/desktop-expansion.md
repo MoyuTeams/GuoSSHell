@@ -103,9 +103,15 @@ scoped russh、borrowed bigint、独立压缩 codec 及 inline 同步候选用�
 
 待接线：共享入口路由、字体 RID/slot 确认、外观无 RID 协议的全应用 writer、`KeyBarWriter.shared` 统一旧写入口、真实 Rinf/SQLite 往返与 NativeFocus。组件测试不替代这些验收。
 
-### 阶段六（前体已备，待生产化）：本地 Shell
+### 阶段六（owner 实现已备，待 transport／GUI 接线）：本地 Shell
 
 应用侧自持 PTY owner 已验证：自然退出以原进程对象 signaled 为门、8 MiB 堵写真实取消、跨读事件 UTF-8 累计、单次 unwind 主错误保持、资源根持有到全部 worker join（`native/hub/src/local_shell/`，当前测试构造器）。无合法 saved-Local 契约时非空 `connection_id` 在进入 SSH 分支前拒绝。
+
+长期 owner 源码位于 `native/hub/src/local_shell/production.rs` 及平台接缝，包含有界
+读写队列、启动／取消／关闭与 Windows Job 管理。Windows 直接引用同源码的
+`desktop_local_shell_production` 11 项测试通过；源码由 Windows 专用测试目标独立
+编译，尚未注册到 hub、`LocalPtyTransport` 或 GUI，Local
+产品入口保持关闭；Unix 进程树结果仍为 `UnverifiedUnix`，不能宣称跨平台完成。
 
 剩余要求：通过 `LocalPtyTransport` 接入统一 transport；默认 shell 用上游平台选择，自定义启动项按结构化字段校验，不接受 UI 隐式 shell 拼接；本地不走网络权限/SSH 凭据；spawn 未完成时关闭的竞态立即接管清理；Windows Job/ConPTY 与 Unix PTY/进程组清理不只查直接子 PID；完整 process-root、持久平台错误收敛、其他平台与 GUI 注册。
 
@@ -172,9 +178,9 @@ profile、字体与静态配色按窗格持有。这个检查点不是阶段四�
 3. 补真实物理键、非 US 布局、死键、AltGr、IME／TIP、指针及适用平台验收；满足开放条件后才调整 production guard。
 4. 按依赖推进阶段五完整设置、阶段六本地 Shell、阶段七隔离 System OpenSSH，再汇合阶段八。
 
-独立 Local Shell production 与 `selected_p1` 网络／session owner 候选仍有未提交工作，
-不属于 `81c3a00`。继续任务须先核对工作树，不丢弃这些改动，也不未经核验把它们带入
-正常生产路径。正式依赖身份仍以 `UPSTREAM.md` 与 manifest／lock 为准。
+Local Shell owner 作为未开放的业务前体保留，接入条件见阶段六；独立 `selected_p1`
+候选及来源证明不作为已完成的生产能力。继续任务须先核对工作树与接线状态，不未经
+核验把候选带入正常路径。正式依赖身份仍以 `UPSTREAM.md` 与 manifest／lock 为准。
 
 正常新 V2、Local/System 生产入口尚未开放；恢复条件见
 [桌面检查点待完成验收](followups/20261012_桌面检查点待完成验收.md)。高保证资源候选
