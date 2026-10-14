@@ -21,6 +21,7 @@ class DesktopSettingsResources extends StatefulWidget {
     required this.registry,
     this.appearance,
     this.onDirtyChanged,
+    this.showAbout = true,
   }) : assert(interfaceFont.slot == DesktopFontSlot.interface),
        assert(terminalFont.slot == DesktopFontSlot.terminal);
   final DesktopFontResourceCallbacks interfaceFont;
@@ -32,6 +33,9 @@ class DesktopSettingsResources extends StatefulWidget {
   final String applicationVersion;
   final DesktopLicenseRegistry registry;
   final ValueChanged<bool>? onDirtyChanged;
+
+  /// 设置页把「关于」单独成页时关闭；许可注册表仍由父提供。
+  final bool showAbout;
 
   @override
   State<DesktopSettingsResources> createState() =>
@@ -189,13 +193,15 @@ class DesktopSettingsResourcesState extends State<DesktopSettingsResources> {
                             ? 'Windows 外观服务尚未连接；字体与关于区域仍可使用。'
                             : '窗口透明度仅适用于 Windows；当前平台不调用宿主外观。',
                       ),
-                    const SizedBox(height: DesktopSpacing.xxl),
-                    DesktopAboutResources(
-                      applicationName: widget.applicationName,
-                      applicationVersion: widget.applicationVersion,
-                      registry: widget.registry,
-                      enabled: ready,
-                    ),
+                    if (widget.showAbout) ...[
+                      const SizedBox(height: DesktopSpacing.xxl),
+                      DesktopAboutResources(
+                        applicationName: widget.applicationName,
+                        applicationVersion: widget.applicationVersion,
+                        registry: widget.registry,
+                        enabled: ready,
+                      ),
+                    ],
                   ],
                 ),
               ),

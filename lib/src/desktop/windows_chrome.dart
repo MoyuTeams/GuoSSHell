@@ -8,6 +8,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../bindings/bindings.dart';
 import 'desktop_theme.dart';
+import 'settings/resources/desktop_resources_contracts.dart';
 
 bool get isWindowsDesktop =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
@@ -107,23 +108,50 @@ class WindowsDesktopWindow {
   }
 }
 
-/// 这里只保留外观预览；持久化及合法值校验由 Rust 完成。
+/// 外观预览与全应用唯一的持久化写入口；合法值校验由 Rust 完成。
 class WindowsAppearance extends ChangeNotifier {
+  WindowsAppearance({
+    Stream<WindowsAppearanceState>? states,
+    void Function(SaveWindowsAppearance request)? send,
+  }) : _states =
+           states ??
+           WindowsAppearanceState.rustSignalStream.map((pack) => pack.message),
+       _send = send ?? ((request) => request.sendSignalToRust());
   static final instance = WindowsAppearance();
   // 由 Windows 宿主 windows/runner/window_material.cpp 实现。
   static const _material = MethodChannel('guosshell/window_material');
+  final Stream<WindowsAppearanceState> _states;
+  final void Function(SaveWindowsAppearance request) _send;
   bool acrylicEnabled = true;
   double opacity = 0.78;
   bool materialAvailable = false;
-  String? error;
+
+  /// 最近一次 Rust 回报的持久值；预览不改变它。
+  DesktopAppearanceValue saved = const DesktopAppearanceValue(
+    acrylic: true,
+    opacity: 0.78,
+  );
+
+  /// 协议无 request ID：超时后保持隔离，直到迟到的状态回报结算旧写入。
+  int verification = 0;
+  bool _sending = false;
+  bool _timedOut = false;
+  bool get writeReady => !_sending && !_timedOut;
   StreamSubscription? _subscription;
   Future<void> _effectQueue = Future.value();
 
   void connect() {
-    _subscription ??= WindowsAppearanceState.rustSignalStream.listen((pack) {
-      acrylicEnabled = pack.message.acrylic;
-      opacity = pack.message.opacity;
-      error = pack.message.error.isEmpty ? null : pack.message.error;
+    _subscription ??= _states.listen((state) {
+      acrylicEnabled = state.acrylic;
+      opacity = state.opacity;
+      saved = DesktopAppearanceValue(
+        acrylic: state.acrylic,
+        opacity: state.opacity,
+      );
+      if (_timedOut && !_sending) {
+        _timedOut = false;
+        ++verification;
+      }
       notifyListeners();
       unawaited(applyMaterial());
     });
@@ -138,10 +166,43 @@ class WindowsAppearance extends ChangeNotifier {
     if (changedEffect) unawaited(applyMaterial());
   }
 
-  void save() => SaveWindowsAppearance(
-    acrylic: acrylicEnabled,
-    opacity: opacity,
-  ).sendSignalToRust();
+  /// 先订阅再发送；error 非空为已关联失败，超时为结果待核实。
+  Future<DesktopResourceWriteResult<DesktopAppearanceValue>> persist(
+    DesktopAppearanceValue value,
+  ) async {
+    if (!writeReady) throw StateError('上一外观写入尚未结算');
+    _sending = true;
+    notifyListeners();
+    final reply = _states.first.timeout(const Duration(seconds: 10));
+    try {
+      _send(
+        SaveWindowsAppearance(acrylic: value.acrylic, opacity: value.opacity),
+      );
+    } catch (_) {
+      // 发送异常不能证明 Rust 未收到，按待核实处理。
+      reply.ignore();
+      _timedOut = true;
+      _sending = false;
+      notifyListeners();
+      return const DesktopResourceWriteResult.uncertain();
+    }
+    try {
+      final state = await reply;
+      saved = DesktopAppearanceValue(
+        acrylic: state.acrylic,
+        opacity: state.opacity,
+      );
+      return state.error.isEmpty
+          ? DesktopResourceWriteResult.confirmed(saved)
+          : const DesktopResourceWriteResult.failed();
+    } on TimeoutException {
+      _timedOut = true;
+      return const DesktopResourceWriteResult.uncertain();
+    } finally {
+      _sending = false;
+      notifyListeners();
+    }
+  }
 
   Future<void> applyMaterial() {
     if (!materialAvailable) return Future.value();

@@ -15,13 +15,13 @@ import 'package:guosh_shell/src/desktop/desktop_status.dart';
 import 'package:guosh_shell/src/desktop/desktop_theme.dart';
 import 'package:guosh_shell/src/desktop/desktop_widgets.dart';
 import 'package:guosh_shell/src/desktop/legacy_material_surface.dart';
+import 'package:guosh_shell/src/desktop/settings/desktop_settings_page.dart';
 import 'package:guosh_shell/src/desktop/windows_chrome.dart';
 import 'package:guosh_shell/src/desktop/windows_shell.dart';
 import 'package:guosh_shell/src/desktop/windows_sidebar.dart';
 import 'package:guosh_shell/src/keys/keys_page.dart';
 import 'package:guosh_shell/src/platform_target.dart';
 import 'package:guosh_shell/src/settings/interface_font.dart';
-import 'package:guosh_shell/src/settings/interface_font_setting.dart';
 import 'package:guosh_shell/src/terminal/session_target.dart';
 import 'package:guosh_shell/src/workspace/workspace.dart';
 
@@ -229,23 +229,25 @@ void main() {
           );
           await tester.pumpAndSettle();
           expect(navigator.canPop(), isTrue);
-          expect(find.byType(InterfaceFontSetting), findsNWidgets(2));
+          expect(find.byType(DesktopSettingsPage), findsOneWidget);
+          await tester.tap(
+            find.byKey(const ValueKey('settings-nav-appearance')),
+          );
+          await tester.pumpAndSettle();
           for (final slot in ['interface', 'terminal']) {
-            expect(find.byKey(ValueKey('pick-$slot-font')), findsOneWidget);
-            expect(find.byKey(ValueKey('$slot-font-preview')), findsOneWidget);
-          }
-          for (final label in ['恢复内置 MiSans', '恢复内置等宽字体']) {
-            await tester.ensureVisible(find.text(label));
+            expect(find.byKey(ValueKey('pick-$slot-resource')), findsOneWidget);
             expect(
-              tester
-                  .widget<f.Button>(find.widgetWithText(f.Button, label))
-                  .onPressed,
-              isNotNull,
+              find.byKey(ValueKey('$slot-resource-preview')),
+              findsOneWidget,
             );
+            final reset = find.byKey(ValueKey('reset-$slot-resource'));
+            await tester.ensureVisible(reset);
+            expect(tester.widget<f.Button>(reset).onPressed, isNotNull);
           }
           expect(find.text('亚克力半透明'), findsNothing);
-          await tester.tap(find.text('完成'));
+          await tester.tap(find.byKey(const ValueKey('close-settings')));
           await tester.pumpAndSettle();
+          expect(find.byType(DesktopSettingsPage), findsNothing);
           expect(pane.key.currentContext, same(element));
           expect(hostCalls, isEmpty);
           await WindowsDesktopWindow.initialize();

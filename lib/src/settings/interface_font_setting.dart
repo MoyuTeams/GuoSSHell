@@ -1,5 +1,4 @@
 import 'package:file_selector/file_selector.dart';
-import 'package:fluent_ui/fluent_ui.dart' as f;
 import 'package:flutter/material.dart';
 
 import 'interface_font.dart';
@@ -8,13 +7,11 @@ import 'interface_font.dart';
 class InterfaceFontSetting extends StatefulWidget {
   const InterfaceFontSetting({
     super.key,
-    this.fluent = false,
     this.terminal = false,
     this.controller,
     this.pickFile,
     this.previewFontSize,
   });
-  final bool fluent;
   final bool terminal;
   final InterfaceTypography? controller;
   final Future<XFile?> Function()? pickFile;
@@ -94,7 +91,7 @@ class _InterfaceFontSettingState extends State<InterfaceFontSetting> {
       final family = _draft?.family ?? _font.family;
       final error = _error ?? _font.error;
       return Padding(
-        padding: widget.fluent ? EdgeInsets.zero : const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -132,7 +129,7 @@ class _InterfaceFontSettingState extends State<InterfaceFontSetting> {
               ),
               child: Text(
                 widget.terminal
-                    ? '0123456789  ABCDEFGHIJ\nabcdefghij  ──────────\n中文终端 →   main  ✓'
+                    ? '0123456789  ABCDEFGHIJ\nabcdefghij  ──────────\n中文终端 →   main  ✓'
                     : '清晰的界面，熟悉的工作方式。\nAa Bb 0123456789 · 中文预览',
                 key: ValueKey('$_slot-font-preview'),
                 style: theme.textTheme.bodyMedium!.copyWith(
@@ -145,10 +142,7 @@ class _InterfaceFontSettingState extends State<InterfaceFontSetting> {
                 ),
               ),
             ),
-            if (_busy)
-              widget.fluent
-                  ? const f.ProgressBar()
-                  : const LinearProgressIndicator(),
+            if (_busy) const LinearProgressIndicator(),
             Wrap(
               spacing: 8,
               runSpacing: 8,
@@ -186,11 +180,6 @@ class _InterfaceFontSettingState extends State<InterfaceFontSetting> {
     Key? key,
   }) {
     final callback = _busy ? null : action;
-    if (widget.fluent) {
-      return filled
-          ? f.FilledButton(key: key, onPressed: callback, child: Text(label))
-          : f.Button(key: key, onPressed: callback, child: Text(label));
-    }
     return filled
         ? FilledButton(key: key, onPressed: callback, child: Text(label))
         : TextButton(key: key, onPressed: callback, child: Text(label));

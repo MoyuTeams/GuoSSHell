@@ -11,13 +11,17 @@ import 'settings_form_controls.dart';
 
 export 'desktop_profile_form.dart' show DesktopProfileTtfPicker;
 
-/// 可嵌入正常设置入口的完整配置区域；controller 与字体适配器由父持有。
+enum DesktopSettingsFormSection { app, profile }
+
+/// 可嵌入正常设置入口的完整配置区域；controller、字体适配器与分区导航由父持有。
 class DesktopSettingsForms extends StatefulWidget {
   const DesktopSettingsForms({
     super.key,
     required this.controller,
     required this.onPickTtf,
     required this.onClose,
+    this.section = DesktopSettingsFormSection.app,
+    this.onShowApp,
     this.focusBoundary,
   });
   final DesktopSettingsController controller;
@@ -25,6 +29,10 @@ class DesktopSettingsForms extends StatefulWidget {
 
   /// 确认关闭后由父移除设置区域并释放 controller；应用级 gateway 不随窗口销毁。
   final VoidCallback onClose;
+  final DesktopSettingsFormSection section;
+
+  /// 「设为默认」写入应用草稿后请父切到应用分区。
+  final VoidCallback? onShowApp;
   final DesktopSettingsFocusBoundary? focusBoundary;
 
   @override
@@ -32,7 +40,6 @@ class DesktopSettingsForms extends StatefulWidget {
 }
 
 class DesktopSettingsFormsState extends State<DesktopSettingsForms> {
-  bool _profileSection = false;
   String? _freshId;
   String? _issue;
   final _writeStates = <String, String>{};
@@ -126,9 +133,13 @@ class DesktopSettingsFormsState extends State<DesktopSettingsForms> {
     setState(() => _freshId = id);
   });
 
-  Future<bool> _confirm(String title, String content) async =>
+  Future<bool> _confirm(
+    String title,
+    String content, {
+    BuildContext? context,
+  }) async =>
       await showDialog<bool>(
-        context: _surfaceContext,
+        context: context ?? _surfaceContext,
         useRootNavigator: false,
         builder: (context) => ContentDialog(
           title: Text(title),
@@ -148,12 +159,17 @@ class DesktopSettingsFormsState extends State<DesktopSettingsForms> {
       false;
 
   /// 标题栏、父路由返回与页内关闭共用此确认入口；确认后才调用 onClose。
-  Future<void> requestClose() async {
+  /// extraDirty 并入父持有的其他设置区草稿；本区域不可见时由父提供对话框 context。
+  Future<void> requestClose({
+    bool extraDirty = false,
+    BuildContext? dialogContext,
+  }) async {
     final pending = c.blockingWrite;
-    if ((c.dirty || pending != null) &&
+    if ((c.dirty || pending != null || extraDirty) &&
         !await _confirm(
           '关闭设置？',
           pending == null ? '未保存的修改将放弃；已提交配置保持不变。' : '已发出的写入不能取消；关闭后仍须查询核实结果。',
+          context: dialogContext,
         )) {
       return;
     }
@@ -630,7 +646,7 @@ class DesktopSettingsFormsState extends State<DesktopSettingsForms> {
                           defaultTerminalProfile: id,
                         ),
                       );
-                      setState(() => _profileSection = false);
+                      widget.onShowApp?.call();
                     }),
               child: const Text('设为默认（应用草稿）'),
             ),
@@ -700,30 +716,10 @@ class DesktopSettingsFormsState extends State<DesktopSettingsForms> {
               child: SettingsFields(
                 children: [
                   Text(
-                    '配置设置',
+                    widget.section == DesktopSettingsFormSection.app
+                        ? '应用'
+                        : '配置文件',
                     style: FluentTheme.of(context).typography.display,
-                  ),
-                  Wrap(
-                    spacing: DesktopSpacing.sm,
-                    runSpacing: DesktopSpacing.sm,
-                    children: [
-                      Button(
-                        key: const ValueKey('section-app'),
-                        onPressed: () =>
-                            setState(() => _profileSection = false),
-                        child: const Text('应用'),
-                      ),
-                      Button(
-                        key: const ValueKey('section-profile'),
-                        onPressed: () => setState(() => _profileSection = true),
-                        child: const Text('终端配置'),
-                      ),
-                      Button(
-                        key: const ValueKey('close-settings'),
-                        onPressed: requestClose,
-                        child: const Text('关闭设置'),
-                      ),
-                    ],
                   ),
                   if (_issue != null)
                     Semantics(liveRegion: true, child: Text(_issue!)),
@@ -746,7 +742,9 @@ class DesktopSettingsFormsState extends State<DesktopSettingsForms> {
                       ],
                     ),
                   if (c.app != null && c.capabilities != null)
-                    _profileSection ? _profileForm() : _appForm(),
+                    widget.section == DesktopSettingsFormSection.profile
+                        ? _profileForm()
+                        : _appForm(),
                   if (c.app == null &&
                       c.queryState != DesktopSettingsQueryState.loading)
                     const Text('尚未获得有效配置快照，不能编辑。'),

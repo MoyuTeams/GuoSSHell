@@ -469,13 +469,6 @@ class DesktopDraftErrors {
   late final List<DesktopSettingsFieldError> pageErrors;
 }
 
-/// 由共享集成层提供真正的旧偏好确认及全应用单写者／未决隔离。
-/// 此边界不订阅 KeyBarLayoutResult，不把旧偏好表示为 configuration Applied。
-abstract interface class DesktopLegacyPreferences {
-  Future<void> saveKeyBarRows(List<List<String>> rows);
-  Future<void> saveShowKeyBar(bool value);
-}
-
 /// 表单仅通知焦点所有者；不路由或调用任何终端 action。
 abstract interface class DesktopSettingsFocusBoundary {
   void setSettingsInputFocused(bool focused);

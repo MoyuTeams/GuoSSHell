@@ -7,7 +7,6 @@ import 'package:multi_split_view/multi_split_view.dart';
 
 import '../bindings/bindings.dart';
 import '../catalog/catalog_requests.dart';
-import '../settings/key_bar_editor.dart';
 import '../terminal/key_bar_layout.dart';
 import '../terminal/session_target.dart';
 import '../terminal/terminal_key_bar.dart';
@@ -22,12 +21,11 @@ import 'desktop_widgets.dart';
 import 'keys/desktop_key_actions.dart';
 import 'keys/desktop_key_sync_state.dart';
 import 'keys/desktop_keys_page.dart';
+import 'settings/desktop_settings_page.dart';
 import 'windows_chrome.dart';
-import 'windows_settings.dart';
 import 'windows_sidebar.dart';
 import 'workspace/desktop_target_options.dart';
 import 'workspace/desktop_workspace_scope.dart';
-import 'workspace/desktop_workspace_settings.dart';
 
 /// 三平台共用常驻工作区。保留 WindowsShell 身份供既有原生验收定位。
 /// Windows 宿主仍由 WindowsFrame 管理；目录、设置和编辑器不销毁会话。
@@ -201,28 +199,6 @@ class _WindowsShellState extends State<WindowsShell> {
     return mounted;
   }
 
-  Future<void> _editNormalKeyBar(TerminalPaneController origin) async {
-    if (_dialogOpen) return;
-    _dialogOpen = true;
-    bool opened = false;
-    try {
-      if (!await _quietAll() || !mounted || !_originAttachedAndActive(origin)) {
-        return;
-      }
-      opened = true;
-      await showDesktopPage<void>(
-        context,
-        KeyBarEditor(
-          initialRows: _settings?.keyBarRows ?? defaultKeyBarRows,
-          onSave: saveKeyBarLayout,
-        ),
-      );
-    } finally {
-      _dialogOpen = false;
-      if (opened && mounted) await _focusActive(origin: origin);
-    }
-  }
-
   // 必须是壳本身的主焦点，不能把搜索、目录行或按钮的子焦点当欢迎命令权限。
   bool _isEmptyShellOrigin() =>
       mounted &&
@@ -386,6 +362,7 @@ class _WindowsShellState extends State<WindowsShell> {
   Future<DesktopActionOutcome> _settingsDialog({
     TerminalPaneController? origin,
     bool emptyShellOrigin = false,
+    DesktopSettingsSection section = DesktopSettingsSection.app,
   }) async {
     if (origin != null && !_isCurrentOrigin(origin)) {
       return DesktopActionOutcome.staleOrigin;
@@ -396,12 +373,7 @@ class _WindowsShellState extends State<WindowsShell> {
       if (!await _quietAll() || !mounted) {
         return DesktopActionOutcome.unavailable;
       }
-      await f.showDialog<void>(
-        context: context,
-        builder: (_) => isWindowsDesktop
-            ? const WindowsSettings()
-            : const DesktopWorkspaceSettings(),
-      );
+      await showDesktopSettings(context, section: section, settings: _settings);
     } finally {
       _dialogOpen = false;
     }
@@ -412,6 +384,10 @@ class _WindowsShellState extends State<WindowsShell> {
     if (origin?.ownsNativeInput == true) await focused;
     return DesktopActionOutcome.executed;
   }
+
+  // 键位条按钮本身持焦，不能当终端来源；关闭后回到活动窗格。
+  void _editKeyBar() =>
+      unawaited(_settingsDialog(section: DesktopSettingsSection.keybar));
 
   Future<void> _keys() async {
     if (_dialogOpen) return;
@@ -916,9 +892,7 @@ class _WindowsShellState extends State<WindowsShell> {
                                                 active.controller.selection,
                                             canCopy: () =>
                                                 active.controller.canCopy,
-                                            onEdit: () => _editNormalKeyBar(
-                                              active.controller,
-                                            ),
+                                            onEdit: _editKeyBar,
                                             onAction: (id) {
                                               switch (id) {
                                                 case 'copy':
@@ -964,15 +938,7 @@ class _WindowsShellState extends State<WindowsShell> {
                                             rows:
                                                 _settings?.keyBarRows ??
                                                 defaultKeyBarRows,
-                                            onEdit: () => showDesktopPage<void>(
-                                              context,
-                                              KeyBarEditor(
-                                                initialRows:
-                                                    _settings?.keyBarRows ??
-                                                    defaultKeyBarRows,
-                                                onSave: saveKeyBarLayout,
-                                              ),
-                                            ),
+                                            onEdit: _editKeyBar,
                                             onZoomIn: () =>
                                                 active.controller.zoom?.step(1),
                                             onZoomOut: () => active

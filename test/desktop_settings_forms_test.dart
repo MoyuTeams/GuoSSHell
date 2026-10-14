@@ -59,6 +59,9 @@ Future<void> mountForms(
   tester.view.physicalSize = Size(width, 900);
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
+  final key = formsKey ?? GlobalKey<DesktopSettingsFormsState>();
+  var section = DesktopSettingsFormSection.app;
+  // 分区导航与关闭由父设置页持有；测试壳以同名 key 复现这些父级入口。
   await tester.pumpWidget(
     CallbackShortcuts(
       bindings: {
@@ -88,12 +91,47 @@ Future<void> mountForms(
                   shellChord ?? () {},
             },
             child: ScaffoldPage(
-              content: DesktopSettingsForms(
-                key: formsKey,
-                controller: controller,
-                onPickTtf: picker ?? (_, _) async => null,
-                onClose: onClose ?? () {},
-                focusBoundary: focus,
+              content: StatefulBuilder(
+                builder: (context, update) => Column(
+                  children: [
+                    Wrap(
+                      children: [
+                        Button(
+                          key: const ValueKey('section-app'),
+                          onPressed: () => update(
+                            () => section = DesktopSettingsFormSection.app,
+                          ),
+                          child: const Text('应用'),
+                        ),
+                        Button(
+                          key: const ValueKey('section-profile'),
+                          onPressed: () => update(
+                            () => section = DesktopSettingsFormSection.profile,
+                          ),
+                          child: const Text('配置文件'),
+                        ),
+                        Button(
+                          key: const ValueKey('close-settings'),
+                          onPressed: () => key.currentState!.requestClose(),
+                          child: const Text('关闭设置'),
+                        ),
+                      ],
+                    ),
+                    Expanded(
+                      child: DesktopSettingsForms(
+                        key: key,
+                        controller: controller,
+                        onPickTtf: picker ?? (_, _) async => null,
+                        onClose: onClose ?? () {},
+                        section: section,
+                        onShowApp: () => update(
+                          () => section = DesktopSettingsFormSection.app,
+                        ),
+                        focusBoundary: focus,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
