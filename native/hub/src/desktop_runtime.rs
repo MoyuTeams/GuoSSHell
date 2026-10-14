@@ -36,6 +36,8 @@ pub(crate) struct Protocol {
     pub source: Source,
     pub mode: Arc<crate::desktop_input_port::InputMode>,
     pub input: Option<Arc<crate::desktop_input_port::InputPort>>,
+    /// 有序通道的物理键锁存；只在 supervisor 内按 seq 顺序门控，与原生端口状态互斥。
+    pub keys: crate::desktop_input_policy::InputPolicyState,
     last_seq: u64,
     usage: Arc<Mutex<Usage>>,
 }
@@ -45,6 +47,7 @@ impl Protocol {
             source: Source { source, identity },
             mode: Arc::default(),
             input: None,
+            keys: Default::default(),
             last_seq: 0,
             usage: Arc::default(),
         }

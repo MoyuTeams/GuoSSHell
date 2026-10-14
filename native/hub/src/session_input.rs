@@ -459,10 +459,7 @@ pub(super) async fn apply(
                     .await?
                 }
                 KeyResult::ClearScrollback => {
-                    policy::clear_scrollback(&mut screen.engine).map_err(failure)?;
-                    screen.selection = None;
-                    screen.window = Window::Bottom;
-                    screen.last_sent = None;
+                    clear_local(screen)?;
                     let row_revision = port.invalidate_projection();
                     crate::signals::desktop_native_input::DesktopNativeInvalidation {
                         source: port.source.source.clone(),
@@ -547,6 +544,43 @@ pub(super) async fn apply(
         screen.changed(session_id).map_err(failure)?;
     }
     Ok(quit)
+}
+
+/// 引擎清理成功后才清选区、回到底部并作废已发帧；信号与出帧由调用方负责。
+fn clear_local(screen: &mut Screen) -> Result<(), SessionEnd> {
+    policy::clear_scrollback(&mut screen.engine).map_err(failure)?;
+    screen.selection = None;
+    screen.window = Window::Bottom;
+    screen.last_sent = None;
+    Ok(())
+}
+
+/// 有序通道已门控的按键意图：与原生路径同一编码，写入与清屏在原 actor 内执行。
+/// 壳动作已由 supervisor 回报，不会到达这里。
+pub(super) async fn apply_key(
+    session_id: u32,
+    screen: &mut Screen,
+    transport: &mut dyn SessionTransport,
+    intent: policy::GatedIntent,
+) -> Result<(), SessionEnd> {
+    let previous_window = screen.window;
+    let outcome = policy::apply_intent(&mut screen.engine, intent).map_err(failure)?;
+    if outcome.scroll_to_bottom {
+        screen.window = Window::Bottom;
+    }
+    match outcome.result {
+        KeyResult::Bytes(bytes) => write(transport, &bytes).await?,
+        KeyResult::ClearScrollback => {
+            clear_local(screen)?;
+            send_selection_state(session_id, None);
+            return screen.changed(session_id).map_err(failure);
+        }
+        KeyResult::Action(_) | KeyResult::NoSend(_) | KeyResult::TypedInputReject(_) => {}
+    }
+    if screen.window != previous_window {
+        screen.changed(session_id).map_err(failure)?;
+    }
+    Ok(())
 }
 
 async fn apply_pointer(

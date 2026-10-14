@@ -205,8 +205,17 @@ fn gate_key_inner(
             .map(|key| (slot, key.route))
     });
     let (slot, route) = match (input.phase, existing) {
-        (DesktopKeyPhase::Down, Some(_)) => {
+        (DesktopKeyPhase::Down, Some(_)) if native => {
             return GatedIntent::reject(InputReject::DuplicateDown);
+        }
+        // 有序通道可能因焦点丢失收不到 Up：同物理键再次 Down 视为隐式 Up+Down，
+        // 旧锁存直接作废，避免按键被锁死。Repeat 不经此处，不会重复触发壳动作。
+        (DesktopKeyPhase::Down, Some((slot, _))) => {
+            state.active[slot] = Some(ActiveKey {
+                identity,
+                route: Route::Rejected,
+            });
+            (slot, Route::Rejected)
         }
         (DesktopKeyPhase::Down, None) => {
             let Some(slot) = state.active.iter().position(Option::is_none) else {

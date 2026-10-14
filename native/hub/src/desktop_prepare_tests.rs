@@ -164,13 +164,46 @@ fn secret() -> SecretString {
 }
 
 #[test]
-fn default_preparations_reject_v2_before_reservation_and_preserve_result_correlation() {
+fn production_table_enables_desktop_only_and_explicit_off_stays_policy_unavailable() {
+    assert_eq!(
+        Preparations::native().native_enabled,
+        crate::connect::desktop_supported()
+    );
+    // 桌面目标：生产表直接进入预约；显式关闭表仍按策略拒绝且不占预算。
+    let mut production = Preparations {
+        native_enabled: true,
+        ..Preparations::default()
+    };
+    let (identity, _lease, replaced) = production
+        .begin_on(prepare(5, 1, 7), Instant::now(), true)
+        .expect("桌面生产入口开启");
+    assert!(!identity.is_empty() && replaced.is_none());
+    let mut off = Preparations::default();
+    assert_eq!(
+        off.begin_on(prepare(5, 1, 7), Instant::now(), true).err(),
+        Some(Failure::PolicyUnavailable)
+    );
+    assert_eq!(off.budget.usage(), Usage::default());
+    // 移动目标：无论开关如何都在平台检查处拒绝，旧 ConnectRequest 路径不受影响。
+    for mut table in [Preparations::native(), Preparations::default()] {
+        assert_eq!(
+            table
+                .begin_on(prepare(6, 1, 8), Instant::now(), false)
+                .err(),
+            Some(Failure::PlatformUnavailable)
+        );
+        assert_eq!(table.budget.usage(), Usage::default());
+    }
+}
+
+#[test]
+fn explicit_off_preparations_reject_v2_before_reservation_and_preserve_result_correlation() {
     let mut table = Preparations::default();
     let request = prepare(17, 9, 11);
     let failure = table
         .begin(request.clone(), Instant::now())
         .err()
-        .expect("普通构造拒绝准备");
+        .expect("显式关闭拒绝准备");
     assert_eq!(failure, Failure::PolicyUnavailable);
     let reply = super::result(
         request.source.clone(),
@@ -192,7 +225,7 @@ fn default_preparations_reject_v2_before_reservation_and_preserve_result_correla
     let failure = table
         .start(&request, secret(), Instant::now())
         .err()
-        .expect("普通构造拒绝启动");
+        .expect("显式关闭拒绝启动");
     assert_eq!(failure, Failure::PolicyUnavailable);
     let reply = super::result(
         request.source.clone(),
@@ -216,7 +249,7 @@ fn default_preparations_reject_v2_before_reservation_and_preserve_result_correla
 }
 
 #[tokio::test]
-async fn default_guard_preserves_prepared_entry_font_and_budget_until_cancel() {
+async fn explicit_off_guard_preserves_prepared_entry_font_and_budget_until_cancel() {
     let f = Fixture::new();
     f.slot("apply");
     let request = prepare(1, 1, 10);

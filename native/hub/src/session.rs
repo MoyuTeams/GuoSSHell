@@ -29,15 +29,19 @@ use rshell_m0::rshell_session::{
 
 use crate::app::AppContext;
 use crate::connect::{self, Abort, Channels, Connected, PromptIds, RemoteTerminal};
+use crate::desktop_input_policy::{
+    AltProvenance, GatedIntent, KeyResult, PolicyKeyInput, RawChord, TextOwnership,
+    VerifiedKeyCodes,
+};
 use crate::desktop_prepare::{self, Preparations};
 use crate::desktop_runtime::{self, Protocol};
 use crate::frame_codec::pack_runs;
 use crate::local_network;
 use crate::settings;
 use crate::signals::desktop_session::{
-    DesktopCancel, DesktopClipboard, DesktopEvent, DesktopEventResult, DesktopFailure,
-    DesktopFrame, DesktopOrdered, DesktopPreparationState, DesktopPrepare, DesktopReply,
-    DesktopSelection, DesktopStart, DesktopViewportState,
+    DesktopAction, DesktopAltSource, DesktopCancel, DesktopClipboard, DesktopEvent,
+    DesktopEventResult, DesktopFailure, DesktopFrame, DesktopOrdered, DesktopPreparationState,
+    DesktopPrepare, DesktopReply, DesktopSelection, DesktopStart, DesktopViewportState,
 };
 use crate::signals::interaction::InteractionReply;
 use crate::signals::{
@@ -68,6 +72,8 @@ pub enum SessionCommand {
     /// 断开之后再连一次（画面与滚回保留）。
     Reconnect,
     Input(TerminalInput),
+    /// 有序通道已按 profile 门控的按键意图（send:/编码键/clear_scrollback），由 actor 执行。
+    Key(crate::desktop_input_policy::GatedIntent),
     Mouse(TerminalMouseEvent),
     Selection(SelectionRequest),
     Copy,
@@ -156,7 +162,7 @@ pub async fn supervisor(
         crate::signals::desktop_native_input::DesktopNativeLifecycleQuery::get_dart_signal_receiver(
         );
     let desktop_reply_rx = DesktopReply::get_dart_signal_receiver();
-    let mut preparations = Preparations::default();
+    let mut preparations = Preparations::native();
     let mut loading = tokio::task::JoinSet::new();
     let mut running = tokio::task::JoinSet::new();
     let mut task_failures = 0;
@@ -308,7 +314,10 @@ pub async fn supervisor(
                 let Some(pack) = pack else { break };
                 let request = pack.message;
                 let mut result = DesktopEventResult { source: request.source.clone(), identity: request.identity.clone(), seq: request.seq, failure: DesktopFailure::None, action: None };
-                result.failure = route_ordered(&mut sessions, request);
+                match route_ordered(&mut sessions, request) {
+                    Ok(action) => result.action = action,
+                    Err(failure) => result.failure = failure,
+                }
                 result.send_signal_to_dart();
             }
             pack = native_command_rx.recv() => {
@@ -508,30 +517,32 @@ fn route_legacy_reply(sessions: &HashMap<u32, SessionHandle>, reply: Interaction
     }
 }
 
-fn route_ordered(sessions: &mut HashMap<u32, SessionHandle>, r: DesktopOrdered) -> DesktopFailure {
+/// 成功时返回壳动作（仅按键绑定/默认候选产生）；失败值按 `DesktopEventResult` 语义回报。
+fn route_ordered(
+    sessions: &mut HashMap<u32, SessionHandle>,
+    r: DesktopOrdered,
+) -> Result<Option<DesktopAction>, DesktopFailure> {
     let Some(handle) = sessions.get_mut(&r.source.session_id) else {
-        return DesktopFailure::IdentityMismatch;
+        return Err(DesktopFailure::IdentityMismatch);
     };
     let Some(protocol) = &mut handle.protocol else {
-        return DesktopFailure::MixedMode;
+        return Err(DesktopFailure::MixedMode);
     };
-    let lease = match protocol.admit(&r) {
-        Ok(lease) => lease,
-        Err(failure) => return failure,
-    };
+    let lease = protocol.admit(&r)?;
     let command = match r.event {
         DesktopEvent::Disconnect => {
             handle.close.send_replace(true);
-            return DesktopFailure::None;
+            return Ok(None);
         }
         DesktopEvent::Reconnect => SessionCommand::Reconnect,
-        DesktopEvent::Text { text } if text.is_empty() => return DesktopFailure::InvalidEvent,
+        DesktopEvent::Text { text } if text.is_empty() => {
+            return Err(DesktopFailure::InvalidEvent);
+        }
         DesktopEvent::Text { text } => SessionCommand::Input(TerminalInput::CommittedText(text)),
         DesktopEvent::Paste { text } => SessionCommand::Paste(text),
-        DesktopEvent::Resize { geometry } => match desktop_prepare::geometry(geometry) {
-            Ok(size) => SessionCommand::Resize(size),
-            Err(failure) => return failure,
-        },
+        DesktopEvent::Resize { geometry } => {
+            SessionCommand::Resize(desktop_prepare::geometry(geometry)?)
+        }
         DesktopEvent::Viewport {
             follow_bottom,
             top_stable_row,
@@ -566,7 +577,7 @@ fn route_ordered(sessions: &mut HashMap<u32, SessionHandle>, r: DesktopOrdered) 
             };
             match mouse_event_from_request(request) {
                 Some(event) => SessionCommand::Mouse(event),
-                None => return DesktopFailure::InvalidEvent,
+                None => return Err(DesktopFailure::InvalidEvent),
             }
         }
         DesktopEvent::Selection {
@@ -586,18 +597,70 @@ fn route_ordered(sessions: &mut HashMap<u32, SessionHandle>, r: DesktopOrdered) 
             rectangular,
         }),
         DesktopEvent::Copy => SessionCommand::Copy,
-        // 旧信号没有可信 raw/dual/text ownership；不能替原生宿主证明事件来源。
-        DesktopEvent::Key { .. } => return DesktopFailure::PolicyUnavailable,
+        DesktopEvent::Key {
+            key,
+            phase,
+            physical,
+            logical: _,
+            shift,
+            control,
+            alt,
+            left_alt,
+            right_alt,
+            alt_source,
+            super_key,
+            default_action,
+        } => {
+            let Some(port) = &protocol.input else {
+                return Err(DesktopFailure::PolicyUnavailable);
+            };
+            // 键名表与旧 InputRequest 路径相同；无法识别的键不进入锁存状态。
+            let code = parse_key_code(&key).ok_or(DesktopFailure::InvalidEvent)?;
+            let input = PolicyKeyInput {
+                raw_chord: Some(RawChord {
+                    code: code.clone(),
+                    modifiers: KeyModifiers {
+                        shift,
+                        control,
+                        alt,
+                        super_key,
+                    },
+                }),
+                dual: Some(VerifiedKeyCodes {
+                    code: code.clone(),
+                    legacy_code: code,
+                }),
+                phase,
+                physical_identity: std::num::NonZeroU64::new(physical),
+                alt_provenance: match alt_source {
+                    DesktopAltSource::Known => AltProvenance::Known {
+                        left: left_alt,
+                        right: right_alt,
+                    },
+                    DesktopAltSource::Unknown => AltProvenance::Unknown,
+                },
+                text_ownership: TextOwnership::TerminalKey,
+                default_action,
+            };
+            let intent =
+                crate::desktop_input_policy::gate_key(&mut protocol.keys, &port.profile, input);
+            match &intent {
+                GatedIntent::Quiet(outcome) => match outcome.result {
+                    KeyResult::Action(action) => return Ok(Some(action)),
+                    KeyResult::NoSend(_) => return Ok(None),
+                    KeyResult::TypedInputReject(_) => return Err(DesktopFailure::InvalidEvent),
+                    KeyResult::ClearScrollback | KeyResult::Bytes(_) => {}
+                },
+                GatedIntent::Send { .. } | GatedIntent::Encode { .. } => {}
+            }
+            SessionCommand::Key(intent)
+        }
     };
-    if handle
+    handle
         .commands
         .send(SessionCommand::Ordered(Box::new(command), lease))
-        .is_err()
-    {
-        DesktopFailure::IdentityMismatch
-    } else {
-        DesktopFailure::None
-    }
+        .map(|()| None)
+        .map_err(|_| DesktopFailure::IdentityMismatch)
 }
 
 async fn run_prepared_session(
@@ -1183,6 +1246,11 @@ async fn run_connected_loop(
                             Err(error) => {
                                 return (SessionEnd::failed(FailureKind::Other, format!("encode_input: {error:?}")), false);
                             }
+                        }
+                    }
+                    SessionCommand::Key(intent) => {
+                        if let Err(end) = native_input::apply_key(session_id, screen, transport, intent).await {
+                            return (end, false);
                         }
                     }
                     SessionCommand::Mouse(event) => {

@@ -182,7 +182,7 @@ pub(crate) struct Launch {
 
 #[derive(Default)]
 pub(crate) struct Preparations {
-    // 用户入口在输入/工作区汇合验收前关闭；受控入口使用同一生产实现。
+    // Default 为显式关闭；生产 supervisor 用 native()，仅桌面目标开启。
     native_enabled: bool,
     entries: HashMap<u32, Entry>,
     history: VecDeque<Ended>,
@@ -233,8 +233,7 @@ pub(crate) fn result(
 }
 
 impl Preparations {
-    /// 受控验证使用同一准备实现，不开放尚未汇合输入/工作区的用户入口。
-    #[cfg(test)]
+    /// 生产准备表：桌面目标开启 V2 准备/启动，移动目标保持关闭。
     pub(crate) fn native() -> Self {
         Self {
             native_enabled: connect::desktop_supported(),

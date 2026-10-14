@@ -289,17 +289,17 @@ fn ordered_receiver_rejects_mixed_mode_old_generation_and_duplicate_acks_without
     request.source.generation = 4;
     assert_eq!(
         super::route_ordered(&mut sessions, request.clone()),
-        DesktopFailure::StaleGeneration
+        Err(DesktopFailure::StaleGeneration)
     );
     assert!(receiver.try_recv().is_err());
     request.source.generation = 5;
     assert_eq!(
         super::route_ordered(&mut sessions, request.clone()),
-        DesktopFailure::None
+        Ok(None)
     );
     assert_eq!(
         super::route_ordered(&mut sessions, request.clone()),
-        DesktopFailure::Duplicate
+        Err(DesktopFailure::Duplicate)
     );
     let SessionCommand::Ordered(command, lease) = receiver.try_recv().expect("只有一份本代ACK")
     else {
@@ -312,7 +312,7 @@ fn ordered_receiver_rejects_mixed_mode_old_generation_and_duplicate_acks_without
     request.seq = 2;
     assert_eq!(
         super::route_ordered(&mut sessions, request),
-        DesktopFailure::MixedMode
+        Err(DesktopFailure::MixedMode)
     );
     assert!(receiver.try_recv().is_err());
 }

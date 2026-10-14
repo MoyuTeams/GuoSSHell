@@ -545,12 +545,13 @@ fn physical_lifecycle_latches_consumption_and_rejects_unassociated_phases() {
         run(&mut state, &p, &mut real, key(1, KeyCode::F(1))),
         quiet(KeyResult::Action(DesktopAction::NewTab))
     );
+    // 丢失 Up 后同物理键再次 Down：隐式 Up+Down，按新 chord 重新分类，槽位不增长。
     let mut duplicate = key(1, KeyCode::Character('a'));
     duplicate.default_action = Some(DesktopAction::Copy);
     let before = state.active;
     assert_eq!(
         run(&mut state, &p, &mut real, duplicate),
-        rejected(InputReject::DuplicateDown)
+        quiet(KeyResult::Action(DesktopAction::Copy))
     );
     assert_eq!(state.active, before);
     let mut repeat = key(1, KeyCode::Character('a'));

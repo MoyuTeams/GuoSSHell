@@ -2934,3 +2934,318 @@ async fn caret_projection_uses_the_rendered_overscan_frame_without_query_render(
     close.send_replace(true);
     task.await.expect("actor");
 }
+
+/// 有序通道按键：supervisor 侧门控 + 原 actor 执行，使用真实引擎与受控 transport。
+struct OrderedKeys {
+    root: crate::desktop_input_port::Registration,
+    sessions: std::collections::HashMap<u32, crate::session::SessionHandle>,
+    commands: tokio::sync::mpsc::UnboundedReceiver<crate::session::SessionCommand>,
+    seq: u64,
+    screen: Screen,
+    wire: Arc<Wire>,
+    transport: Transport,
+}
+
+impl OrderedKeys {
+    fn new(session_id: u32, profile: rshell_m0::rshell_core::ResolvedTerminalProfile) -> Self {
+        let root = registration_with_profile(session_id, profile);
+        let port = root.0.clone();
+        let mut protocol = desktop_runtime::Protocol::new(
+            port.source.source.clone(),
+            port.source.identity.clone(),
+        );
+        protocol.input = Some(port.clone());
+        let (commands_tx, commands) = unbounded_channel();
+        let (replies, _) = unbounded_channel();
+        let (close, _) = watch::channel(false);
+        let mut sessions = std::collections::HashMap::new();
+        sessions.insert(
+            session_id,
+            crate::session::SessionHandle {
+                generation: 1,
+                commands: commands_tx,
+                replies,
+                close,
+                protocol: Some(protocol),
+            },
+        );
+        let wire = Arc::new(Wire::default());
+        Self {
+            screen: Screen::new(
+                DefaultTerminalEngine::new(&port.profile, size()).expect("真实终端"),
+                size(),
+            ),
+            transport: Transport {
+                wire: wire.clone(),
+                output: None,
+                pause: false,
+            },
+            root,
+            sessions,
+            commands,
+            seq: 0,
+            wire,
+        }
+    }
+
+    fn send(
+        &mut self,
+        event: DesktopEvent,
+    ) -> Result<Option<DesktopAction>, crate::signals::desktop_session::DesktopFailure> {
+        self.seq += 1;
+        let port = &self.root.0;
+        crate::session::route_ordered(
+            &mut self.sessions,
+            crate::signals::desktop_session::DesktopOrdered {
+                version: crate::signals::desktop_session::VERSION,
+                source: port.source.source.clone(),
+                identity: port.source.identity.clone(),
+                seq: self.seq,
+                event,
+            },
+        )
+    }
+
+    /// 执行 actor 收到的下一条按键意图，返回本次写出的字节；没有排队命令时为 None。
+    async fn apply(&mut self) -> Option<Vec<u8>> {
+        let crate::session::SessionCommand::Ordered(command, _lease) =
+            self.commands.try_recv().ok()?
+        else {
+            panic!("有序命令必须持有预算");
+        };
+        let crate::session::SessionCommand::Key(intent) = *command else {
+            panic!("按键只产生 Key 命令");
+        };
+        let session_id = self.root.0.source.source.session_id;
+        super::apply_key(session_id, &mut self.screen, &mut self.transport, intent)
+            .await
+            .unwrap_or_else(|end| panic!("按键执行失败：{}", end.detail));
+        Some(std::mem::take(
+            &mut *self.wire.bytes.lock().expect("写出字节"),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ordered_key(
+    key: &str,
+    phase: DesktopKeyPhase,
+    physical: u64,
+    control: bool,
+    left_alt: bool,
+    right_alt: bool,
+    default_action: Option<DesktopAction>,
+) -> DesktopEvent {
+    DesktopEvent::Key {
+        key: key.into(),
+        phase,
+        physical,
+        logical: 0,
+        shift: false,
+        control,
+        alt: left_alt || right_alt,
+        left_alt,
+        right_alt,
+        alt_source: crate::signals::desktop_session::DesktopAltSource::Known,
+        super_key: false,
+        default_action,
+    }
+}
+
+fn plain(key: &str, phase: DesktopKeyPhase, physical: u64) -> DesktopEvent {
+    ordered_key(key, phase, physical, false, false, false, None)
+}
+
+fn bound_profile() -> rshell_m0::rshell_core::ResolvedTerminalProfile {
+    use rshell_m0::rshell_core::{
+        KeyBinding, KeyCode, KeyModifiers, TerminalOverrides, TerminalSettingsV1,
+    };
+    let mut profile = TerminalSettingsV1::default().resolve(&TerminalOverrides::default());
+    for (n, action) in [(1, "new_tab"), (2, "send:\x1b[3~"), (3, "clear_scrollback")] {
+        profile.key_bindings.push(KeyBinding {
+            code: KeyCode::F(n),
+            modifiers: KeyModifiers::default(),
+            action: action.into(),
+        });
+    }
+    profile
+}
+
+#[tokio::test]
+async fn ordered_key_reports_shell_actions_once_and_writes_send_sequences_in_actor() {
+    use crate::signals::desktop_session::DesktopFailure;
+    let mut keys = OrderedKeys::new(9101, bound_profile());
+    // 绑定动作经结果回报给壳，不进入 actor；Repeat 不重复触发，Up 只释放锁存。
+    assert_eq!(
+        keys.send(plain("f1", DesktopKeyPhase::Down, 11)),
+        Ok(Some(DesktopAction::NewTab))
+    );
+    assert_eq!(
+        keys.send(plain("f1", DesktopKeyPhase::Repeat, 11)),
+        Ok(None)
+    );
+    assert_eq!(keys.send(plain("f1", DesktopKeyPhase::Up, 11)), Ok(None));
+    assert!(keys.apply().await.is_none());
+    // 未被 profile 覆盖的默认候选同样回报；profile 绑定优先于候选。
+    assert_eq!(
+        keys.send(ordered_key(
+            "character:c",
+            DesktopKeyPhase::Down,
+            12,
+            true,
+            false,
+            false,
+            Some(DesktopAction::Copy)
+        )),
+        Ok(Some(DesktopAction::Copy))
+    );
+    assert_eq!(
+        keys.send(ordered_key(
+            "f1",
+            DesktopKeyPhase::Down,
+            13,
+            false,
+            false,
+            false,
+            Some(DesktopAction::Copy)
+        )),
+        Ok(Some(DesktopAction::NewTab))
+    );
+    // send: 序列在原 actor 内写出；Repeat 按策略重复发送。
+    assert_eq!(keys.send(plain("f2", DesktopKeyPhase::Down, 14)), Ok(None));
+    assert_eq!(keys.apply().await.as_deref(), Some(b"\x1b[3~".as_slice()));
+    assert_eq!(
+        keys.send(plain("f2", DesktopKeyPhase::Repeat, 14)),
+        Ok(None)
+    );
+    assert_eq!(keys.apply().await.as_deref(), Some(b"\x1b[3~".as_slice()));
+    assert_eq!(keys.send(plain("f2", DesktopKeyPhase::Up, 14)), Ok(None));
+    assert!(keys.apply().await.is_none());
+    // 键名表与旧路径相同；无法识别的键消费 seq 但不外发。
+    assert_eq!(
+        keys.send(plain("not_a_key", DesktopKeyPhase::Down, 15)),
+        Err(DesktopFailure::InvalidEvent)
+    );
+    assert!(keys.apply().await.is_none());
+}
+
+#[tokio::test]
+async fn ordered_key_left_and_right_alt_follow_profile_meta_and_kitty_release_is_encoded() {
+    let mut profile = bound_profile();
+    profile.left_alt_as_meta = true;
+    profile.right_alt_as_meta = false;
+    profile.enable_kitty_keyboard = true;
+    let mut keys = OrderedKeys::new(9102, profile);
+    for (left, right, expected) in [
+        (true, false, b"\x1bx".as_slice()),
+        (false, true, b"x".as_slice()),
+    ] {
+        let down = ordered_key(
+            "character:x",
+            DesktopKeyPhase::Down,
+            21,
+            false,
+            left,
+            right,
+            None,
+        );
+        assert_eq!(keys.send(down), Ok(None));
+        assert_eq!(keys.apply().await.as_deref(), Some(expected));
+        let up = ordered_key(
+            "character:x",
+            DesktopKeyPhase::Up,
+            21,
+            false,
+            left,
+            right,
+            None,
+        );
+        assert_eq!(keys.send(up), Ok(None));
+        assert_eq!(
+            keys.apply().await.as_deref(),
+            Some(b"".as_slice()),
+            "未协商 Kitty 时释放不外发"
+        );
+    }
+    // 远端协商 Kitty 事件类型后，Up 产生真实释放序列。
+    keys.screen.advance(b"\x1b[>3u").expect("真实 Kitty 协商");
+    let ctrl = |phase| ordered_key("character:a", phase, 22, true, false, false, None);
+    assert_eq!(keys.send(ctrl(DesktopKeyPhase::Down)), Ok(None));
+    assert_eq!(
+        keys.apply().await.as_deref(),
+        Some(b"\x1b[97;5u".as_slice())
+    );
+    assert_eq!(keys.send(ctrl(DesktopKeyPhase::Up)), Ok(None));
+    assert_eq!(
+        keys.apply().await.as_deref(),
+        Some(b"\x1b[97;5:3u".as_slice())
+    );
+}
+
+#[tokio::test]
+async fn ordered_key_lost_up_does_not_lock_the_key() {
+    let mut keys = OrderedKeys::new(9103, bound_profile());
+    // 焦点切走丢了 Up：同物理键再按仍按新 Down 处理，绑定动作也能再次触发。
+    for _ in 0..2 {
+        assert_eq!(
+            keys.send(plain("character:a", DesktopKeyPhase::Down, 31)),
+            Ok(None)
+        );
+        assert_eq!(keys.apply().await.as_deref(), Some(b"a".as_slice()));
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            keys.send(plain("f1", DesktopKeyPhase::Down, 32)),
+            Ok(Some(DesktopAction::NewTab))
+        );
+    }
+    assert_eq!(
+        keys.send(plain("f1", DesktopKeyPhase::Repeat, 32)),
+        Ok(None)
+    );
+    assert_eq!(keys.send(plain("f1", DesktopKeyPhase::Up, 32)), Ok(None));
+    assert_eq!(
+        keys.send(plain("character:a", DesktopKeyPhase::Up, 31)),
+        Ok(None)
+    );
+    assert_eq!(keys.apply().await.as_deref(), Some(b"".as_slice()));
+    assert!(keys.apply().await.is_none());
+}
+
+#[tokio::test]
+async fn ordered_key_clear_scrollback_runs_in_actor_and_resets_selection_and_window() {
+    use rshell_m0::rshell_session::TerminalEngine as _;
+    let mut keys = OrderedKeys::new(9104, bound_profile());
+    keys.screen
+        .advance("滚回\r\n".repeat(20).as_bytes())
+        .expect("真实输出");
+    let bounds = keys.screen.engine.viewport_bounds();
+    assert!(bounds.first_stable_row < bounds.bottom_top_stable_row);
+    keys.screen.selection = Some(super::SelectionRange {
+        start: super::CellPosition {
+            stable_row: bounds.first_stable_row,
+            column: 0,
+        },
+        end: super::CellPosition {
+            stable_row: bounds.first_stable_row,
+            column: 2,
+        },
+        rectangular: false,
+    });
+    keys.screen.window = super::Window::At {
+        top: bounds.first_stable_row,
+        rows: 8,
+    };
+    assert_eq!(keys.send(plain("f3", DesktopKeyPhase::Down, 41)), Ok(None));
+    assert_eq!(
+        keys.apply().await.as_deref(),
+        Some(b"".as_slice()),
+        "清屏不写远端"
+    );
+    let bounds = keys.screen.engine.viewport_bounds();
+    assert_eq!(bounds.first_stable_row, bounds.bottom_top_stable_row);
+    assert!(keys.screen.selection.is_none());
+    assert_eq!(keys.screen.window, super::Window::Bottom);
+    assert_eq!(keys.send(plain("f3", DesktopKeyPhase::Up, 41)), Ok(None));
+    assert!(keys.apply().await.is_none());
+}
