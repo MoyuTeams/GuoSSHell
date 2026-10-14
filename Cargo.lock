@@ -2155,7 +2155,7 @@ dependencies = [
 [[package]]
 name = "portable-pty-psmux"
 version = "0.9.6"
-source = "git+https://github.com/hugefiver/rsHell?rev=08d8df5ab975c75b5a9772a4e52fd79695ca9d11#08d8df5ab975c75b5a9772a4e52fd79695ca9d11"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=0ed54be086b2dc7aae2b4b2cc5126adad7ebb347#0ed54be086b2dc7aae2b4b2cc5126adad7ebb347"
 dependencies = [
  "anyhow",
  "downcast-rs",
@@ -2385,7 +2385,7 @@ dependencies = [
 [[package]]
 name = "rshell-core"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=08d8df5ab975c75b5a9772a4e52fd79695ca9d11#08d8df5ab975c75b5a9772a4e52fd79695ca9d11"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=0ed54be086b2dc7aae2b4b2cc5126adad7ebb347#0ed54be086b2dc7aae2b4b2cc5126adad7ebb347"
 dependencies = [
  "async-channel",
  "async-trait",
@@ -2419,7 +2419,7 @@ dependencies = [
 [[package]]
 name = "rshell-platform"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=08d8df5ab975c75b5a9772a4e52fd79695ca9d11#08d8df5ab975c75b5a9772a4e52fd79695ca9d11"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=0ed54be086b2dc7aae2b4b2cc5126adad7ebb347#0ed54be086b2dc7aae2b4b2cc5126adad7ebb347"
 dependencies = [
  "directories",
  "thiserror 2.0.20",
@@ -2429,7 +2429,7 @@ dependencies = [
 [[package]]
 name = "rshell-session"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=08d8df5ab975c75b5a9772a4e52fd79695ca9d11#08d8df5ab975c75b5a9772a4e52fd79695ca9d11"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=0ed54be086b2dc7aae2b4b2cc5126adad7ebb347#0ed54be086b2dc7aae2b4b2cc5126adad7ebb347"
 dependencies = [
  "alacritty_terminal",
  "async-channel",
@@ -2450,7 +2450,7 @@ dependencies = [
 [[package]]
 name = "rshell-storage"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=08d8df5ab975c75b5a9772a4e52fd79695ca9d11#08d8df5ab975c75b5a9772a4e52fd79695ca9d11"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=0ed54be086b2dc7aae2b4b2cc5126adad7ebb347#0ed54be086b2dc7aae2b4b2cc5126adad7ebb347"
 dependencies = [
  "async-trait",
  "keyring",

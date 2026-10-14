@@ -121,10 +121,7 @@ fn run_actor(
                         run_session_inner(
                             context,
                             request(source.source.session_id),
-                            Some(connect::Target {
-                                profile,
-                                saved: false,
-                            }),
+                            Some(connect::Target::ssh(profile, false)),
                             Some(settings),
                             Some(password),
                             commands,

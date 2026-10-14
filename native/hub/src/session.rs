@@ -922,7 +922,12 @@ async fn run_session_inner(
     let mut backlog = VecDeque::new();
     // 回答通道跨重连复用，提示编号也必须跨重连唯一，旧回答不能命中新提示。
     let mut prompts = PromptIds::default();
-    let frozen_target = if desktop_runtime::SOURCE.try_with(|_| ()).is_ok() {
+    // V2 会话与本地 shell 重连都沿用最初的目标；本地 shell 无法按请求字段重新解析。
+    let frozen_target = if desktop_runtime::SOURCE.try_with(|_| ()).is_ok()
+        || prepared_target
+            .as_ref()
+            .is_some_and(connect::Target::is_local)
+    {
         prepared_target.take()
     } else {
         None

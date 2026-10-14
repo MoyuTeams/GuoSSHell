@@ -944,15 +944,72 @@ fn forged_mobile_and_non_native_preparations_fail_before_any_resource_reservatio
         Err(Failure::UnsupportedVersion)
     ));
     request.version = VERSION;
-    for target in [
-        DesktopTargetKind::SystemOpenSsh,
-        DesktopTargetKind::LocalShell,
-    ] {
-        request.target = target;
-        assert!(matches!(
-            table.begin_on(request.clone(), Instant::now(), true),
-            Err(Failure::TransportUnavailable)
-        ));
-    }
+    request.target = DesktopTargetKind::SystemOpenSsh;
+    assert!(matches!(
+        table.begin_on(request.clone(), Instant::now(), true),
+        Err(Failure::TransportUnavailable)
+    ));
     assert_eq!(table.budget.usage(), Usage::default());
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn local(session: u32, request_id: u32) -> DesktopPrepare {
+    DesktopPrepare {
+        target: DesktopTargetKind::LocalShell,
+        host: String::new(),
+        port: 0,
+        username: String::new(),
+        ..prepare(session, 1, request_id)
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn local_shell_prepares_and_starts_with_empty_target_fields_and_no_password() {
+    let fixture = Fixture::new();
+    let mut table = Preparations::enabled_for_test();
+    let request = local(9, 30);
+    let (identity, lease, _) = table
+        .begin_on(request.clone(), Instant::now(), true)
+        .expect("本地 shell 准备预约");
+    let loaded = fixture.load(&request, identity.clone(), lease).await;
+    let (reply, binary) = table.complete(loaded, Instant::now()).expect("准备完成");
+    assert_eq!(reply.state, State::Prepared);
+    drop(binary);
+
+    let mut with_password = start(&request, &identity);
+    with_password.password = "本地不收密码".into();
+    assert_eq!(
+        table.start(&with_password, secret(), Instant::now()).err(),
+        Some(Failure::InvalidTarget),
+        "本地 shell 带密码即拒绝"
+    );
+    let launch = table
+        .start(
+            &start(&request, &identity),
+            SecretString::from(String::new()),
+            Instant::now(),
+        )
+        .expect("本地 shell Start");
+    assert!(launch.target.target.is_local());
+    assert_eq!(launch.target.target.describe(), "本地 shell");
+    assert!(launch.target.request.connection_id.is_empty());
+    assert!(launch.target.request.host.is_empty());
+    assert!(launch.target.request.username.is_empty());
+    assert!(launch.target.request.command.is_empty());
+    assert_eq!(launch.target.request.cols, 91);
+    drop(launch);
+
+    // 本地目标带主机字段：加载阶段即判为非法目标。
+    let mut invalid = local(10, 40);
+    invalid.host = "example.test".into();
+    let (identity, lease, _) = table
+        .begin_on(invalid.clone(), Instant::now(), true)
+        .expect("预约");
+    let loaded = fixture.load(&invalid, identity, lease).await;
+    let (reply, _) = table.complete(loaded, Instant::now()).expect("准备结束");
+    assert_eq!(reply.state, State::Failed);
+    assert_eq!(reply.failure, Failure::InvalidTarget);
+    drop(table);
+    fixture.close();
 }

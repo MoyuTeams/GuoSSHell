@@ -19,6 +19,9 @@ use rshell_m0::rshell_core::{
     KeyboardInteractivePrompt, ResolvedTerminalProfile, SecretUpdate, SessionFailure, TerminalSize,
     TransportKind,
 };
+/// 本地 shell 的启动描述：桌面目标为上游类型。
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub use rshell_m0::rshell_session::LocalLaunch;
 use rshell_m0::rshell_session::{
     AuthPlan, ExternalSigner, InteractionBroker, KnownHostsVerifier, NativeSshTransport,
     SessionTransport, TransportRequest, interaction_channel,
@@ -136,7 +139,49 @@ impl Channels<'_> {
 pub struct Target {
     pub profile: ConnectionProfile,
     pub saved: bool,
+    pub kind: TargetKind,
 }
+
+/// 目标的传输种类。
+#[derive(Clone)]
+pub enum TargetKind {
+    Ssh,
+    /// 本地 shell：不认证，每次连接（含重连）都按同一启动描述新起进程。
+    /// `None` 在连接时取平台默认 shell，工作目录为用户主目录。
+    Local(Option<LocalLaunch>),
+}
+
+impl Target {
+    pub fn ssh(profile: ConnectionProfile, saved: bool) -> Self {
+        Self {
+            profile,
+            saved,
+            kind: TargetKind::Ssh,
+        }
+    }
+
+    /// 本地 shell；`profile` 只是占位，主机、端口与用户名为空，不进入目录。
+    pub fn local(launch: Option<LocalLaunch>) -> Self {
+        let mut profile = ConnectionProfile::new(LOCAL_DESCRIPTION, "");
+        profile.port = 0;
+        Self {
+            profile,
+            saved: false,
+            kind: TargetKind::Local(launch),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self.kind, TargetKind::Local(_))
+    }
+}
+
+const LOCAL_DESCRIPTION: &str = "本地 shell";
+
+/// 移动目标不引用上游本地 PTY 类型：空枚举无法构造，本地目标只能取默认（随后被拒）。
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+#[derive(Clone)]
+pub enum LocalLaunch {}
 
 pub struct DesktopTarget {
     pub request: ConnectRequest,
@@ -203,6 +248,10 @@ fn validate_desktop_for<const DESKTOP: bool>(
         return Err((Error::InvalidProfileId, "profile_id"));
     }
     if !request.connection_id.is_empty() {
+        // 本地 shell 不在目录里，只能由空 connection_id 表示。
+        if request.target == DesktopTargetKind::LocalShell {
+            return Err((Error::InvalidField, "connection_id"));
+        }
         if uuid::Uuid::parse_str(&request.connection_id).is_err() {
             return Err((Error::InvalidConnectionId, "connection_id"));
         }
@@ -242,7 +291,8 @@ fn validate_desktop_for<const DESKTOP: bool>(
     Ok(())
 }
 
-/// 解析目录与终端配置，非 Native 分支只返回不可用，不构造传输层或启动程序。
+/// 解析目录与终端配置；System OpenSSH 只返回不可用。解析不构造传输层或启动程序，
+/// 本地 shell 在连接时才启动。
 pub async fn resolve_desktop(
     context: &Arc<AppContext>,
     request: DesktopConnectRequest,
@@ -367,25 +417,20 @@ async fn resolve_desktop_inner(
     let (settings, saved, font) = loaded.map_err(|(error, field)| (error, field.to_owned()))?;
 
     let expected = match request.target {
-        DesktopTargetKind::NativeSsh => TransportKind::NativeSsh,
-        DesktopTargetKind::SystemOpenSsh => TransportKind::SystemOpenSsh,
-        DesktopTargetKind::LocalShell => {
-            return Err((
-                DesktopConnectError::TransportUnavailable,
-                "transport not implemented".to_owned(),
-            ));
-        }
+        DesktopTargetKind::NativeSsh => Some(TransportKind::NativeSsh),
+        DesktopTargetKind::SystemOpenSsh => Some(TransportKind::SystemOpenSsh),
+        DesktopTargetKind::LocalShell => None,
     };
     if saved
         .as_ref()
-        .is_some_and(|profile| profile.transport != expected)
+        .is_some_and(|profile| Some(profile.transport) != expected)
     {
         return Err((
             DesktopConnectError::InvalidField,
             "target/connection_id".to_owned(),
         ));
     }
-    if request.target != DesktopTargetKind::NativeSsh {
+    if request.target == DesktopTargetKind::SystemOpenSsh {
         return Err((
             DesktopConnectError::TransportUnavailable,
             "transport not implemented".to_owned(),
@@ -406,10 +451,8 @@ async fn resolve_desktop_inner(
         dpi: request.dpi,
     };
     let target = match saved {
-        Some(profile) => Target {
-            profile,
-            saved: true,
-        },
+        _ if request.target == DesktopTargetKind::LocalShell => Target::local(None),
+        Some(profile) => Target::ssh(profile, true),
         None => resolve_target(context, &native).await.map_err(|_| {
             (
                 DesktopConnectError::InvalidField,
@@ -480,10 +523,13 @@ impl std::io::Write for MetadataBudget {
 impl Target {
     /// 状态与提示里显示的目标。
     pub fn describe(&self) -> String {
-        format!(
-            "{}@{}:{}",
-            self.profile.username, self.profile.host, self.profile.port
-        )
+        match self.kind {
+            TargetKind::Local(_) => LOCAL_DESCRIPTION.to_owned(),
+            TargetKind::Ssh => format!(
+                "{}@{}:{}",
+                self.profile.username, self.profile.host, self.profile.port
+            ),
+        }
     }
 }
 
@@ -503,10 +549,7 @@ pub async fn resolve_target(
         profile.authentication = AuthenticationKind::Password;
         profile.remote_command =
             Some(request.command.trim().to_owned()).filter(|command| !command.is_empty());
-        return Ok(Target {
-            profile,
-            saved: false,
-        });
+        return Ok(Target::ssh(profile, false));
     }
 
     let id = uuid::Uuid::parse_str(&request.connection_id)
@@ -528,10 +571,7 @@ pub async fn resolve_target(
             "目录目标不是 Native SSH".to_owned(),
         ));
     }
-    Ok(Target {
-        profile,
-        saved: true,
-    })
+    Ok(Target::ssh(profile, true))
 }
 
 /// 建立连接。`quick_password` 是快速连接随请求带来的密码（可能为空）。
@@ -545,8 +585,26 @@ pub async fn establish(
     prompts: &mut PromptIds,
 ) -> Result<Connected, Abort> {
     let described = target.describe();
-    let Target { profile, saved } = target;
+    let Target {
+        profile,
+        saved,
+        kind,
+    } = target;
     let transport_request = native_transport_request(terminal.size, terminal.terminal_type)?;
+    if let TargetKind::Local(launch) = kind {
+        // 本地 shell 不认证、不校验主机密钥；TERM 由传输层按请求设入子进程环境。
+        drop(quick_password);
+        let transport = connect_local(
+            launch,
+            session_id,
+            &profile,
+            &transport_request,
+            channels,
+            prompts,
+        )
+        .await?;
+        return Ok(Connected { transport, profile });
+    }
     // 外部签名器（OpenPGP 卡或安全密钥）与它要会话代办的事（问 PIN、等用户）。
     let mut external: Option<(Signer, UnboundedReceiver<SignerRequest>)> = None;
 
@@ -723,6 +781,70 @@ pub(crate) async fn handshake(
         return Err(error);
     }
     Ok(())
+}
+
+/// 启动本地 shell 并完成连接；未指定启动描述时取平台默认 shell。
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+async fn connect_local(
+    launch: Option<LocalLaunch>,
+    session_id: u32,
+    profile: &ConnectionProfile,
+    transport_request: &TransportRequest,
+    channels: Channels<'_>,
+    prompts: &mut PromptIds,
+) -> Result<Box<dyn SessionTransport>, Abort> {
+    let launch = match launch {
+        Some(launch) => launch,
+        None => spawn_blocking(default_local_launch)
+            .await
+            .map_err(|error| Abort::failed(FailureKind::Other, format!("shell task: {error}")))??,
+    };
+    let mut transport: Box<dyn SessionTransport> =
+        Box::new(rshell_m0::rshell_session::LocalPtyTransport::launch(launch));
+    handshake(
+        transport.as_mut(),
+        session_id,
+        profile,
+        transport_request,
+        channels,
+        prompts,
+        None,
+    )
+    .await?;
+    Ok(transport)
+}
+
+/// 移动目标不编译本地 PTY 传输（让 iOS 链接时剥离 PTY/进程符号）；桌面协议在校验时
+/// 已以 PlatformUnavailable 拒绝，这里只作兜底拒绝。
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+async fn connect_local(
+    launch: Option<LocalLaunch>,
+    _session_id: u32,
+    _profile: &ConnectionProfile,
+    _transport_request: &TransportRequest,
+    _channels: Channels<'_>,
+    _prompts: &mut PromptIds,
+) -> Result<Box<dyn SessionTransport>, Abort> {
+    match launch {
+        Some(never) => match never {},
+        None => Err(Abort::failed(
+            FailureKind::InvalidTarget,
+            "local shell unavailable".to_owned(),
+        )),
+    }
+}
+
+/// 平台默认 shell，工作目录为用户主目录（取不到时沿用当前目录）。
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn default_local_launch() -> Result<LocalLaunch, Abort> {
+    let shell = rshell_platform::default_local_shell()
+        .map_err(|_| Abort::failed(FailureKind::Other, "local shell not found".to_owned()))?;
+    Ok(LocalLaunch::Command {
+        program: shell.program,
+        args: shell.args,
+        cwd: std::env::home_dir(),
+        env: shell.env,
+    })
 }
 
 /// 旧会话维持上游默认 TERM；桌面会话由不可变的有效配置指定远端 PTY 的 TERM。

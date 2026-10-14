@@ -640,10 +640,7 @@ async fn native_wrong_password_rejects_before_pty_and_releases_real_transport() 
         connect::establish(
             &fixture.context,
             72,
-            connect::Target {
-                profile,
-                saved: false,
-            },
+            connect::Target::ssh(profile, false),
             SecretString::from("错误的虚构口令".to_owned()),
             RemoteTerminal {
                 size: size(),

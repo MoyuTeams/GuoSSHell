@@ -17,7 +17,6 @@ const MOBILE_UNAVAILABLE: &str = "移动端不支持桌面会话协议";
 const VERSION_UNAVAILABLE: &str = "不支持的桌面会话协议版本";
 const STORAGE_UNAVAILABLE: &str = "配置存储不可用";
 const SYSTEM_UNAVAILABLE: &str = "System OpenSSH 传输尚未实现";
-const LOCAL_UNAVAILABLE: &str = "本地 shell 传输尚未实现";
 
 /// 无请求字段可以提升能力；唯一真实入口取 Rust 的编译目标。
 pub async fn handle(
@@ -112,10 +111,11 @@ fn result(
                 unavailable_reason: SYSTEM_UNAVAILABLE.into(),
                 credentials: vec![],
             },
+            // 本地 shell 与 Native 同在桌面目标可用，不需要凭证。
             DesktopTransportCapability {
                 target: DesktopTargetKind::LocalShell,
-                backend_available: false,
-                unavailable_reason: LOCAL_UNAVAILABLE.into(),
+                backend_available: native_ready,
+                unavailable_reason: native_reason.into(),
                 credentials: vec![],
             },
         ],
@@ -129,7 +129,7 @@ mod tests {
     use rinf::DartSignal;
     use rshell_m0::rshell_storage::SqliteRepository;
 
-    use super::{LOCAL_UNAVAILABLE, SYSTEM_UNAVAILABLE, build_for, result};
+    use super::{SYSTEM_UNAVAILABLE, build_for, result};
     use crate::signals::{
         DESKTOP_CONNECT_VERSION, DesktopCapabilitiesQuery, DesktopCapabilitiesStatus,
         DesktopCredentialKind, DesktopTargetKind,
@@ -173,11 +173,16 @@ mod tests {
                 DesktopCredentialKind::KeyboardInteractive,
             ]
         );
-        for capability in &reply.transports[1..] {
-            assert!(!capability.backend_available);
-            assert!(!capability.unavailable_reason.is_empty());
-            assert!(capability.credentials.is_empty());
-        }
+        let system = &reply.transports[1];
+        assert_eq!(system.target, DesktopTargetKind::SystemOpenSsh);
+        assert!(!system.backend_available);
+        assert!(!system.unavailable_reason.is_empty());
+        assert!(system.credentials.is_empty());
+        let local = &reply.transports[2];
+        assert_eq!(local.target, DesktopTargetKind::LocalShell);
+        assert!(local.backend_available);
+        assert!(local.unavailable_reason.is_empty());
+        assert!(local.credentials.is_empty(), "本地 shell 不需要凭证");
         let mut settings = repository
             .load_configuration()
             .expect("原应用配置")
@@ -259,13 +264,16 @@ mod tests {
     fn unavailable_transports_keep_fixed_reasons_for_future_implementation() {
         let ready = result(1, DesktopCapabilitiesStatus::Ready, Some(1));
         let storage = result(2, DesktopCapabilitiesStatus::StorageUnavailable, None);
-        for index in [1, 2] {
-            assert_eq!(
-                ready.transports[index].unavailable_reason,
-                storage.transports[index].unavailable_reason
-            );
-        }
+        assert_eq!(
+            ready.transports[1].unavailable_reason,
+            storage.transports[1].unavailable_reason
+        );
         assert_eq!(ready.transports[1].unavailable_reason, SYSTEM_UNAVAILABLE);
-        assert_eq!(ready.transports[2].unavailable_reason, LOCAL_UNAVAILABLE);
+        // 本地 shell 与 Native 同条件可用，不可用时沿用同一原因。
+        assert_eq!(
+            storage.transports[2].unavailable_reason,
+            storage.transports[0].unavailable_reason
+        );
+        assert!(!storage.transports[2].backend_available);
     }
 }

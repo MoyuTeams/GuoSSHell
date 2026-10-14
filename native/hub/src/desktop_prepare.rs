@@ -182,7 +182,8 @@ pub(crate) struct Launch {
 
 #[derive(Default)]
 pub(crate) struct Preparations {
-    // Default 为显式关闭；生产 supervisor 用 native()，仅桌面目标开启。
+    // V2 准备/启动开关（Native SSH 与本地 shell）。Default 为显式关闭；
+    // 生产 supervisor 用 native()，仅桌面目标开启。
     native_enabled: bool,
     entries: HashMap<u32, Entry>,
     history: VecDeque<Ended>,
@@ -316,7 +317,7 @@ impl Preparations {
         if !desktop {
             return Err(Failure::PlatformUnavailable);
         }
-        if request.target != crate::signals::DesktopTargetKind::NativeSsh {
+        if request.target == crate::signals::DesktopTargetKind::SystemOpenSsh {
             return Err(Failure::TransportUnavailable);
         }
         if !self.native_enabled {
@@ -559,7 +560,9 @@ impl Preparations {
             return Err(Failure::Duplicate);
         }
         let target = &entry.ready.as_ref().ok_or(Failure::NotPrepared)?.0;
-        if target.target.saved && !password.expose_secret().is_empty() {
+        // 只有快速 Native SSH 随 Start 带密码；目录目标与本地 shell 带密码即拒绝。
+        if (target.target.saved || target.target.is_local()) && !password.expose_secret().is_empty()
+        {
             return Err(Failure::InvalidTarget);
         }
         geometry(request.geometry)?;

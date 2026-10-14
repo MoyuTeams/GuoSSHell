@@ -33,6 +33,9 @@ use crate::signals::{
 #[path = "session_native_tests.rs"]
 mod native;
 
+#[path = "session_local_tests.rs"]
+mod local;
+
 fn context(vault: Arc<dyn CredentialVault>) -> Arc<AppContext> {
     context_at(
         vault,
@@ -124,25 +127,58 @@ fn binding(index: u8, action: &str) -> KeyBinding {
 #[tokio::test]
 async fn desktop_targets_that_are_not_implemented_never_enter_the_transport() {
     let context = context(Arc::new(MemoryCredentialVault::new()));
-    for target in [
-        DesktopTargetKind::LocalShell,
-        DesktopTargetKind::SystemOpenSsh,
-    ] {
-        let mut request = desktop(target);
-        if target == DesktopTargetKind::SystemOpenSsh {
-            request.host = "example.test".into();
-            request.port = 22;
-            request.username = "user".into();
-        }
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            connect::resolve_desktop(&context, request),
-        )
-        .await
-        .expect("拒绝不等待网络或子进程");
+    let mut request = desktop(DesktopTargetKind::SystemOpenSsh);
+    request.host = "example.test".into();
+    request.port = 22;
+    request.username = "user".into();
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        connect::resolve_desktop(&context, request),
+    )
+    .await
+    .expect("拒绝不等待网络或子进程");
+    assert!(matches!(
+        result,
+        Err((DesktopConnectError::TransportUnavailable, _))
+    ));
+}
+
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn desktop_local_shell_resolves_without_catalog_secret_or_process() {
+    let context = context(Arc::new(MemoryCredentialVault::new()));
+    let prepared = tokio::time::timeout(
+        Duration::from_secs(2),
+        connect::resolve_desktop(&context, desktop(DesktopTargetKind::LocalShell)),
+    )
+    .await
+    .expect("解析不启动子进程")
+    .expect("本地 shell 目标");
+    assert!(prepared.target.is_local());
+    assert!(!prepared.target.saved);
+    assert_eq!(prepared.target.describe(), "本地 shell");
+    assert!(prepared.request.host.is_empty());
+    assert!(prepared.request.username.is_empty());
+    assert!(prepared.request.connection_id.is_empty());
+    assert!(prepared.quick_password.expose_secret().is_empty());
+
+    let mut saved = profile();
+    saved.username = "user".into();
+    let id = saved.id.0.to_string();
+    context
+        .credentials
+        .apply_catalog(CatalogMutation::Create(saved), SecretUpdate::Unchanged)
+        .expect("保存 Native 目录连接");
+    let mut with_id = desktop(DesktopTargetKind::LocalShell);
+    with_id.connection_id = id;
+    let mut with_password = desktop(DesktopTargetKind::LocalShell);
+    with_password.password = "本地不收密码".into();
+    let mut with_command = desktop(DesktopTargetKind::LocalShell);
+    with_command.command = "echo".into();
+    for request in [with_id, with_password, with_command] {
         assert!(matches!(
-            result,
-            Err((DesktopConnectError::TransportUnavailable, _))
+            connect::resolve_desktop(&context, request).await,
+            Err((DesktopConnectError::InvalidField, _))
         ));
     }
 }
@@ -477,10 +513,7 @@ async fn stale_acceptance_and_rejection_cannot_answer_a_reconnect_prompt() {
         let (replies_tx, mut replies) = unbounded_channel();
         let mut backlog = VecDeque::new();
         let mut prompts = PromptIds::default();
-        let target = || Target {
-            profile: profile(),
-            saved: false,
-        };
+        let target = || Target::ssh(profile(), false);
         assert!(replies_tx.send(reply(1, false)).is_ok());
         let first = connect::establish(
             &context,
