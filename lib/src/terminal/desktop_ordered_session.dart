@@ -677,8 +677,7 @@ DesktopAction? desktopDefaultAction(
       DesktopCommand.search => DesktopAction.search,
       DesktopCommand.settings => DesktopAction.settings,
       DesktopCommand.toggleSidebar => DesktopAction.toggleSidebar,
-      // Rust 没有对应动作：按键照常交给终端。
-      DesktopCommand.localTerminal => null,
+      DesktopCommand.localTerminal => DesktopAction.newLocalTerminal,
     };
   }
   // 与 TerminalZoom.handleKey 相同：Ctrl（不含 Alt）加 =/+/-/0。

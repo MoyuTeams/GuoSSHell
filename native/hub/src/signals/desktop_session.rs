@@ -160,6 +160,8 @@ pub enum DesktopAction {
     ZoomIn,
     ZoomOut,
     ZoomReset,
+    /// 仅作默认候选（Ctrl+Shift+L）；不属于 profile 可绑定的动作集合。
+    NewLocalTerminal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SignalPiece)]

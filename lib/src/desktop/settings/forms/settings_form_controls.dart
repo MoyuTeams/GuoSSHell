@@ -36,6 +36,7 @@ class SettingsTextField extends StatefulWidget {
     this.errors = const [],
     this.description,
     this.autofocus = false,
+    this.fieldKey,
   });
   final String label;
   final String value;
@@ -43,6 +44,9 @@ class SettingsTextField extends StatefulWidget {
   final List<DesktopSettingsFieldError> errors;
   final String? description;
   final bool autofocus;
+
+  /// 输入框自身的 key；外层 key 由表单用于定位错误。
+  final Key? fieldKey;
 
   @override
   State<SettingsTextField> createState() => SettingsTextFieldState();
@@ -82,6 +86,7 @@ class SettingsTextFieldState extends State<SettingsTextField> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         TextBox(
+          key: widget.fieldKey,
           controller: _text,
           focusNode: _focus,
           autofocus: widget.autofocus,

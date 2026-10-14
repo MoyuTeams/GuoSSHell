@@ -612,5 +612,7 @@ pub(super) fn action_number(action: DesktopAction) -> u32 {
         DesktopAction::ZoomIn => 14,
         DesktopAction::ZoomOut => 15,
         DesktopAction::ZoomReset => 16,
+        // 原生 ABI 不签发该候选；编号仅为穷尽匹配预留，宿主对未知编号中止。
+        DesktopAction::NewLocalTerminal => 17,
     }
 }

@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'bindings/bindings.dart';
 import 'catalog/connection_list_page.dart';
 import 'desktop/catalog/desktop_catalog_gateway.dart';
+import 'desktop/desktop_app_color_scheme.dart';
 import 'desktop/desktop_status.dart';
 import 'desktop/desktop_theme.dart';
 import 'desktop/windows_chrome.dart';
@@ -61,18 +62,27 @@ class GuoSSHellApp extends StatelessWidget {
           fluent.FluentLocalizations.delegate,
         ],
         supportedLocales: const [Locale('zh'), Locale('en')],
-        builder: (context, child) {
-          final media = MediaQuery.of(context);
-          return fluent.FluentTheme(
-            data: desktopFluentTheme(
-              fontFamily: fontFamily,
-              highContrast: media.highContrast,
-              reduceMotion:
-                  media.disableAnimations || media.accessibleNavigation,
-            ),
-            child: WindowsFrame(child: child!),
-          );
-        },
+        builder: (context, child) => ValueListenableBuilder(
+          valueListenable: DesktopAppColorScheme.instance,
+          builder: (context, scheme, _) {
+            final media = MediaQuery.of(context);
+            return fluent.FluentTheme(
+              data: desktopFluentTheme(
+                fontFamily: fontFamily,
+                highContrast: media.highContrast,
+                reduceMotion:
+                    media.disableAnimations || media.accessibleNavigation,
+                colorScheme: scheme,
+              ),
+              child: WindowsFrame(
+                background: media.highContrast
+                    ? desktopBackground
+                    : desktopCanvas(scheme),
+                child: child!,
+              ),
+            );
+          },
+        ),
         theme: desktopMaterialTheme(fontFamily: fontFamily),
         home: _StartupGate(
           desktop: true,
@@ -94,26 +104,30 @@ class GuoSSHellApp extends StatelessWidget {
           fluent.FluentLocalizations.delegate,
         ],
         supportedLocales: const [Locale('zh'), Locale('en')],
-        builder: (context, child) {
-          final media = MediaQuery.of(context);
-          return fluent.FluentTheme(
-            data: desktopFluentTheme(
-              fontFamily: fontFamily,
-              highContrast: media.highContrast,
-              reduceMotion:
-                  media.disableAnimations || media.accessibleNavigation,
-            ),
-            child: Theme(
-              data: desktopMaterialTheme(fontFamily: fontFamily),
-              child: ColoredBox(
-                color: media.highContrast
-                    ? DesktopColors.highContrastCanvas
-                    : desktopBackground,
-                child: child!,
+        builder: (context, child) => ValueListenableBuilder(
+          valueListenable: DesktopAppColorScheme.instance,
+          builder: (context, scheme, _) {
+            final media = MediaQuery.of(context);
+            return fluent.FluentTheme(
+              data: desktopFluentTheme(
+                fontFamily: fontFamily,
+                highContrast: media.highContrast,
+                reduceMotion:
+                    media.disableAnimations || media.accessibleNavigation,
+                colorScheme: scheme,
               ),
-            ),
-          );
-        },
+              child: Theme(
+                data: desktopMaterialTheme(fontFamily: fontFamily),
+                child: ColoredBox(
+                  color: media.highContrast
+                      ? DesktopColors.highContrastCanvas
+                      : desktopCanvas(scheme),
+                  child: child!,
+                ),
+              ),
+            );
+          },
+        ),
         home: _StartupGate(
           desktop: true,
           startup: startupOverride,
@@ -184,6 +198,10 @@ class _RustStartupPort implements StartupPort {
   void querySettings() {
     if (isWindowsDesktop) WindowsAppearanceQuery().sendSignalToRust();
     SettingsQuery().sendSignalToRust();
+    // 应用配色经设置 gateway 读取；之后任何设置结果都会刷新它。移动端不读取。
+    if (appTargetFor(defaultTargetPlatform) == AppTarget.desktop) {
+      DesktopAppColorScheme.instance.connect();
+    }
   }
 
   @override

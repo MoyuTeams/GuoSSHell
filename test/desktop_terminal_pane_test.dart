@@ -378,7 +378,7 @@ void main() {
     await h.close(tester);
   });
 
-  testWidgets('Rust 回报 new_tab/split 动作经工作区执行入口，壳不重复执行', (tester) async {
+  testWidgets('Rust 回报 new_tab/split/本地终端动作经工作区执行入口，壳不重复执行', (tester) async {
     final h = _PaneHarness();
     await h.mount(tester);
     h.reply = (request) {
@@ -390,7 +390,11 @@ void main() {
             )
           : null;
     };
-    for (final key in [LogicalKeyboardKey.keyT, LogicalKeyboardKey.keyD]) {
+    for (final key in [
+      LogicalKeyboardKey.keyT,
+      LogicalKeyboardKey.keyD,
+      LogicalKeyboardKey.keyL,
+    ]) {
       await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
       await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
       await tester.sendKeyEvent(key);
@@ -398,7 +402,11 @@ void main() {
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
     }
     await tester.pumpAndSettle();
-    expect(h.executed, [DesktopAction.newTab, DesktopAction.splitRight]);
+    expect(h.executed, [
+      DesktopAction.newTab,
+      DesktopAction.splitRight,
+      DesktopAction.newLocalTerminal,
+    ]);
     final down = h
         .where<DesktopEventKey>()
         .map((request) => request.event as DesktopEventKey)

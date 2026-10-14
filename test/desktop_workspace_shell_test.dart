@@ -22,6 +22,7 @@ import 'desktop_catalog_flow_test.dart' show FakeCatalog, saved, emptyKeyState;
 
 class _Options implements DesktopTargetOptionsGateway {
   bool available = true;
+  bool system = false;
   Completer<DesktopTargetOptions>? pending;
   int queries = 0;
   DesktopTargetOptions get value => DesktopTargetOptions(
@@ -30,6 +31,7 @@ class _Options implements DesktopTargetOptionsGateway {
       DesktopProfileOption('b', '配置 B'),
     ],
     nativeAvailable: available,
+    systemAvailable: system,
     nativeReason: 'Native 当前不可用',
     systemReason: 'System 固定不可用原因',
     localReason: 'Local 固定不可用原因',
@@ -559,6 +561,63 @@ void main() {
     await tester.pumpAndSettle();
     expect(quick.controller.focusNode.hasFocus, isTrue);
     expect(quick.key.currentContext, same(quickElement));
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('快速连接可选 System OpenSSH：不可用时禁用，选中后不要求密码', (tester) async {
+    final h = _Harness();
+    await h.mount(tester);
+    final transport = find.byKey(const Key('catalog-transport'));
+    await tester.tap(iconButton('快速连接 · Ctrl+Shift+T'));
+    await tester.pumpAndSettle();
+    // 快速连接只保留「连接方式」一个传输控件。
+    expect(find.byKey(const ValueKey('workspace-transport')), findsNothing);
+    var combo = tester.widget<f.ComboBox<DesktopTransport>>(transport);
+    expect(combo.value, DesktopTransport.nativeSsh);
+    expect(combo.items![1].enabled, isFalse);
+    expect(find.text('System OpenSSH 不可用：System 固定不可用原因'), findsOneWidget);
+    expect(find.byKey(const ValueKey('catalog-field-密码')), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+
+    h.options.system = true;
+    await tester.tap(iconButton('快速连接 · Ctrl+Shift+T'));
+    await tester.pumpAndSettle();
+    combo = tester.widget<f.ComboBox<DesktopTransport>>(transport);
+    expect(combo.items![1].enabled, isTrue);
+    tester
+        .widget<f.ComboBox<String>>(
+          find.byKey(const ValueKey('workspace-profile')),
+        )
+        .onChanged!('b');
+    await tester.enterText(
+      find.byKey(const ValueKey('catalog-field-密码')),
+      'fixture-only-secret',
+    );
+    combo.onChanged!(DesktopTransport.systemOpenSsh);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('catalog-field-密码')), findsNothing);
+    expect(find.textContaining('由系统 ssh 处理认证'), findsOneWidget);
+    await tester.enterText(
+      find.byKey(const ValueKey('catalog-field-主机')),
+      'fixture.test',
+    );
+    await tester.enterText(
+      find.byKey(const ValueKey('catalog-field-用户名')),
+      'fixture',
+    );
+    await tester.ensureVisible(find.widgetWithText(f.FilledButton, '连接'));
+    await tester.tap(find.widgetWithText(f.FilledButton, '连接'));
+    await tester.pumpAndSettle();
+    final target = h.panes.last.controller.target;
+    expect(target.isSystemSsh, isTrue);
+    expect(target.connectionId, isEmpty);
+    expect(
+      [target.host, target.port, target.username],
+      ['fixture.test', 22, 'fixture'],
+    );
+    expect(target.password, isEmpty, reason: '先输入的密码不随 System 目标发出');
+    expect(target.profileId, 'b');
     await tester.pumpWidget(const SizedBox());
   });
 

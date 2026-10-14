@@ -245,24 +245,28 @@ class _WindowsShellState extends State<WindowsShell> {
   }
 
   /// 本地终端用应用默认 profile；先查能力，不可用时禁用入口并提示原因。
-  Future<void> _openLocal() async {
-    if (_dialogOpen || _localQuerying || _localUnavailable != null) return;
+  /// 返回是否打开了标签。
+  Future<bool> _openLocal() async {
+    if (_dialogOpen || _localQuerying || _localUnavailable != null) {
+      return false;
+    }
     _localQuerying = true;
     try {
       final options = await _targetOptions.query();
-      if (!mounted) return;
+      if (!mounted) return false;
       if (!options.localAvailable) {
         setState(() => _localUnavailable = _error = options.localReason);
-        return;
+        return false;
       }
     } catch (_) {
       if (mounted) setState(() => _error = '无法读取本地终端能力，请重试。');
-      return;
+      return false;
     } finally {
       _localQuerying = false;
     }
     _workspace.openTab(const SessionTarget.local());
     _focusActive();
+    return true;
   }
 
   Future<void> _openWithProfile(ConnectionSummary item) async {
@@ -362,6 +366,7 @@ class _WindowsShellState extends State<WindowsShell> {
                   quick: quick,
                   keyActions: _keyActions,
                   keySyncState: _keySyncState,
+                  targetOptions: options,
                 ),
               ),
             ],
@@ -1203,6 +1208,10 @@ class _WindowsShellState extends State<WindowsShell> {
         if (nativeAction) await WidgetsBinding.instance.endOfFrame;
         if (!mounted || !_originAttachedAndActive(origin)) {
           return DesktopActionOutcome.staleOrigin;
+        }
+      case DesktopAction.newLocalTerminal:
+        if (!_localEntry || !await _openLocal()) {
+          return DesktopActionOutcome.unavailable;
         }
     }
     return DesktopActionOutcome.executed;

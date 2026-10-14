@@ -367,7 +367,7 @@ fn six_core_actions_are_exclusive_and_repeat_only_send() {
     }
 }
 
-const ACTIONS: [DesktopAction; 16] = [
+const ACTIONS: [DesktopAction; 17] = [
     DesktopAction::NewTab,
     DesktopAction::SplitRight,
     DesktopAction::SplitDown,
@@ -384,6 +384,7 @@ const ACTIONS: [DesktopAction; 16] = [
     DesktopAction::ZoomIn,
     DesktopAction::ZoomOut,
     DesktopAction::ZoomReset,
+    DesktopAction::NewLocalTerminal,
 ];
 
 #[test]
@@ -428,6 +429,75 @@ fn every_default_candidate_is_once_only_and_overridden_by_merged_bindings() {
     }
     assert!(old.inputs.is_empty());
     assert_eq!(old.clears, 0, "返回请求不偷偷执行 clear");
+}
+
+#[test]
+fn new_local_terminal_is_default_candidate_only_and_not_profile_bindable() {
+    let ctrl_shift = KeyModifiers {
+        shift: true,
+        control: true,
+        ..KeyModifiers::default()
+    };
+    let candidate = |identity| {
+        let mut input = key(identity, KeyCode::Character('L'));
+        chord(&mut input, ctrl_shift);
+        input.dual = None;
+        input.default_action = Some(DesktopAction::NewLocalTerminal);
+        input
+    };
+    // 未被绑定覆盖时候选回报一次；Repeat/Up 只释放锁存。
+    let p = profile();
+    let mut old = OldEngine::new(&p);
+    let mut state = InputPolicyState::default();
+    let mut input = candidate(1);
+    assert_eq!(
+        run(&mut state, &p, &mut old, input.clone()),
+        quiet(KeyResult::Action(DesktopAction::NewLocalTerminal))
+    );
+    input.phase = DesktopKeyPhase::Repeat;
+    assert_eq!(
+        run(&mut state, &p, &mut old, input.clone()),
+        no_send(NoSendReason::ConsumedKey)
+    );
+    input.phase = DesktopKeyPhase::Up;
+    assert_eq!(
+        run(&mut state, &p, &mut old, input),
+        no_send(NoSendReason::ConsumedKey)
+    );
+    assert_eq!(state, InputPolicyState::default());
+    // profile 绑定优先于候选。
+    let mut bound = profile();
+    bound
+        .key_bindings
+        .push(binding(KeyCode::Character('L'), ctrl_shift, "send:\x7f"));
+    assert_eq!(
+        run(
+            &mut InputPolicyState::default(),
+            &bound,
+            &mut old,
+            candidate(2)
+        )
+        .result,
+        KeyResult::Bytes(vec![0x7f])
+    );
+    // 不在 profile 动作集合内：绑定该名称按无效动作拒绝，不回退成候选。
+    assert!(rshell_m0::rshell_core::parse_terminal_key_action("new_local_terminal").is_err());
+    let mut invalid = profile();
+    invalid.key_bindings.push(binding(
+        KeyCode::Character('L'),
+        ctrl_shift,
+        "new_local_terminal",
+    ));
+    assert_eq!(
+        run(
+            &mut InputPolicyState::default(),
+            &invalid,
+            &mut old,
+            candidate(3)
+        ),
+        rejected(InputReject::InvalidAction)
+    );
+    assert!(old.inputs.is_empty());
 }
 
 #[test]

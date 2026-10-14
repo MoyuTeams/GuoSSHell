@@ -126,6 +126,7 @@ class _ProfileFormState extends State<DesktopProfileForm> {
     bool enabled = true,
   }) => SettingsTextField(
     key: _fields.putIfAbsent(field, GlobalKey<SettingsTextFieldState>.new),
+    fieldKey: ValueKey('field-$field'),
     label: label,
     value: value,
     description: description,

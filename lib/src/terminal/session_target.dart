@@ -41,6 +41,7 @@ class SessionTarget {
        password = '',
        command = '';
 
+  /// [systemSsh] 时由系统 ssh 在终端里自行认证，[password] 须为空。
   const SessionTarget.quick({
     required this.host,
     required this.port,
@@ -48,7 +49,9 @@ class SessionTarget {
     this.password = '',
     this.command = '',
     this.profileId = '',
-  }) : kind = SessionTargetKind.ssh,
+    bool systemSsh = false,
+  }) : assert(!systemSsh || password == ''),
+       kind = systemSsh ? SessionTargetKind.systemSsh : SessionTargetKind.ssh,
        connectionId = '',
        _name = '';
 

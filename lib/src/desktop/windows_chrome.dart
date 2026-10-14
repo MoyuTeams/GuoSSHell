@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../bindings/bindings.dart';
+import 'desktop_app_color_scheme.dart';
 import 'desktop_theme.dart';
 import 'settings/resources/desktop_resources_contracts.dart';
 
@@ -38,12 +39,19 @@ const desktopFontFallback = [
 ];
 
 /// Segoe UI 不包含中文字形，显式选择 Windows 的无衬线中文界面字体。
+/// [colorScheme] 为应用配色：`default` 保持设计 token，其余由终端配色派生，
+/// 高对比度时忽略。窗口画布见 [desktopCanvas]。
 f.FluentThemeData desktopFluentTheme({
   String? fontFamily,
   bool highContrast = false,
   bool reduceMotion = false,
+  String colorScheme = 'default',
 }) {
-  final ramp = f.Typography.fromBrightness(brightness: Brightness.dark);
+  final palette = highContrast ? null : desktopAppPalette(colorScheme);
+  final ramp = f.Typography.fromBrightness(
+    brightness: palette?.brightness ?? Brightness.dark,
+    color: palette?.text,
+  );
   TextStyle? cjk(TextStyle? style) =>
       style?.copyWith(fontFamilyFallback: desktopFontFallback);
   final accessibility = desktopTheme(
@@ -52,18 +60,36 @@ f.FluentThemeData desktopFluentTheme({
     fontFamily: fontFamily ?? DesktopType.family,
   );
   return f.FluentThemeData(
-    brightness: Brightness.dark,
-    accentColor: highContrast ? accessibility.accentColor : f.Colors.blue,
+    brightness: palette?.brightness ?? Brightness.dark,
+    accentColor: highContrast
+        ? accessibility.accentColor
+        : palette == null
+        ? f.Colors.blue
+        : f.AccentColor.swatch({
+            for (final shade in [
+              'darkest',
+              'darker',
+              'dark',
+              'normal',
+              'light',
+              'lighter',
+              'lightest',
+            ])
+              shade: palette.accent,
+          }),
     resources: highContrast ? accessibility.resources : null,
     focusTheme: highContrast
         ? accessibility.focusTheme
         : f.FocusThemeData(
-            primaryBorder: const BorderSide(
-              color: desktopAccent,
+            primaryBorder: BorderSide(
+              color: palette?.accent ?? desktopAccent,
               width: DesktopMetrics.focus,
             ),
-            secondaryBorder: const BorderSide(color: desktopBackground),
+            secondaryBorder: BorderSide(
+              color: palette?.canvas ?? desktopBackground,
+            ),
           ),
+    micaBackgroundColor: palette?.canvas,
     fasterAnimationDuration: accessibility.fasterAnimationDuration,
     fastAnimationDuration: accessibility.fastAnimationDuration,
     mediumAnimationDuration: accessibility.mediumAnimationDuration,
@@ -81,9 +107,13 @@ f.FluentThemeData desktopFluentTheme({
     ),
     scaffoldBackgroundColor: highContrast
         ? DesktopColors.highContrastCanvas
-        : null,
+        : palette?.surface,
   );
 }
+
+/// 窗口画布：应用配色为 `default` 或高对比度时保持 [desktopBackground]。
+Color desktopCanvas(String colorScheme) =>
+    desktopAppPalette(colorScheme)?.canvas ?? desktopBackground;
 
 /// 原生窗口操作集中在 Windows 入口，其他平台不初始化桌面插件。
 class WindowsDesktopWindow {
@@ -226,8 +256,15 @@ class WindowsAppearance extends ChangeNotifier {
 
 /// 包在 Navigator 外面，设置页及认证对话框打开时也保留自绘窗口控件。
 class WindowsFrame extends StatefulWidget {
-  const WindowsFrame({super.key, required this.child});
+  const WindowsFrame({
+    super.key,
+    required this.child,
+    this.background = desktopBackground,
+  });
   final Widget child;
+
+  /// 窗口画布色，随应用配色变化；透明度仍由外观设置控制。
+  final Color background;
 
   @override
   State<WindowsFrame> createState() => _WindowsFrameState();
@@ -278,8 +315,12 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
             appearance.acrylicEnabled &&
             appearance.materialAvailable &&
             !MediaQuery.highContrastOf(context);
+        // 浅色画布（如日晒浅色）上标题与窗口按钮改用深色。
+        final brightness = ThemeData.estimateBrightnessForColor(
+          widget.background,
+        );
         return ColoredBox(
-          color: desktopBackground.withValues(
+          color: widget.background.withValues(
             alpha: transparent ? appearance.opacity : 1,
           ),
           child: Column(
@@ -302,11 +343,14 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
                                 excludeFromSemantics: true,
                               ),
                               const SizedBox(width: 12),
-                              const Text(
+                              Text(
                                 'GuoSSHell',
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w600,
+                                  color: brightness == Brightness.light
+                                      ? Colors.black87
+                                      : null,
                                 ),
                               ),
                               const SizedBox(width: 16),
@@ -329,7 +373,7 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
                       '最小化',
                       WindowCaptionButton.minimize(
                         onPressed: windowManager.minimize,
-                        brightness: Brightness.dark,
+                        brightness: brightness,
                       ),
                     ),
                     _caption(
@@ -337,18 +381,18 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
                       _maximized
                           ? WindowCaptionButton.unmaximize(
                               onPressed: windowManager.unmaximize,
-                              brightness: Brightness.dark,
+                              brightness: brightness,
                             )
                           : WindowCaptionButton.maximize(
                               onPressed: windowManager.maximize,
-                              brightness: Brightness.dark,
+                              brightness: brightness,
                             ),
                     ),
                     _caption(
                       '关闭窗口',
                       WindowCaptionButton.close(
                         onPressed: windowManager.close,
-                        brightness: Brightness.dark,
+                        brightness: brightness,
                       ),
                     ),
                   ],

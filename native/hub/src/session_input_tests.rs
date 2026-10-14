@@ -3130,6 +3130,33 @@ async fn ordered_key_reports_shell_actions_once_and_writes_send_sequences_in_act
 }
 
 #[tokio::test]
+async fn ordered_key_reports_new_local_terminal_candidate_once_without_actor_input() {
+    let mut keys = OrderedKeys::new(9105, bound_profile());
+    let chord = |phase| DesktopEvent::Key {
+        key: "character:l".into(),
+        phase,
+        physical: 41,
+        logical: 0,
+        shift: true,
+        control: true,
+        alt: false,
+        left_alt: false,
+        right_alt: false,
+        alt_source: crate::signals::desktop_session::DesktopAltSource::Known,
+        super_key: false,
+        default_action: (phase == DesktopKeyPhase::Down).then_some(DesktopAction::NewLocalTerminal),
+    };
+    // 终端持焦时 Ctrl+Shift+L 经结果回报给壳一次，不写入终端。
+    assert_eq!(
+        keys.send(chord(DesktopKeyPhase::Down)),
+        Ok(Some(DesktopAction::NewLocalTerminal))
+    );
+    assert_eq!(keys.send(chord(DesktopKeyPhase::Repeat)), Ok(None));
+    assert_eq!(keys.send(chord(DesktopKeyPhase::Up)), Ok(None));
+    assert!(keys.apply().await.is_none());
+}
+
+#[tokio::test]
 async fn ordered_key_left_and_right_alt_follow_profile_meta_and_kitty_release_is_encoded() {
     let mut profile = bound_profile();
     profile.left_alt_as_meta = true;

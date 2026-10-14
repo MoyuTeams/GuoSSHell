@@ -143,6 +143,7 @@ SessionTarget desktopTargetWithProfile(
         password: target.password,
         command: target.command,
         profileId: profileId,
+        systemSsh: target.isSystemSsh,
       );
 
 class DesktopProfilePicker extends StatelessWidget {
@@ -172,24 +173,27 @@ class DesktopProfilePicker extends StatelessWidget {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
-      DropDownButton(
-        key: const ValueKey('workspace-transport'),
-        title: Text(systemSsh ? '传输：System OpenSSH' : '传输：Native SSH'),
-        items: [
-          MenuFlyoutItem(
-            text: Text(systemSsh ? 'Native SSH' : 'Native SSH（当前传输）'),
-            onPressed: null,
-          ),
-          MenuFlyoutItem(
-            text: Text(
-              systemSsh ? 'System OpenSSH（当前传输）' : 'System OpenSSH：$_system',
+      // 目录连接的传输已定，只读展示；快速连接由编辑器「连接方式」选择，不重复展示。
+      if (saved) ...[
+        DropDownButton(
+          key: const ValueKey('workspace-transport'),
+          title: Text(systemSsh ? '传输：System OpenSSH' : '传输：Native SSH'),
+          items: [
+            MenuFlyoutItem(
+              text: Text(systemSsh ? 'Native SSH' : 'Native SSH（当前传输）'),
+              onPressed: null,
             ),
-            onPressed: null,
-          ),
-          MenuFlyoutItem(text: Text('本地 shell：$_local'), onPressed: null),
-        ],
-      ),
-      const SizedBox(height: DesktopSpacing.md),
+            MenuFlyoutItem(
+              text: Text(
+                systemSsh ? 'System OpenSSH（当前传输）' : 'System OpenSSH：$_system',
+              ),
+              onPressed: null,
+            ),
+            MenuFlyoutItem(text: Text('本地 shell：$_local'), onPressed: null),
+          ],
+        ),
+        const SizedBox(height: DesktopSpacing.md),
+      ],
       const Text('终端 profile（本次会话）'),
       const SizedBox(height: DesktopSpacing.sm),
       ComboBox<String>(

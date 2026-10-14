@@ -240,7 +240,7 @@ void main() {
     );
   });
 
-  test('只解析固定退出格式；Ctrl/Cmd+Shift+L 映射本地终端且不交 Rust 动作', () {
+  test('只解析固定退出格式；Ctrl/Cmd+Shift+L 映射本地终端并作为 Rust 默认候选', () {
     expect(localShellExitCode('exit code=Some(0) success=true'), 0);
     expect(localShellExitCode('exit code=Some(3) success=false'), 3);
     expect(localShellExitCode('exit code=None success=false'), isNull);
@@ -271,8 +271,50 @@ void main() {
         alt: false,
         meta: false,
       ),
-      isNull,
+      DesktopAction.newLocalTerminal,
     );
+  });
+
+  _widgets('终端持焦时 Rust 回报的新建本地终端动作经壳打开本地标签', (tester) async {
+    final options = _Options();
+    final contexts = <WorkspacePane, BuildContext>{};
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    final catalog = FakeCatalog();
+    addTearDown(catalog.close);
+    await tester.pumpWidget(
+      _host(
+        WindowsShell(
+          gateway: catalog,
+          targetOptions: options,
+          paneBuilder: (pane) => Builder(
+            builder: (context) {
+              contexts[pane] = context;
+              return Focus(
+                focusNode: pane.controller.focusNode,
+                child: Text('pane-${pane.controller.target.title}'),
+              );
+            },
+          ),
+        ),
+      ),
+    );
+    catalog.catalog.add(const CatalogState(query: '', connections: []));
+    catalog.keys.add(emptyKeyState);
+    await tester.pumpAndSettle();
+    await tester.tap(_welcomeLocal);
+    await tester.pumpAndSettle();
+    final origin = contexts.keys.single;
+    expect(origin.controller.focusNode.hasFocus, isTrue);
+    final outcome = DesktopWorkspaceScope.of(contexts[origin]!)
+        .execute(DesktopAction.newLocalTerminal, origin: origin.controller);
+    await tester.pumpAndSettle();
+    expect(await outcome, DesktopActionOutcome.executed);
+    expect(contexts, hasLength(2));
+    expect(contexts.keys.last.controller.target.isLocal, isTrue);
+    expect(options.queries, 2);
   });
 
   _widgets('桌面侧栏、欢迎页与快捷键打开本地终端标签', (tester) async {

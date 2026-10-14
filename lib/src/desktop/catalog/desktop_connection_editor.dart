@@ -29,7 +29,11 @@ class DesktopConnectionEditor extends StatefulWidget {
     this.quick = false,
     this.keyActions,
     this.keySyncState,
+    this.targetOptions,
   });
+
+  /// 快速连接由调用方先行查询的传输能力；目录编辑自行查询，不使用此项。
+  final DesktopTargetOptions? targetOptions;
 
   @override
   State<DesktopConnectionEditor> createState() =>
@@ -58,8 +62,10 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
       widget.existing?.transport ?? DesktopTransport.nativeSsh;
 
   /// 系统 ssh 是否可用；null 为尚未查询到。
-  bool? _systemAvailable;
-  String _systemReason = '';
+  late bool? _systemAvailable = widget.quick
+      ? widget.targetOptions?.systemAvailable
+      : null;
+  late String _systemReason = widget.targetOptions?.systemReason ?? '';
 
   bool get _systemSsh => _transport == DesktopTransport.systemOpenSsh;
 
@@ -200,8 +206,10 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
           host: _host.text.trim(),
           port: _portValue,
           username: _username.text.trim(),
-          password: _password.text,
+          // System OpenSSH 由系统 ssh 在终端里询问密码，不携带任何秘密。
+          password: _systemSsh ? '' : _password.text,
           command: _command.text.trim(),
+          systemSsh: _systemSsh,
         ),
       );
       return;
@@ -336,39 +344,37 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
         const SizedBox(height: DesktopSpacing.md),
         _field(_username, '用户名'),
         const SizedBox(height: DesktopSpacing.lg),
-        if (!widget.quick) ...[
-          Text('连接方式', style: FluentTheme.of(context).typography.body),
-          const SizedBox(height: DesktopSpacing.sm),
-          ComboBox<DesktopTransport>(
-            key: const Key('catalog-transport'),
-            value: _transport,
-            items: [
-              const ComboBoxItem(
-                value: DesktopTransport.nativeSsh,
-                child: Text('Native SSH'),
-              ),
-              ComboBoxItem(
-                value: DesktopTransport.systemOpenSsh,
-                // 已是 System 的连接即使暂时找不到 ssh 也保留原值。
-                enabled: _systemAvailable == true || _systemSsh,
-                child: const Text('System OpenSSH'),
-              ),
-            ],
-            onChanged: _busy
-                ? null
-                : (value) {
-                    if (value != null) setState(() => _transport = value);
-                  },
-          ),
-          if (_systemAvailable == false) ...[
-            const SizedBox(height: DesktopSpacing.sm),
-            Text(
-              'System OpenSSH 不可用：$_systemReason',
-              style: FluentTheme.of(context).typography.caption,
+        Text('连接方式', style: FluentTheme.of(context).typography.body),
+        const SizedBox(height: DesktopSpacing.sm),
+        ComboBox<DesktopTransport>(
+          key: const Key('catalog-transport'),
+          value: _transport,
+          items: [
+            const ComboBoxItem(
+              value: DesktopTransport.nativeSsh,
+              child: Text('Native SSH'),
+            ),
+            ComboBoxItem(
+              value: DesktopTransport.systemOpenSsh,
+              // 已是 System 的连接即使暂时找不到 ssh 也保留原值。
+              enabled: _systemAvailable == true || _systemSsh,
+              child: const Text('System OpenSSH'),
             ),
           ],
-          const SizedBox(height: DesktopSpacing.lg),
+          onChanged: _busy
+              ? null
+              : (value) {
+                  if (value != null) setState(() => _transport = value);
+                },
+        ),
+        if (_systemAvailable == false) ...[
+          const SizedBox(height: DesktopSpacing.sm),
+          Text(
+            'System OpenSSH 不可用：$_systemReason',
+            style: FluentTheme.of(context).typography.caption,
+          ),
         ],
+        const SizedBox(height: DesktopSpacing.lg),
         if (!widget.quick && !_systemSsh) ...[
           Text('认证方式', style: FluentTheme.of(context).typography.body),
           const SizedBox(height: DesktopSpacing.sm),
@@ -391,16 +397,21 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
           ),
           const SizedBox(height: DesktopSpacing.lg),
         ],
-        if (widget.quick) ...[
-          _field(_password, '密码', hint: '可留空，连接时再输入', secret: true),
-          const SizedBox(height: DesktopSpacing.md),
-        ] else if (_systemSsh) ...[
+        if (_systemSsh) ...[
           Text(
             '由系统 ssh 处理认证：~/.ssh/config、agent 与 known_hosts 照常生效，'
             '主机密钥确认与密码在终端里输入。',
             style: FluentTheme.of(context).typography.body,
           ),
           const SizedBox(height: DesktopSpacing.md),
+        ],
+        // 快速连接的 System 目标只用 ssh 配置与 agent，不另设私钥路径。
+        if (widget.quick) ...[
+          if (!_systemSsh) ...[
+            _field(_password, '密码', hint: '可留空，连接时再输入', secret: true),
+            const SizedBox(height: DesktopSpacing.md),
+          ],
+        ] else if (_systemSsh) ...[
           Text('私钥文件（可选）', style: FluentTheme.of(context).typography.body),
           const SizedBox(height: DesktopSpacing.sm),
           Row(
