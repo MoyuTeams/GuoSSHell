@@ -79,6 +79,7 @@ jobs:
       - name: Cargo 实验候选测试（不计入门禁）
         id: experimental-candidates
         continue-on-error: true
+        timeout-minutes: 20
         run: cargo test -p hub --features experimental-candidates --locked --no-fail-fast
       - name: 标注实验候选测试结果
         if: always()
