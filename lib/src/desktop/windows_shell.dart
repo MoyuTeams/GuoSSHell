@@ -115,7 +115,9 @@ class _WindowsShellState extends State<WindowsShell> {
     );
     _search.addListener(_query);
     _query();
-    if (isWindowsDesktop) WindowsDesktopWindow.confirmClose = _confirmClose;
+    if (isWindowsDesktop || defaultTargetPlatform == TargetPlatform.macOS) {
+      WindowsDesktopWindow.confirmClose = _confirmClose;
+    }
   }
 
   void _query() => widget.queryCatalog != null
@@ -141,7 +143,9 @@ class _WindowsShellState extends State<WindowsShell> {
 
   @override
   void dispose() {
-    if (isWindowsDesktop) WindowsDesktopWindow.confirmClose = null;
+    if (isWindowsDesktop || defaultTargetPlatform == TargetPlatform.macOS) {
+      WindowsDesktopWindow.confirmClose = null;
+    }
     for (final subscription in _subscriptions) {
       subscription.cancel();
     }

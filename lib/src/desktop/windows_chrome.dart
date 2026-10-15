@@ -125,12 +125,20 @@ f.FluentThemeData desktopFluentTheme({
 Color desktopCanvas(String colorScheme) =>
     desktopAppPalette(colorScheme)?.canvas ?? desktopBackground;
 
-/// 原生窗口操作集中在 Windows 入口，其他平台不初始化桌面插件。
+/// Windows 初始化窗口材质与关闭保护；macOS 只连接宿主退出确认，不初始化 Windows 插件。
 class WindowsDesktopWindow {
   static bool initialized = false;
   static Future<bool> Function()? confirmClose;
+  static const _macClose = MethodChannel('guosshell/window_close');
 
   static Future<void> initialize() async {
+    if (defaultTargetPlatform == TargetPlatform.macOS) {
+      _macClose.setMethodCallHandler((call) async {
+        if (call.method != 'confirmClose') throw MissingPluginException();
+        return await (confirmClose?.call() ?? Future.value(true));
+      });
+      return;
+    }
     if (!isWindowsDesktop) return;
     await windowManager.ensureInitialized();
     await windowManager.setTitleBarStyle(

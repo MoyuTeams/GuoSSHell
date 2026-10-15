@@ -754,51 +754,55 @@ void main() {
     other.dispose();
   });
 
-  testWidgets('关闭 pane/tab/window 均确认，取消保留会话，最后窗格回到目录', (tester) async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-    final h = _Harness();
-    await h.mount(tester);
-    final pane = h.panes.single;
-    final element = pane.key.currentContext;
-    final scope = h.scope(tester);
-    final closeWindow = WindowsDesktopWindow.confirmClose!();
-    await tester.pumpAndSettle();
-    expect(find.text('关闭 GuoSSHell？'), findsOneWidget);
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect(await closeWindow, isFalse);
-    expect(pane.key.currentContext, same(element));
-    final closePane = h
-        .scope(tester)
-        .execute(DesktopAction.closePane, origin: pane.controller);
-    await tester.pumpAndSettle();
-    expect(find.text('关闭窗格？'), findsOneWidget);
-    await tester.tap(find.text('取消'));
-    await closePane;
-    await tester.pumpAndSettle();
-    expect(pane.key.currentContext, same(element));
-    tester.widget<f.TabView>(find.byType(f.TabView)).tabs.single.onClosed!();
-    await tester.pumpAndSettle();
-    expect(find.text('关闭标签？'), findsOneWidget);
-    await tester.tap(find.text('取消'));
-    await tester.pumpAndSettle();
-    expect(pane.key.currentContext, same(element));
-    final finalClose = h
-        .scope(tester)
-        .execute(DesktopAction.closePane, origin: pane.controller);
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('断开'));
-    await finalClose;
-    await tester.pumpAndSettle();
-    expect(pane.key.currentContext, isNull);
-    expect(find.text('连接，开始工作。'), findsOneWidget);
-    expect(await WindowsDesktopWindow.confirmClose!(), isTrue);
-    expect(
-      await scope.execute(DesktopAction.splitRight, origin: pane.controller),
-      DesktopActionOutcome.staleOrigin,
-    );
-    await tester.pumpWidget(const SizedBox());
-    expect(WindowsDesktopWindow.confirmClose, isNull);
-    debugDefaultTargetPlatformOverride = null;
-  });
+  for (final platform in [TargetPlatform.windows, TargetPlatform.macOS]) {
+    testWidgets('$platform 关闭 pane/tab/window 均确认，取消保留会话，最后窗格回到目录', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = platform;
+      final h = _Harness();
+      await h.mount(tester);
+      final pane = h.panes.single;
+      final element = pane.key.currentContext;
+      final scope = h.scope(tester);
+      final closeWindow = WindowsDesktopWindow.confirmClose!();
+      await tester.pumpAndSettle();
+      expect(find.text('关闭 GuoSSHell？'), findsOneWidget);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(await closeWindow, isFalse);
+      expect(pane.key.currentContext, same(element));
+      final closePane = h
+          .scope(tester)
+          .execute(DesktopAction.closePane, origin: pane.controller);
+      await tester.pumpAndSettle();
+      expect(find.text('关闭窗格？'), findsOneWidget);
+      await tester.tap(find.text('取消'));
+      await closePane;
+      await tester.pumpAndSettle();
+      expect(pane.key.currentContext, same(element));
+      tester.widget<f.TabView>(find.byType(f.TabView)).tabs.single.onClosed!();
+      await tester.pumpAndSettle();
+      expect(find.text('关闭标签？'), findsOneWidget);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(pane.key.currentContext, same(element));
+      final finalClose = h
+          .scope(tester)
+          .execute(DesktopAction.closePane, origin: pane.controller);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('断开'));
+      await finalClose;
+      await tester.pumpAndSettle();
+      expect(pane.key.currentContext, isNull);
+      expect(find.text('连接，开始工作。'), findsOneWidget);
+      expect(await WindowsDesktopWindow.confirmClose!(), isTrue);
+      expect(
+        await scope.execute(DesktopAction.splitRight, origin: pane.controller),
+        DesktopActionOutcome.staleOrigin,
+      );
+      await tester.pumpWidget(const SizedBox());
+      expect(WindowsDesktopWindow.confirmClose, isNull);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
 }
