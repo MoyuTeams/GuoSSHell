@@ -15,6 +15,8 @@
 #
 # M6_REPORT=<名字> 改报告与日志的名字（默认 <套件>-<设备>）：只补跑一部分时不覆盖整套的结果。
 # 真机必填 M6_HOST；M6_PORT / M6_LLM_HOST / M6_LLM_PORT 指定测试台，M6_DEVICE 指定报告标签。
+# run / matrix / macos / device 必填 M6_HOST_KEY_SHA256（带外核对的 fixture 指纹）；
+# 非 matrix 入口也可显式传 --dart-define=M6_HOST_KEY_SHA256=SHA256:...，与环境变量冲突则拒绝。
 # 本机签名覆盖放在不入库的 xcconfig，经 XCODE_XCCONFIG_FILE 指定。
 #
 # 设备：iphone-17-pro-max、iphone-17、ipad-pro-13、ipad-pro-11（iOS 模拟器，没有就按机型新建）。
@@ -40,8 +42,40 @@ m6_no_proxy="${m6_no_proxy:+${m6_no_proxy},}localhost,127.0.0.1,::1,${M6_HOST:-1
 export no_proxy="${m6_no_proxy}" NO_PROXY="${m6_no_proxy}"
 
 usage() {
-  sed -n '2,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 2
+}
+
+# 在创建/启动模拟器或构建前检查；同一显式指纹用于 build 与 drive，不在线发现信任材料。
+fixture_fingerprint() {
+  local fingerprint="${M6_HOST_KEY_SHA256:-}" argument value next_define=0 supplied
+  for argument in "$@"; do
+    value=""
+    supplied=0
+    if [ "${next_define}" -eq 1 ]; then
+      case "${argument}" in M6_HOST_KEY_SHA256=*) value="${argument#M6_HOST_KEY_SHA256=}"; supplied=1 ;; esac
+      next_define=0
+    else
+      case "${argument}" in
+        --dart-define) next_define=1 ;;
+        --dart-define=M6_HOST_KEY_SHA256=*) value="${argument#--dart-define=M6_HOST_KEY_SHA256=}"; supplied=1 ;;
+        *) continue ;;
+      esac
+      [ "${next_define}" -eq 0 ] || continue
+    fi
+    if [ "${supplied}" -eq 1 ]; then
+      if [ -n "${fingerprint}" ] && [ "${fingerprint}" != "${value}" ]; then
+        echo "M6_HOST_KEY_SHA256 的环境变量与 dart-define 必须一致" >&2
+        exit 2
+      fi
+      fingerprint="${value}"
+    fi
+  done
+  if [[ ! "${fingerprint}" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]; then
+    echo "M6 验收需要带外核对的 M6_HOST_KEY_SHA256（SHA256: 后接 43 位未填充 Base64）；matrix 请设置环境变量，其他 Flutter 套件入口也可传 dart-define。" >&2
+    exit 2
+  fi
+  M6_FIXTURE_DEFINE="--dart-define=M6_HOST_KEY_SHA256=${fingerprint}"
 }
 
 device_type() {
@@ -141,6 +175,7 @@ target_of() {
 run() {
   local suite="$1" device="$2"
   shift 2
+  fixture_fingerprint "$@"
   local target udid report="${M6_REPORT:-${suite}-${device}}"
   target="$(target_of "${suite}")"
   udid="$(udid_of "${device}")"
@@ -150,12 +185,12 @@ run() {
   echo "== ${suite} @ ${device}（${udid}）→ ${log}"
   # 先构建一次（构建会把负载拉满），负载降下来再 drive（它只剩增量构建与安装）。
   flutter build ios --simulator --debug -t "${target}" \
-    --dart-define=M6_DEVICE="${device}" "$@" >"${log}" 2>&1
+    --dart-define=M6_DEVICE="${device}" "$@" "${M6_FIXTURE_DEFINE}" >"${log}" 2>&1
   wait_for_load 2>&1 | tee -a "${log}"
   local status=0
   M6_REPORT="${report}" flutter drive \
     --driver=test_driver/integration_test.dart --target="${target}" -d "${udid}" \
-    --dart-define=M6_DEVICE="${device}" "$@" >>"${log}" 2>&1 || status=$?
+    --dart-define=M6_DEVICE="${device}" "$@" "${M6_FIXTURE_DEFINE}" >>"${log}" 2>&1 || status=$?
   grep -E 'All tests passed|Some tests failed|Failure in method' "${log}" | sed 's/^/   /' || true
   return "${status}"
 }
@@ -173,6 +208,7 @@ case "${1:-}" in
     ;;
   matrix)
     shift
+    fixture_fingerprint
     suites=("$@")
     [ ${#suites[@]} -gt 0 ] || suites=("${SUITES[@]}")
     failed=0
@@ -208,16 +244,17 @@ case "${1:-}" in
     [ $# -ge 2 ] || usage
     suite="$2"
     shift 2
+    fixture_fingerprint "$@"
     target="$(target_of "${suite}")"
     report="${M6_REPORT:-${suite}-macos}"
     mkdir -p build/m6/logs
     log="build/m6/logs/${report}.log"
     echo "== ${suite} @ macOS（profile）→ ${log}"
-    flutter build macos --profile -t "${target}" --dart-define=M6_DEVICE=macos "$@" >"${log}" 2>&1
+    flutter build macos --profile -t "${target}" --dart-define=M6_DEVICE=macos "$@" "${M6_FIXTURE_DEFINE}" >"${log}" 2>&1
     wait_for_load 2>&1 | tee -a "${log}"
     M6_REPORT="${report}" flutter drive --profile -d macos \
       --driver=test_driver/integration_test.dart --target="${target}" \
-      --dart-define=M6_DEVICE=macos "$@" >>"${log}" 2>&1 || status=$?
+      --dart-define=M6_DEVICE=macos "$@" "$M6_FIXTURE_DEFINE" >>"${log}" 2>&1 || status=$?
     grep -E 'All tests passed|Some tests failed|Failure in method' "${log}" | sed 's/^/   /' || true
     exit "${status:-0}"
     ;;
@@ -227,6 +264,7 @@ case "${1:-}" in
     suite="$2"
     udid="$3"
     shift 3
+    fixture_fingerprint "$@"
     target="$(target_of "${suite}")"
     device="${M6_DEVICE:-physical-device}"
     report="${M6_REPORT:-${suite}-${device}}"
@@ -242,7 +280,7 @@ case "${1:-}" in
       --dart-define=M6_PORT="${M6_PORT:-2223}" \
       --dart-define=M6_LLM_HOST="${M6_LLM_HOST:-${M6_HOST}}" \
       --dart-define=M6_LLM_PORT="${M6_LLM_PORT:-2224}" \
-      "$@" >"${log}" 2>&1 || status=$?
+      "$@" "${M6_FIXTURE_DEFINE}" >"${log}" 2>&1 || status=$?
     # 构建失败时不能接受设备上旧 App 的通过结果。
     if grep -qE '^Failed to build iOS app|^Could not build the precompiled application' "${log}"; then
       echo "真机验收失败：当前测试 App 构建未通过" >&2

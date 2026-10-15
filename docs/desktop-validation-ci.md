@@ -9,7 +9,7 @@
 `workflow_dispatch` 已声明，但 GitHub 要求工作流文件先存在于仓库默认分支，才会
 提供手动运行入口；只有 `feat-desktop` 分支新增文件时，不能保证远端手动入口可见。
 
-Windows 2025、macOS 15 与 Ubuntu 24.04 各自使用既有 setup action 准备工具链，
+Windows 2025、macOS 26 与 Ubuntu 24.04 各自使用既有 setup action 准备工具链，
 运行 Cargo fmt/check/clippy/test 与 Flutter analyze/test，然后在本机宿主构建对应的
 debug 桌面应用。`hub` 的实验候选测试（selected_p1 及依赖它的应用侧 local_shell、
 system_ssh 原型测试，不属于产品本地终端与 System OpenSSH 路径）由 `experimental-candidates` feature 门控，不在默认

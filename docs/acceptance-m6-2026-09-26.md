@@ -15,6 +15,22 @@
 
 ## 2. 测试台
 
+M6 harness 使用本轮独占临时数据目录，不打开正常应用的目录或信任库。运行前必须从受控
+测试台带外核对主机公钥指纹（`SHA256:` 后接 43 位未填充 Base64），不得以在线扫描结果
+自动建立信任。
+
+- `scripts/m6.sh run / matrix / macos / device`：设置环境变量 `M6_HOST_KEY_SHA256`，
+  脚本在启动模拟器或构建前校验，并将同一指纹传给每次 Flutter build/drive。
+  `matrix` 的参数仍只接套件名，指纹通过环境变量供给整个矩阵。
+- `run / macos / device` 也接受显式 `--dart-define=M6_HOST_KEY_SHA256=SHA256:<fixture 指纹>`；
+  若同时设置环境变量，两者必须一致。直接调用 Flutter 启动 harness 时使用此 dart-define。
+- 缺失、格式错误或冲突时脚本退出并说明错误；实际主机指纹不匹配则 harness 失败，
+  主机密钥变化不自动替换。自动化套件结束先停止 Rust，再删除本轮临时目录。
+
+`sims / report` 不启动 harness，不要求指纹。`ui / ui-device` 是独立 XCUITest 入口，
+不使用上述 Dart harness，不能以该参数宣称已有隔离目录或指纹校验。不得在正常用户
+应用数据上运行这些入口，也不得将正常用户数据目录作为任何测试夹具。
+
 ### 2.1 验收服务器
 
 沿用 `scripts/sshd-test.sh`（Docker，登录 probe / probe），镜像扩展为 M6 全套，基础镜像换成

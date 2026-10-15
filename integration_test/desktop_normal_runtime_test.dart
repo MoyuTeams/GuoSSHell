@@ -8,7 +8,7 @@ import 'package:guosh_shell/src/bindings/bindings.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:rinf/rinf.dart';
 
-// 验证正常 runner、真实 Rinf hub 与关闭的生产守护，不证明认证、输入或 TIP 行为。
+// 验证正常 runner 的 Flutter V2 准备与私有原生输入隔离，不证明认证、输入或 TIP 行为。
 const _native = MethodChannel('guosshell/desktop_native_input_v1');
 
 Future<T> _response<T>(
@@ -42,7 +42,7 @@ Uint64 _id(int value) => Uint64(BigInt.from(value));
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('正常 hub 同模块关联与 Prepare/Start 生产守护', (tester) async {
+  testWidgets('正常 hub 开放 Flutter V2，私有原生输入仍关闭', (tester) async {
     if (!Platform.isWindows) {
       throw TestFailure('此接口验收需要真实 Windows runner');
     }
@@ -103,12 +103,12 @@ void main() {
           command: '',
         ).sendSignalToRust(),
       );
-      expect(preparation.state, DesktopPreparationState.failed);
-      expect(preparation.failure, DesktopFailure.policyUnavailable);
-      expect(preparation.identity, isEmpty);
-      expect(preparation.snapshot, isNull);
+      expect(preparation.state, DesktopPreparationState.prepared);
+      expect(preparation.failure, DesktopFailure.none);
+      expect(preparation.identity, isNotEmpty);
+      expect(preparation.snapshot, isNotNull);
 
-      // Start 的守护独立于 Prepare，不能凭客户端字段启动未验收会话。
+      // Start 仍校验准备身份，非法请求不能启动连接。
       final start = await _response(
         tester,
         DesktopPreparationResult.rustSignalStream,
@@ -131,10 +131,55 @@ void main() {
         ).sendSignalToRust(),
       );
       expect(start.state, DesktopPreparationState.failed);
-      expect(start.failure, DesktopFailure.policyUnavailable);
+      expect(start.failure, DesktopFailure.identityMismatch);
       expect(start.snapshot, isNull);
 
+      // 合法 Flutter V2 Start 被接纳；不提供密码，停在认证输入等待，不连接外部目标。
+      final accepted = await _response(
+        tester,
+        DesktopPreparationResult.rustSignalStream,
+        (value) => value.source == source && value.requestId == 3,
+        () => DesktopStart(
+          version: 2,
+          requestId: 3,
+          prepareRequestId: 1,
+          source: source,
+          identity: preparation.identity,
+          geometry: const DesktopGeometry(
+            cols: 80,
+            rows: 24,
+            pixelWidth: 640,
+            pixelHeight: 384,
+            dpi: 96,
+          ),
+          fontProjection: preparation.snapshot!.fallbackProjection,
+          password: '',
+        ).sendSignalToRust(),
+      );
+      expect(accepted.state, DesktopPreparationState.accepted);
+      expect(accepted.failure, DesktopFailure.none);
+      final ended = await _response(
+        tester,
+        DesktopNativeLifecycle.rustSignalStream,
+        (value) =>
+            value.source == source &&
+            value.identity == preparation.identity &&
+            value.state == NativeLifecycleState.ended,
+        () => DesktopOrdered(
+          version: 2,
+          source: source,
+          identity: preparation.identity,
+          seq: _id(1),
+          event: const DesktopEventDisconnect(),
+        ).sendSignalToRust(),
+      );
+      expect(ended.state, NativeLifecycleState.ended);
+
       // 真实 Rinf 往返验证新 GUI 编码与完整回执；未登记来源不能取得输入权限。
+      final nativeSource = DesktopSource(
+        sessionId: 0x5a4002,
+        generation: _id(1),
+      );
       const inputs = <GuiInput>[
         GuiInputGuiKey(value: GuiKeyEnter()),
         GuiInputGuiKey(value: GuiKeyF(value: 12)),
@@ -143,7 +188,7 @@ void main() {
       for (var index = 0; index < inputs.length; index++) {
         final request = DesktopNativeCommand(
           version: 1,
-          source: source,
+          source: nativeSource,
           identity: '未登记检查点',
           attempt: _id(7),
           focusEpoch: _id(9),
@@ -160,7 +205,8 @@ void main() {
           tester,
           DesktopNativeCommandResult.rustSignalStream,
           (value) =>
-              value.source == source && value.requestId == request.requestId,
+              value.source == nativeSource &&
+              value.requestId == request.requestId,
           request.sendSignalToRust,
         );
         expect(result.version, 1);

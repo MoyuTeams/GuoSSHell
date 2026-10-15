@@ -4,6 +4,7 @@
 // 由 scripts/m6.sh 经 flutter drive 运行；--dart-define：
 //   M6_HOST / M6_PORT   验收服务器（默认 127.0.0.1:2223）
 //   M6_DEVICE           设备名，截图与报告按它分目录
+//   M6_HOST_KEY_SHA256  从受控 fixture 带外取得的主机公钥指纹（必填）
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -24,31 +25,57 @@ import 'package:terminal_view/terminal_view.dart' show BufferLine, TerminalKey;
 const m6Host = String.fromEnvironment('M6_HOST', defaultValue: '127.0.0.1');
 const m6Port = int.fromEnvironment('M6_PORT', defaultValue: 2223);
 const m6Device = String.fromEnvironment('M6_DEVICE', defaultValue: 'device');
+const m6HostKey = String.fromEnvironment('M6_HOST_KEY_SHA256');
 // iOS 测试插件会保留截图原图；内存与卡顿门槛用关闭截图的独立轮次判定。
-const m6CaptureScreenshots = bool.fromEnvironment('M6_SCREENSHOTS', defaultValue: true);
+const m6CaptureScreenshots = bool.fromEnvironment(
+  'M6_SCREENSHOTS',
+  defaultValue: true,
+);
 
 /// 验收服务器上假 AI 上游的地址；默认与 SSH 使用同一主机，真机可以访问局域网测试台。
 const m6LlmHost = String.fromEnvironment('M6_LLM_HOST', defaultValue: m6Host);
 const m6LlmPort = int.fromEnvironment('M6_LLM_PORT', defaultValue: 2224);
 
-Uri m6Api(String path, {Map<String, String>? query}) =>
-    Uri(scheme: 'http', host: m6LlmHost, port: m6LlmPort, path: path, queryParameters: query);
+Uri m6Api(String path, {Map<String, String>? query}) => Uri(
+  scheme: 'http',
+  host: m6LlmHost,
+  port: m6LlmPort,
+  path: path,
+  queryParameters: query,
+);
 
 bool _rustStarted = false;
+Directory? _ownedSupport;
 
 /// 起 Rust 侧并等设置到位（与 App 启动时的 _StartupGate 相同的顺序）。
 Future<void> startRust() async {
   if (_rustStarted) return;
-  _rustStarted = true;
+  if (!m6HostKey.startsWith('SHA256:') || m6HostKey.length <= 7) {
+    throw StateError('M6 必须提供受控 fixture 的 M6_HOST_KEY_SHA256');
+  }
   await initializeRust(assignRustSignal);
+  _rustStarted = true;
   final ready = AppReady.rustSignalStream.first;
   final settings = SettingsState.rustSignalStream.first;
-  final directory = await getApplicationSupportDirectory();
+  final directory = await (await getTemporaryDirectory()).createTemp(
+    'guosh-m6-',
+  );
+  _ownedSupport = directory;
   AppStart(supportDir: directory.path).sendSignalToRust();
   final ok = (await ready).message;
   if (!ok.ok) throw StateError('AppReady: ${ok.detail}');
   SettingsQuery().sendSignalToRust();
   await settings;
+}
+
+/// 只回收本轮独占数据；先停止 Rust，避免仍持有目录或信任库。
+Future<void> stopRust() async {
+  if (!_rustStarted) return;
+  finalizeRust();
+  _rustStarted = false;
+  final directory = _ownedSupport;
+  _ownedSupport = null;
+  if (directory != null) await directory.delete(recursive: true);
 }
 
 /// 一次测试里的 App：一个工作区、若干窗格。
@@ -64,46 +91,60 @@ class M6App {
   late final StreamSubscription<RustSignalPack<FrameUpdate>> _frames;
   final Map<int, DateTime> _lastFrame = {};
 
-  /// 打开工作区并连上验收服务器（首次连接自动信任主机密钥，密钥变了就替换）。
+  /// 打开工作区并连接受控服务器，只信任带外提供的 fixture 指纹。
   Future<TerminalPaneController> open({String command = ''}) async {
-    await tester.pumpWidget(MaterialApp(
-      theme: ThemeData(brightness: Brightness.dark, colorScheme: ColorScheme.fromSeed(seedColor: Colors.teal, brightness: Brightness.dark)),
-      home: WorkspacePage(
-        initial: SessionTarget.quick(
-          host: m6Host,
-          port: m6Port,
-          username: 'probe',
-          password: 'probe',
-          command: command,
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(
+          brightness: Brightness.dark,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: Colors.teal,
+            brightness: Brightness.dark,
+          ),
+        ),
+        home: WorkspacePage(
+          initial: SessionTarget.quick(
+            host: m6Host,
+            port: m6Port,
+            username: 'probe',
+            password: 'probe',
+            command: command,
+          ),
         ),
       ),
-    ));
+    );
     return waitConnected();
   }
 
   /// 活动窗格（第一个）。
   TerminalPaneController get pane => panes.first;
 
-  List<TerminalPaneController> get panes =>
-      tester.widgetList<TerminalPane>(find.byType(TerminalPane)).map((w) => w.controller).toList();
+  List<TerminalPaneController> get panes => tester
+      .widgetList<TerminalPane>(find.byType(TerminalPane))
+      .map((w) => w.controller)
+      .toList();
 
   /// 等窗格连上；路上遇到主机密钥确认就替用户点掉。
-  Future<TerminalPaneController> waitConnected({TerminalPaneController? of}) async {
+  Future<TerminalPaneController> waitConnected({
+    TerminalPaneController? of,
+  }) async {
     final deadline = DateTime.now().add(const Duration(seconds: 60));
     var retries = 0;
     while (true) {
       await tester.pump(const Duration(milliseconds: 100));
       if (find.text('信任并连接').evaluate().isNotEmpty) {
+        final fingerprint = find.byWidgetPredicate(
+          (widget) =>
+              widget is Text && widget.data?.split('\n').last == m6HostKey,
+        );
+        if (fingerprint.evaluate().length != 1) {
+          throw TestFailure('验收服务器主机密钥与 fixture 指纹不符');
+        }
         await tester.tap(find.text('信任并连接'));
         continue;
       }
       if (find.text('替换旧密钥并连接').evaluate().isNotEmpty) {
-        final checkbox = find.byType(Checkbox);
-        if (checkbox.evaluate().isNotEmpty) await tester.tap(checkbox.first);
-        await tester.pump(const Duration(milliseconds: 300));
-        final replace = find.text('替换旧密钥并连接');
-        if (replace.evaluate().isNotEmpty) await tester.tap(replace.first);
-        continue;
+        throw TestFailure('受控 fixture 的主机密钥发生变化，不允许自动替换');
       }
       // 首次局域网授权完成后，系统可能已让原来的连接失败；从界面重新发起连接。
       final retry = find.text('重试');
@@ -117,22 +158,31 @@ class M6App {
       final pane = of ?? (panes.isEmpty ? null : panes.first);
       if (pane != null && pane.connected) return pane;
       if (DateTime.now().isAfter(deadline)) {
-        throw TestFailure('连接验收服务器超时（$m6Host:$m6Port，先 ./scripts/sshd-test.sh up）');
+        throw TestFailure(
+          '连接验收服务器超时（$m6Host:$m6Port，先 ./scripts/sshd-test.sh up）',
+        );
       }
     }
   }
 
   /// 送出 [text]（直接交给终端的文本输入，不先 pump），量到屏幕上出现 [expect]（默认就是
   /// [text]）的毫秒数；每帧查一次。按软换行接回的逻辑行找（窄窗格里一行会折开）。
-  Future<int> echoMs(String text, {String? expect, TerminalPaneController? pane}) async {
+  Future<int> echoMs(
+    String text, {
+    String? expect,
+    TerminalPaneController? pane,
+  }) async {
     final controller = pane ?? this.pane;
     final target = expect ?? text;
     final watch = Stopwatch()..start();
     controller.terminal.textInput(text);
-    while (!logicalLines(pane: controller).any((line) => line.contains(target))) {
+    while (!logicalLines(pane: controller)
+        .any((line) => line.contains(target))) {
       if (watch.elapsed > const Duration(seconds: 10)) {
         await screenshot('timeout-${DateTime.now().millisecondsSinceEpoch}');
-        throw TestFailure('等回显「$target」超时。${describe(pane: controller)}\n当前屏幕：\n${screenText(pane: controller)}');
+        throw TestFailure(
+          '等回显「$target」超时。${describe(pane: controller)}\n当前屏幕：\n${screenText(pane: controller)}',
+        );
       }
       await tester.pump(const Duration(milliseconds: 1));
     }
@@ -143,7 +193,9 @@ class M6App {
   /// 量一段之前调一次丢掉旧窗口，量完再调一次收齐。
   Future<void> flushPerf({TerminalPaneController? pane}) async {
     final controller = pane ?? this.pane;
-    final reply = ScreenCheck.rustSignalStream.firstWhere((p) => p.message.sessionId == controller.sessionId);
+    final reply = ScreenCheck.rustSignalStream.firstWhere(
+      (p) => p.message.sessionId == controller.sessionId,
+    );
     ScreenCheckRequest(sessionId: controller.sessionId).sendSignalToRust();
     await reply.timeout(const Duration(seconds: 10));
     await tester.pump(const Duration(milliseconds: 50));
@@ -156,8 +208,19 @@ class M6App {
   }
 
   /// 按一个功能键（经 App 的键编码通道）。
-  Future<void> key(TerminalKey key, {bool ctrl = false, bool alt = false, bool shift = false, TerminalPaneController? pane}) async {
-    (pane ?? this.pane).terminal.keyInput(key, ctrl: ctrl, alt: alt, shift: shift);
+  Future<void> key(
+    TerminalKey key, {
+    bool ctrl = false,
+    bool alt = false,
+    bool shift = false,
+    TerminalPaneController? pane,
+  }) async {
+    (pane ?? this.pane).terminal.keyInput(
+      key,
+      ctrl: ctrl,
+      alt: alt,
+      shift: shift,
+    );
     await tester.pump(const Duration(milliseconds: 50));
   }
 
@@ -166,11 +229,13 @@ class M6App {
     final terminal = (pane ?? this.pane).terminal;
     final top = terminal.screenTopIndex;
     return [
-      for (var row = 0; row < terminal.viewHeight; row++) _lineText(terminal.lineAt(top + row), terminal.viewWidth),
+      for (var row = 0; row < terminal.viewHeight; row++)
+        _lineText(terminal.lineAt(top + row), terminal.viewWidth),
     ];
   }
 
-  String screenText({TerminalPaneController? pane}) => screen(pane: pane).join('\n');
+  String screenText({TerminalPaneController? pane}) =>
+      screen(pane: pane).join('\n');
 
   /// 当前屏幕按软换行接回的逻辑行（一行输出比屏幕宽时跨几行）。
   List<String> logicalLines({TerminalPaneController? pane}) {
@@ -201,13 +266,19 @@ class M6App {
   }
 
   /// 等屏幕上出现 [text]（或满足 [test]）。
-  Future<Duration> waitScreen(String text, {Duration timeout = const Duration(seconds: 60), TerminalPaneController? pane}) async {
+  Future<Duration> waitScreen(
+    String text, {
+    Duration timeout = const Duration(seconds: 60),
+    TerminalPaneController? pane,
+  }) async {
     final start = DateTime.now();
     final deadline = start.add(timeout);
     while (!screenText(pane: pane).contains(text)) {
       if (DateTime.now().isAfter(deadline)) {
         await screenshot('timeout-${DateTime.now().millisecondsSinceEpoch}');
-        throw TestFailure('等「$text」超时。${describe(pane: pane)}\n当前屏幕：\n${screenText(pane: pane)}');
+        throw TestFailure(
+          '等「$text」超时。${describe(pane: pane)}\n当前屏幕：\n${screenText(pane: pane)}',
+        );
       }
       await tester.pump(const Duration(milliseconds: 50));
     }
@@ -215,7 +286,11 @@ class M6App {
   }
 
   /// 等条件成立。
-  Future<void> waitFor(bool Function() done, String what, {Duration timeout = const Duration(seconds: 30)}) async {
+  Future<void> waitFor(
+    bool Function() done,
+    String what, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
     final deadline = DateTime.now().add(timeout);
     while (!done()) {
       if (DateTime.now().isAfter(deadline)) {
@@ -228,19 +303,29 @@ class M6App {
 
   /// 等假上游做出某个剧本决定（/m6/plans）：[since] 之后出现满足 [test] 的一条。
   /// 用它判断「agent 开始流式」「subagent 已派出」，不依赖各 agent 界面上的写法。
-  Future<void> waitForPlan(bool Function(Map<String, dynamic> plan) test, String what,
-      {required DateTime since, Duration timeout = const Duration(seconds: 90)}) async {
+  Future<void> waitForPlan(
+    bool Function(Map<String, dynamic> plan) test,
+    String what, {
+    required DateTime since,
+    Duration timeout = const Duration(seconds: 90),
+  }) async {
     final deadline = DateTime.now().add(timeout);
     final client = HttpClient();
     try {
       while (true) {
         try {
-          final request = await client.getUrl(m6Api('/m6/plans', query: {'limit': '200'}));
+          final request = await client.getUrl(
+            m6Api('/m6/plans', query: {'limit': '200'}),
+          );
           final response = await request.close();
-          final plans = jsonDecode(await response.transform(utf8.decoder).join()) as List<dynamic>;
+          final plans = jsonDecode(
+            await response.transform(utf8.decoder).join(),
+          ) as List<dynamic>;
           final hit = plans.cast<Map<String, dynamic>>().any(
-                (plan) => (plan['t'] as int) >= since.millisecondsSinceEpoch && test(plan),
-              );
+            (plan) =>
+                (plan['t'] as int) >= since.millisecondsSinceEpoch &&
+                test(plan),
+          );
           if (hit) return;
         } on Object {
           // 服务器暂时连不上：下一轮再问。
@@ -257,7 +342,10 @@ class M6App {
   }
 
   /// 等输出静止：[quiet] 内没有新帧。
-  Future<void> waitIdle({Duration quiet = const Duration(milliseconds: 800), TerminalPaneController? pane}) async {
+  Future<void> waitIdle({
+    Duration quiet = const Duration(milliseconds: 800),
+    TerminalPaneController? pane,
+  }) async {
     final sessionId = (pane ?? this.pane).sessionId;
     final deadline = DateTime.now().add(const Duration(seconds: 60));
     while (true) {
@@ -270,24 +358,33 @@ class M6App {
 
   /// 画面一致性：Rust 最近发出的一帧（逐列）与 Dart 画完同一序号的帧后的行池逐列比对，
   /// 返回不一致之处（空 = 一致）。按帧序号对齐，所以画面还在刷新（TUI 定时重画）也能比。
-  Future<List<String>> screenMismatches({TerminalPaneController? pane, int attempts = 5}) async {
+  Future<List<String>> screenMismatches({
+    TerminalPaneController? pane,
+    int attempts = 5,
+  }) async {
     final controller = pane ?? this.pane;
     List<String>? problems;
     for (var attempt = 0; attempt < attempts; attempt++) {
       problems = await _compareOnce(controller);
       if (problems != null) return problems;
     }
-    throw TestFailure('画面一致性：$attempts 次都没能与 Rust 发出的帧对齐（${describe(pane: controller)}）');
+    throw TestFailure(
+      '画面一致性：$attempts 次都没能与 Rust 发出的帧对齐（${describe(pane: controller)}）',
+    );
   }
 
   /// 对齐不上（Dart 已经画了更新的帧）返回 null，由调用方重试。
   Future<List<String>?> _compareOnce(TerminalPaneController controller) async {
-    final reply = ScreenCheck.rustSignalStream.firstWhere((p) => p.message.sessionId == controller.sessionId);
+    final reply = ScreenCheck.rustSignalStream.firstWhere(
+      (p) => p.message.sessionId == controller.sessionId,
+    );
     ScreenCheckRequest(sessionId: controller.sessionId).sendSignalToRust();
     final check = (await reply.timeout(const Duration(seconds: 10))).message;
     final deadline = DateTime.now().add(const Duration(seconds: 2));
     while (controller.lastFrameSeq != check.seq) {
-      if (controller.lastFrameSeq > check.seq || DateTime.now().isAfter(deadline)) return null;
+      if (controller.lastFrameSeq > check.seq ||
+          DateTime.now().isAfter(deadline))
+        return null;
       await tester.pump(const Duration(milliseconds: 16));
     }
     // 同一轮事件里比对：此刻行池正是这一帧。
@@ -327,7 +424,10 @@ class M6App {
   /// 从 [since] 起收集到的性能窗口（PerfMonitor）。
   List<PerfRecord> perfSince(int since, {TerminalPaneController? pane}) {
     final sessionId = (pane ?? this.pane).sessionId;
-    return PerfMonitor.instance.records.skip(since).where((r) => r.sessionId == sessionId).toList();
+    return PerfMonitor.instance.records
+        .skip(since)
+        .where((r) => r.sessionId == sessionId)
+        .toList();
   }
 
   int get perfMark => PerfMonitor.instance.records.length;
@@ -372,20 +472,26 @@ Future<List<int>> inputBytes() async {
 
 /// 字节里的 SGR 鼠标事件，每个写成「按钮码 + M/m @ 列,行」，如 `35M@12,5`。
 List<String> sgrMouseEvents(List<int> bytes) => [
-      for (final m in RegExp(r'\x1b\[<(\d+);(\d+);(\d+)([Mm])').allMatches(String.fromCharCodes(bytes)))
-        '${m.group(1)}${m.group(4)}@${m.group(2)},${m.group(3)}',
-    ];
+  for (final m in RegExp(
+    r'\x1b\[<(\d+);(\d+);(\d+)([Mm])',
+  ).allMatches(String.fromCharCodes(bytes)))
+    '${m.group(1)}${m.group(4)}@${m.group(2)},${m.group(3)}',
+];
 
 /// 把几窗性能数据汇总成一条（写进报告）。
 Map<String, Object> summarizePerf(List<PerfRecord> records) {
   if (records.isEmpty) return {'windows': 0};
-  int maxOf(int Function(PerfRecord) f) => records.map(f).reduce((a, b) => a > b ? a : b);
-  int sumOf(int Function(PerfRecord) f) => records.map(f).fold(0, (a, b) => a + b);
+  int maxOf(int Function(PerfRecord) f) =>
+      records.map(f).reduce((a, b) => a > b ? a : b);
+  int sumOf(int Function(PerfRecord) f) =>
+      records.map(f).fold(0, (a, b) => a + b);
   final frames = sumOf((r) => r.frames);
   final windowMs = sumOf((r) => r.windowMs);
   return {
     'windows': records.length,
-    'fps': windowMs == 0 ? 0 : double.parse((frames * 1000 / windowMs).toStringAsFixed(1)),
+    'fps': windowMs == 0
+        ? 0
+        : double.parse((frames * 1000 / windowMs).toStringAsFixed(1)),
     'latency_us_p95_max': maxOf((r) => r.latencyUsP95),
     'latency_us_max': maxOf((r) => r.latencyUsMax),
     'ack_timeouts': sumOf((r) => r.ackTimeouts),
@@ -405,9 +511,12 @@ Map<String, Object> summarizePerf(List<PerfRecord> records) {
 
 /// 屏幕上不该出现的东西：替换字符、泄漏成文字的转义序列。
 List<String> screenGarbage(String screen) => [
-      if (screen.contains('�')) '出现替换字符 U+FFFD',
-      for (final m in RegExp(r'\[\?\d+[hl]|\]\d+;|\[\d+;\d+[Hr]').allMatches(screen).take(3)) '疑似转义序列泄漏：「${m.group(0)}」',
-    ];
+  if (screen.contains('�')) '出现替换字符 U+FFFD',
+  for (final m in RegExp(
+    r'\[\?\d+[hl]|\]\d+;|\[\d+;\d+[Hr]',
+  ).allMatches(screen).take(3))
+    '疑似转义序列泄漏：「${m.group(0)}」',
+];
 
 /// 旋转 / 改窗口的替身：改视图的物理尺寸（框架层；真实旋转在 XCUITest 里验）。系统键盘与安全区
 /// 不跟着这个替身变——竖屏的软键盘还占着时宽高对调，工作区只剩几十像素，标签条与键位条放不下——
@@ -441,7 +550,9 @@ String _lineText(BufferLine line, int cols, {bool trim = true}) {
     final text = _cellText(line, col);
     if (text.isNotEmpty) {
       out.write(text);
-    } else if (col == 0 || line.getCodePoint(col - 1) == 0 || _width(line, col - 1) == 1) {
+    } else if (col == 0 ||
+        line.getCodePoint(col - 1) == 0 ||
+        _width(line, col - 1) == 1) {
       out.write(' ');
     }
   }

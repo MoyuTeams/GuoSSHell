@@ -14,6 +14,7 @@ void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   binding.framePolicy = LiveTestWidgetsFlutterBindingFramePolicy.fullyLive;
   setUpAll(startRust);
+  tearDownAll(stopRust);
 
   testWidgets('缩放重排且不发送快捷键；编辑排布保存后立即生效', (tester) async {
     final app = M6App(tester, binding);
