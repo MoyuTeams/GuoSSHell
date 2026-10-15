@@ -167,7 +167,6 @@ impl Surface {
             || input.delta_x.unsigned_abs() > 64
             || input.delta_y.unsigned_abs() > 64
             || input.kind != 4 && (input.delta_x != 0 || input.delta_y != 0)
-            || input.kind == 4 && input.delta_x != 0
         {
             return Err(Reject::InvalidEvent);
         }

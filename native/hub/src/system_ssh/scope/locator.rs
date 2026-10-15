@@ -262,6 +262,51 @@ fn image_stamp(file: &File) -> Result<ImageStamp, ScopeReject> {
     })
 }
 
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::expect_used)]
+    #[test]
+    fn readable_fifo_without_writer_is_rejected_without_waiting() {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::time::Duration;
+        #[cfg(target_os = "macos")]
+        type Mode = u16;
+        #[cfg(target_os = "linux")]
+        type Mode = u32;
+        unsafe extern "C" {
+            fn mkfifo(path: *const std::ffi::c_char, mode: Mode) -> std::ffi::c_int;
+        }
+        let directory =
+            std::env::temp_dir().join(format!("guosh-locator-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).expect("创建独占目录");
+        let path = directory.join("ssh");
+        let name = std::ffi::CString::new(path.to_str().expect("临时路径")).expect("无 NUL");
+        assert_eq!(unsafe { mkfifo(name.as_ptr(), 0o700) }, 0);
+        let (sent, received) = std::sync::mpsc::channel();
+        let candidate = path.clone();
+        let worker = std::thread::spawn(move || {
+            sent.send(super::open_image(candidate.to_str().expect("临时路径")).map(|_| ()))
+                .ok();
+        });
+        let result = received.recv_timeout(Duration::from_secs(1));
+        if result.is_err() {
+            // 回归失败时唤醒阻塞读者，不能把挂起线程留在测试进程。
+            #[cfg(target_os = "linux")]
+            let nonblock = 0o4000;
+            #[cfg(target_os = "macos")]
+            let nonblock = 0x0004;
+            let _writer = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(nonblock)
+                .open(&path);
+        }
+        worker.join().expect("定位器线程退出");
+        std::fs::remove_file(&path).expect("清理自有 FIFO");
+        std::fs::remove_dir(&directory).expect("清理自有目录");
+        assert!(matches!(result, Ok(Err(super::ScopeReject::NotExecutable))));
+    }
+}
+
 #[cfg(unix)]
 fn open_image(path: &str) -> Result<File, ScopeReject> {
     use std::os::fd::FromRawFd;
@@ -278,8 +323,12 @@ fn open_image(path: &str) -> Result<File, ScopeReject> {
     let close_on_exec = 0o2000000;
     #[cfg(target_os = "macos")]
     let close_on_exec = 0x01000000;
-    // SAFETY: 栈上的已验证 UTF-8/NUL 路径；O_RDONLY | O_CLOEXEC，不依赖环境/PATH。
-    let fd = unsafe { open(bytes.as_ptr().cast(), close_on_exec) };
+    #[cfg(target_os = "linux")]
+    let nonblock = 0o4000;
+    #[cfg(target_os = "macos")]
+    let nonblock = 0x0004;
+    // SAFETY: 栈上的已验证 UTF-8/NUL 路径；非阻塞打开后以 fd 验证类型，FIFO 不等待写端。
+    let fd = unsafe { open(bytes.as_ptr().cast(), close_on_exec | nonblock) };
     if fd < 0 {
         return Err(ScopeReject::Io);
     }

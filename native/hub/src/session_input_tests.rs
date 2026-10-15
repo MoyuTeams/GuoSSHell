@@ -841,6 +841,45 @@ async fn pointer_button_tracking_ignores_hover_and_keeps_connection_accepting_in
 }
 
 #[tokio::test]
+async fn horizontal_wheel_does_not_revoke_surface_or_move_vertical_viewport() {
+    let root = registration(9881);
+    root.0.connected();
+    let surface = unsafe { root.0.attach_verified(0).expect("原宿主") };
+    let wire = Arc::new(Wire::default());
+    let (close, task) = actor_with_screen(
+        root.0.clone(),
+        Transport {
+            wire: wire.clone(),
+            output: None,
+            pause: false,
+        },
+        true,
+        None,
+    );
+    until(|| root.0.projection().is_some()).await;
+    let original = root.0.projection().expect("原呈现帧");
+    let frozen = geometry(&original);
+    surface.presented_geometry(1, frozen).expect("原几何");
+    let mut wheel = pointer(frozen, original.frame().rows[0].stable_row, true);
+    wheel.kind = 4;
+    wheel.button = 0;
+    wheel.buttons = 0;
+    wheel.delta_x = 3;
+    wheel.delta_y = 0;
+    let horizontal = surface.pointer(2, wheel).expect("水平滚轮有效");
+    until(|| root.0.applied() >= horizontal.effect || task.is_finished()).await;
+    assert!(!task.is_finished());
+    let pressed = surface
+        .key(key(1, DesktopKeyPhase::Down))
+        .expect("继续接受键盘输入");
+    until(|| root.0.applied() >= pressed.effect || task.is_finished()).await;
+    assert_eq!(*wire.bytes.lock().expect("真实输入"), b"a");
+    close.send_replace(true);
+    let screen = task.await.expect("正常结束");
+    assert_eq!(screen.window, super::Window::Bottom);
+}
+
+#[tokio::test]
 async fn pointer_button_tracking_reports_drag_and_keeps_connection_accepting_input() {
     check_pointer_tracking(b"\x1b[?1002h\x1b[?1006h", 1, Some(b"\x1b[<32;4;2M"), 9873).await;
 }

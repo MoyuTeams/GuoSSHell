@@ -684,7 +684,7 @@ async fn apply_pointer(
                 write(transport, &bytes).await?;
             }
         }
-    } else if input.kind == 4 {
+    } else if input.kind == 4 && input.delta_y != 0 {
         let top = match screen.window {
             Window::Bottom => bounds.bottom_top_stable_row,
             Window::At { top, .. } => {
