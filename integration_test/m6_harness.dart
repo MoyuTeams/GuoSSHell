@@ -44,6 +44,21 @@ Uri m6Api(String path, {Map<String, String>? query}) => Uri(
   queryParameters: query,
 );
 
+/// 主机密钥对话框里的指纹文本是「算法\n指纹」。移动端 Material 与桌面 Fluent 两个对话框都用
+/// [SelectableText]（不是 [Text] 子类）显示，故两者都要接受；仍要求最后一行与 [expected] 精确相等。
+bool m6FingerprintMatches(Widget widget, String expected) {
+  final data = switch (widget) {
+    Text(:final data) => data,
+    SelectableText(:final data) => data,
+    _ => null,
+  };
+  return data != null && data.split('\n').last == expected;
+}
+
+/// 命中指纹文本的 finder；调用方须要求命中数恰为 1。
+Finder m6FingerprintFinder(String expected) =>
+    find.byWidgetPredicate((widget) => m6FingerprintMatches(widget, expected));
+
 bool _rustStarted = false;
 Directory? _ownedSupport;
 
@@ -133,10 +148,7 @@ class M6App {
     while (true) {
       await tester.pump(const Duration(milliseconds: 100));
       if (find.text('信任并连接').evaluate().isNotEmpty) {
-        final fingerprint = find.byWidgetPredicate(
-          (widget) =>
-              widget is Text && widget.data?.split('\n').last == m6HostKey,
-        );
+        final fingerprint = m6FingerprintFinder(m6HostKey);
         if (fingerprint.evaluate().length != 1) {
           throw TestFailure('验收服务器主机密钥与 fixture 指纹不符');
         }

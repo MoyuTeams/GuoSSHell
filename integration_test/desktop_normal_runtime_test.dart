@@ -50,6 +50,10 @@ void main() {
       'guosh-normal-runtime-',
     );
     var initialized = false;
+    ServerSocket? server;
+    final held = <Socket>[];
+    StreamSubscription<RustSignalPack<DesktopNativeLifecycle>>?
+    lifecycleSubscription;
     try {
       await initializeRust(assignRustSignal);
       initialized = true;
@@ -83,6 +87,15 @@ void main() {
       );
       expect(ready.ok, isTrue, reason: ready.detail);
       final source = DesktopSource(sessionId: 0x5a4001, generation: _id(1));
+      // 本用例自起的一次性本机监听端口：只接受连接、不读不写，SSH 握手停在等待服务端标识，
+      // 直到 Disconnect 关闭会话；不依赖 runner 上是否有 22 端口服务。
+      server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      server.listen(held.add);
+      // 在 Start 之前开始缓存生命周期事件：Ended 可能在测试订阅前就已发出，断言只查缓存。
+      final lifecycles = <DesktopNativeLifecycle>[];
+      lifecycleSubscription = DesktopNativeLifecycle.rustSignalStream.listen(
+        (pack) => lifecycles.add(pack.message),
+      );
       final preparation = await _response(
         tester,
         DesktopPreparationResult.rustSignalStream,
@@ -98,7 +111,7 @@ void main() {
           profileId: '',
           connectionId: '',
           host: '127.0.0.1',
-          port: 22,
+          port: server!.port,
           username: 'normal-runtime-test',
           command: '',
         ).sendSignalToRust(),
@@ -134,7 +147,7 @@ void main() {
       expect(start.failure, DesktopFailure.identityMismatch);
       expect(start.snapshot, isNull);
 
-      // 合法 Flutter V2 Start 被接纳；不提供密码，停在认证输入等待，不连接外部目标。
+      // 合法 Flutter V2 Start 被接纳；只连本用例的本机监听端口，不连接外部目标。
       final accepted = await _response(
         tester,
         DesktopPreparationResult.rustSignalStream,
@@ -158,22 +171,26 @@ void main() {
       );
       expect(accepted.state, DesktopPreparationState.accepted);
       expect(accepted.failure, DesktopFailure.none);
-      final ended = await _response(
-        tester,
-        DesktopNativeLifecycle.rustSignalStream,
-        (value) =>
-            value.source == source &&
-            value.identity == preparation.identity &&
-            value.state == NativeLifecycleState.ended,
-        () => DesktopOrdered(
-          version: 2,
-          source: source,
-          identity: preparation.identity,
-          seq: _id(1),
-          event: const DesktopEventDisconnect(),
-        ).sendSignalToRust(),
-      );
-      expect(ended.state, NativeLifecycleState.ended);
+      DesktopOrdered(
+        version: 2,
+        source: source,
+        identity: preparation.identity,
+        seq: _id(1),
+        event: const DesktopEventDisconnect(),
+      ).sendSignalToRust();
+      final elapsed = Stopwatch()..start();
+      bool isEnded(DesktopNativeLifecycle value) =>
+          value.source == source &&
+          value.identity == preparation.identity &&
+          value.state == NativeLifecycleState.ended;
+      while (!lifecycles.any(isEnded)) {
+        if (elapsed.elapsed > const Duration(seconds: 15)) {
+          throw TestFailure('正常 hub 响应超时：DesktopNativeLifecycle ended');
+        }
+        await tester.pump(const Duration(milliseconds: 25));
+        expect(tester.takeException(), isNull);
+      }
+      expect(lifecycles.where(isEnded), hasLength(1));
 
       // 真实 Rinf 往返验证新 GUI 编码与完整回执；未登记来源不能取得输入权限。
       final nativeSource = DesktopSource(
@@ -220,6 +237,11 @@ void main() {
         expect(result.guiModifierRevision, _id(100 + index));
       }
     } finally {
+      await lifecycleSubscription?.cancel();
+      for (final socket in held) {
+        socket.destroy();
+      }
+      await server?.close();
       if (initialized) finalizeRust();
       // 该目录由本用例独占创建；运行时停止后才删除，不触及用户存储。
       await owned.delete(recursive: true);
