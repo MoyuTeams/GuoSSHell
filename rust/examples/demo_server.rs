@@ -169,8 +169,6 @@ impl DemoHandler {
 /// 测试服务器专用：真实执行命令，stdout/stderr 直通频道。
 /// 进度条脚本的 `\r` 重画会原样进引擎——正好当 60Hz 帧源。
 async fn run_real_command(channel: Channel<Msg>, command: String) {
-    use tokio::io::AsyncReadExt;
-
     let mut child = match tokio::process::Command::new("bash")
         .arg("-c")
         .arg(&command)
@@ -187,43 +185,88 @@ async fn run_real_command(channel: Channel<Msg>, command: String) {
         }
     };
 
-    async fn pipe<R: tokio::io::AsyncRead + Unpin>(
-        mut stream: R,
-        channel: &Channel<Msg>,
-    ) -> Option<()> {
-        let mut buffer = vec![0u8; 8192];
-        loop {
-            match stream.read(&mut buffer).await {
-                Ok(0) | Err(_) => return None,
-                Ok(n) => channel.data_bytes(buffer[..n].to_vec()).await.ok()?,
-            }
+    // 两路都读到 EOF 才等退出；错误或超时才终止子进程，单路 EOF 不能截断另一端。
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(3600), async {
+        let out = child.stdout.take().ok_or(())?;
+        let err = child.stderr.take().ok_or(())?;
+        drain_command_output(out, err, |bytes| async {
+            channel.data_bytes(bytes).await.map_err(|_| ())
+        })
+        .await?;
+        child.wait().await.map_err(|_| ())
+    })
+    .await;
+    let code = match completed {
+        Ok(Ok(status)) => status.code().unwrap_or(1) as u32,
+        failure => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            if failure.is_err() { 124 } else { 1 }
         }
-    }
-
-    // stdout / stderr 并行泵入频道；任一端结束（或频道关闭）就收尾。
-    // 1 小时兜底超时防止测试服务器挂死。
-    let mut code = 0u32;
-    if let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) {
-        tokio::select! {
-            _ = pipe(out, &channel) => {}
-            _ = pipe(err, &channel) => {}
-            _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
-                code = 124;
-            }
-        }
-    }
-
+    };
     // 真 sshd 的收尾序列：exit-status → EOF → close（App 据此弹「已断开」）。
-    let _ = child.start_kill();
-    let status = child.wait().await;
-    if let Ok(status) = status
-        && let Some(c) = status.code()
-    {
-        code = c as u32;
-    }
     let _ = channel.exit_status(code).await;
     let _ = channel.eof().await;
     let _ = channel.close().await;
+}
+
+async fn drain_command_output<R, S, F, Fut>(out: R, err: S, send: F) -> Result<(), ()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    S: tokio::io::AsyncRead + Unpin,
+    F: Fn(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), ()>>,
+{
+    async fn pipe<R, F, Fut>(mut stream: R, send: &F) -> Result<(), ()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        F: Fn(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = Result<(), ()>>,
+    {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = [0u8; 8192];
+        loop {
+            let count = stream.read(&mut buffer).await.map_err(|_| ())?;
+            if count == 0 {
+                return Ok(());
+            }
+            send(buffer[..count].to_vec()).await?;
+        }
+    }
+    tokio::try_join!(pipe(out, &send), pipe(err, &send))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn one_pipe_eof_does_not_truncate_the_other_tail() {
+        use tokio::io::AsyncWriteExt;
+        for close_stdout in [false, true] {
+            let (out, mut out_writer) = tokio::io::duplex(64);
+            let (err, mut err_writer) = tokio::io::duplex(64);
+            let bytes = std::sync::Mutex::new(Vec::new());
+            let writer = async {
+                let remaining = if close_stdout {
+                    out_writer.shutdown().await.unwrap();
+                    &mut err_writer
+                } else {
+                    err_writer.shutdown().await.unwrap();
+                    &mut out_writer
+                };
+                tokio::task::yield_now().await;
+                remaining.write_all(b"TAIL\n").await.unwrap();
+                remaining.shutdown().await.unwrap();
+            };
+            let drain = super::drain_command_output(out, err, |chunk| {
+                bytes.lock().unwrap().extend(chunk);
+                std::future::ready(Ok(()))
+            });
+            let (_, result) = tokio::join!(writer, drain);
+            assert_eq!(result, Ok(()));
+            assert_eq!(*bytes.lock().unwrap(), b"TAIL\n");
+        }
+    }
 }
 
 /// 横幅 + 持续日志流。颜色形态故意覆盖 M1 验收的每一项：
