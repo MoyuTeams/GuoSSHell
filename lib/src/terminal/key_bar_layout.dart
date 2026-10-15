@@ -119,13 +119,22 @@ class KeyBarLayoutWriter {
       if (!response.ok) throw StateError(response.detail);
     });
     _pending = completed;
+    // 只释放本次占用的写入槽：send 失败后槽可能已被下一次保存占用。
+    void release() {
+      if (identical(_pending, completed)) _pending = null;
+    }
+
     completed.then(
-      (_) => _pending = null,
-      onError: (Object error, StackTrace stack) {
-        _pending = null;
-      },
+      (_) => release(),
+      onError: (Object error, StackTrace stack) => release(),
     );
-    send(rows);
+    try {
+      send(rows);
+    } catch (error, stack) {
+      // 请求未发出，不会有确认到达；立即释放写入槽并把错误交给调用者。
+      release();
+      return Future.error(error, stack);
+    }
     return completed.timeout(timeout);
   }
 }

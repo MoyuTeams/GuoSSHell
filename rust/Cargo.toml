@@ -56,3 +56,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 # 只给 examples（m0_loopback / demo_server）用，不进 App 依赖图。
 [dev-dependencies]
 bytes = "1"
+
+# demo_server 内有回归测试（内存管道，不起子进程，各平台通用）；
+# example 默认不进 `cargo test`，需显式打开。
+[[example]]
+name = "demo_server"
+test = true

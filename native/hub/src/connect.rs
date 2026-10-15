@@ -1472,6 +1472,23 @@ fn broker_response(kind: PromptKind, mut reply: ProtectedReply) -> InteractionRe
     }
 }
 
+/// 刚通过认证的密码只能记到同一认证目标与凭据上：连接期间改了这些字段，
+/// 密码就不再对应目录中的记录。名称、备注、分组、终端覆盖等与认证无关的
+/// 编辑不影响记住密码；主机密钥策略、远端命令也不决定密码属于谁。
+fn same_authentication_target(
+    current: &ConnectionProfile,
+    authenticated: &ConnectionProfile,
+) -> bool {
+    current.id == authenticated.id
+        && current.host == authenticated.host
+        && current.port == authenticated.port
+        && current.username == authenticated.username
+        && current.transport == authenticated.transport
+        && current.authentication == authenticated.authentication
+        && current.credential_ref == authenticated.credential_ref
+        && current.identity_file == authenticated.identity_file
+}
+
 /// 连接成功后把用户输入的密码存进钥匙串（目录与钥匙串的一致性由上游
 /// `CredentialCoordinator` 保证）。存不进去不影响本次会话。
 pub(crate) async fn store_password(
@@ -1493,7 +1510,8 @@ pub(crate) async fn store_password(
         let Some(profile) = catalog.connections.get(&authenticated.id).cloned() else {
             return Ok(None);
         };
-        if profile != authenticated {
+        if !same_authentication_target(&profile, &authenticated) {
+            debug_print!("[connect] saving password: 认证目标或凭据已在连接期间被修改，不保存");
             return Ok(None);
         }
         task_context

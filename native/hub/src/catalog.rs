@@ -854,6 +854,8 @@ mod tests {
             "credential",
             "deleted",
             "unchanged",
+            "name",
+            "note",
         ] {
             let (context, vault) = context();
             let context = Arc::new(context);
@@ -875,6 +877,11 @@ mod tests {
                 "user" => edited.username = "other".into(),
                 "port" => edited.port = 2222,
                 "auth" => edited.authentication = AuthenticationKind::KeyboardInteractive,
+                "name" => edited.name = "连接期间改名".into(),
+                "note" => {
+                    edited.note = "连接期间补充备注".into();
+                    edited.tags.insert("新标签".into());
+                }
                 _ => {}
             }
             let mutation = if change == "deleted" {
@@ -898,8 +905,16 @@ mod tests {
             )
             .await;
             let after = context.repository.load_catalog().expect("读取目录");
-            if change == "unchanged" {
-                let stored = stored.expect("未修改的目标允许记住密码");
+            if matches!(change, "unchanged" | "name" | "note") {
+                let stored = stored.expect("认证目标未变时允许记住密码");
+                // 保存的是目录当前记录：连接期间的无关编辑不被覆盖回旧值。
+                let saved = &after.connections[&original.id];
+                let edited = &before.connections[&original.id];
+                assert_eq!(
+                    (&saved.name, &saved.note, &saved.tags),
+                    (&edited.name, &edited.note, &edited.tags),
+                    "{change}"
+                );
                 let reference = stored.credential_ref.expect("新引用返回同一会话");
                 assert_eq!(
                     vault

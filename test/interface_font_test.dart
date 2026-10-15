@@ -60,6 +60,59 @@ void main() {
     await expectLater(registry.load('third', Uint8List(1)), throwsStateError);
     expect(loaded, ['one', 'two']);
   });
+  test('注册失败退还额度并移出缓存，同一字体可再次尝试', () async {
+    var attempts = 0;
+    final registry = InterfaceFontRegistry(
+      register: (family, _) async {
+        if (++attempts == 1) throw StateError('引擎拒绝');
+      },
+      maxFonts: 1,
+      maxBytes: 4,
+    );
+    await expectLater(registry.load('one', Uint8List(4)), throwsStateError);
+    expect(registry.accountedFontCount, 0);
+    expect(registry.accountedByteCount, 0);
+    await registry.load('one', Uint8List(4));
+    expect(attempts, 2);
+    expect(registry.accountedFontCount, 1);
+    expect(registry.accountedByteCount, 4);
+  });
+  test('同步抛出的注册失败同样退额', () async {
+    final registry = InterfaceFontRegistry(
+      register: (family, _) => throw StateError('同步失败'),
+      maxFonts: 1,
+      maxBytes: 4,
+    );
+    await expectLater(registry.load('one', Uint8List(4)), throwsStateError);
+    expect(registry.accountedFontCount, 0);
+    expect(registry.accountedByteCount, 0);
+  });
+  test('重复预览同一字体只注册与计额一次', () async {
+    final fixture = FontFixture();
+    final loaded = <String>[];
+    final registry = InterfaceFontRegistry(
+      register: (family, _) async => loaded.add(family),
+    );
+    final interface = InterfaceTypography(
+      transport: fixture.send,
+      register: registry.load,
+    );
+    final terminal = InterfaceTypography(
+      slot: 'terminal',
+      transport: fixture.send,
+      register: registry.load,
+    );
+    XFile chosen() =>
+        XFile.fromData(Uint8List(4), name: 'chosen.ttf', path: 'chosen.ttf');
+    await interface.prepare(chosen());
+    await interface.prepare(chosen());
+    await terminal.prepare(chosen());
+    expect(loaded, ['GuoshFont_fixture']);
+    expect(registry.accountedFontCount, 1);
+    expect(registry.accountedByteCount, 4);
+    interface.dispose();
+    terminal.dispose();
+  });
   for (final platform in [
     TargetPlatform.iOS,
     TargetPlatform.android,

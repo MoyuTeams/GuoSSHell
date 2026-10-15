@@ -37,6 +37,8 @@ final _fontRegistry = InterfaceFontRegistry(
 );
 
 /// Flutter 无字体卸载接口；预览与应用共用进程期额度，取消草稿不能退还已注册字体。
+/// 额度按 family（含内容 hash）计一次，进行中与成功注册均占额；注册失败的
+/// family 退还额度并移出缓存，之后可重新尝试（与 DesktopFontCache 一致）。
 class InterfaceFontRegistry {
   InterfaceFontRegistry({
     required this.register,
@@ -49,6 +51,9 @@ class InterfaceFontRegistry {
   final _loaded = <String, Future<void>>{};
   int _bytes = 0;
 
+  int get accountedFontCount => _loaded.length;
+  int get accountedByteCount => _bytes;
+
   Future<void> load(String family, Uint8List bytes) {
     if (bytes.isEmpty) return Future.value();
     final existing = _loaded[family];
@@ -56,11 +61,21 @@ class InterfaceFontRegistry {
     if (_loaded.length >= maxFonts || bytes.length > maxBytes - _bytes) {
       return Future.error(StateError('本次运行的字体加载额度已用尽，请重启应用后再选择'));
     }
-    _bytes += bytes.length;
+    final size = bytes.length;
+    _bytes += size;
     final completed = Completer<void>();
     _loaded[family] = completed.future;
-    Future<void>.sync(() => register(family, bytes))
-        .then(completed.complete, onError: completed.completeError);
+    Future<void>.sync(() => register(family, bytes)).then(
+      completed.complete,
+      onError: (Object error, StackTrace stack) {
+        // 失败的注册没有占用引擎字体，退额后同一 family 可再试。
+        if (identical(_loaded[family], completed.future)) {
+          _loaded.remove(family);
+          _bytes -= size;
+        }
+        completed.completeError(error, stack);
+      },
+    );
     return completed.future;
   }
 }

@@ -126,7 +126,8 @@ typedef struct GuosshNormalPresentedGeometry {
 /* kind: 1=press，2=move，3=release，4=wheel；button: 0=none，1=left，2=middle，3=right。
  * modifiers: Shift=1，Control=2，Alt=4，Super=8；buttons: Left=1，Middle=2，Right=4。
  * remote 坐标为零基屏幕单元；delta_y 为有符号行数，正数向下，绝对值最多64。
- * 非 wheel 的 delta 为零；当前终端水平滚轮不编码，非零 delta_x 明确拒绝。
+ * 非 wheel 的 delta 为零；wheel 的 delta_x 绝对值最多64，超出仍按无效事件拒绝；
+ * 范围内的非零 delta_x 接受但忽略（当前终端不编码水平滚轮，只按 delta_y 处理）。
  * 几何必须与原 presented 完全一致。Busy 不消费 ID，暂停后续 key/geometry，原样重投。
  */
 typedef struct GuosshNormalFrozenPointer {

@@ -237,38 +237,6 @@ where
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    #[tokio::test]
-    async fn one_pipe_eof_does_not_truncate_the_other_tail() {
-        use tokio::io::AsyncWriteExt;
-        for close_stdout in [false, true] {
-            let (out, mut out_writer) = tokio::io::duplex(64);
-            let (err, mut err_writer) = tokio::io::duplex(64);
-            let bytes = std::sync::Mutex::new(Vec::new());
-            let writer = async {
-                let remaining = if close_stdout {
-                    out_writer.shutdown().await.unwrap();
-                    &mut err_writer
-                } else {
-                    err_writer.shutdown().await.unwrap();
-                    &mut out_writer
-                };
-                tokio::task::yield_now().await;
-                remaining.write_all(b"TAIL\n").await.unwrap();
-                remaining.shutdown().await.unwrap();
-            };
-            let drain = super::drain_command_output(out, err, |chunk| {
-                bytes.lock().unwrap().extend(chunk);
-                std::future::ready(Ok(()))
-            });
-            let (_, result) = tokio::join!(writer, drain);
-            assert_eq!(result, Ok(()));
-            assert_eq!(*bytes.lock().unwrap(), b"TAIL\n");
-        }
-    }
-}
-
 /// 横幅 + 持续日志流。颜色形态故意覆盖 M1 验收的每一项：
 /// 16 色 / truecolor / 反显 / 粗体 / CJK 宽字符 / emoji / 长空白 run。
 async fn demo_stream(channel: Channel<Msg>) {
@@ -384,4 +352,36 @@ fn dirs_demo_host_key() -> std::path::PathBuf {
     let dir = std::path::Path::new(&home).join(".guosh-demo");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("hostkey")
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn one_pipe_eof_does_not_truncate_the_other_tail() {
+        use tokio::io::AsyncWriteExt;
+        for close_stdout in [false, true] {
+            let (out, mut out_writer) = tokio::io::duplex(64);
+            let (err, mut err_writer) = tokio::io::duplex(64);
+            let bytes = std::sync::Mutex::new(Vec::new());
+            let writer = async {
+                let remaining = if close_stdout {
+                    out_writer.shutdown().await.unwrap();
+                    &mut err_writer
+                } else {
+                    err_writer.shutdown().await.unwrap();
+                    &mut out_writer
+                };
+                tokio::task::yield_now().await;
+                remaining.write_all(b"TAIL\n").await.unwrap();
+                remaining.shutdown().await.unwrap();
+            };
+            let drain = super::drain_command_output(out, err, |chunk| {
+                bytes.lock().unwrap().extend(chunk);
+                std::future::ready(Ok(()))
+            });
+            let (_, result) = tokio::join!(writer, drain);
+            assert_eq!(result, Ok(()));
+            assert_eq!(*bytes.lock().unwrap(), b"TAIL\n");
+        }
+    }
 }

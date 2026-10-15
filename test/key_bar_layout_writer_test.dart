@@ -38,4 +38,35 @@ void main() {
     expect(done, isFalse);
     await replies.close();
   });
+
+  test('send 同步抛出时释放写入槽并把错误交给调用者', () async {
+    final replies = StreamController<KeyBarLayoutResult>.broadcast(sync: true);
+    final sent = <List<List<String>>>[];
+    var fail = true;
+    final writer = KeyBarLayoutWriter(
+      results: replies.stream,
+      send: (rows) {
+        if (fail) throw StateError('发送失败');
+        sent.add(rows);
+      },
+    );
+    await expectLater(
+      writer.save([
+        ['escape'],
+      ]),
+      throwsA(isA<StateError>().having((e) => e.message, 'message', '发送失败')),
+    );
+    fail = false;
+    final next = writer.save([
+      ['tab'],
+    ]);
+    expect(sent, [
+      [
+        ['tab'],
+      ],
+    ]);
+    replies.add(const KeyBarLayoutResult(ok: true, detail: ''));
+    await next;
+    await replies.close();
+  });
 }
