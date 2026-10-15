@@ -353,6 +353,8 @@ class _TerminalPaneState extends State<TerminalPane> {
     _branchReady = true;
     _state = SessionState.connecting;
     normal.performAction = _performAction;
+    normal.readClipboard = () async =>
+        (await Clipboard.getData('text/plain'))?.text;
     normal.onClipboard = (text) =>
         unawaited(_pointerClipboard.receiveCopy(text));
     normal.showPrompt = (message) async {
@@ -491,13 +493,16 @@ class _TerminalPaneState extends State<TerminalPane> {
     });
     // 本地 shell 或系统 ssh 以退出码 0 结束：与常见终端一致直接关窗格；非 0 保留并提供
     // 重新启动。离开 closed（重新启动）后允许下一次退出再关闭。
-    if (_state != SessionState.closed) _exitClosing = false;
-    if (_controller.target.runsLocalProcess &&
+    if (_state != SessionState.closed && _state != SessionState.cancelled) {
+      _exitClosing = false;
+    }
+    if ((_state == SessionState.cancelled ||
+            (_controller.target.runsLocalProcess &&
+                _state == SessionState.closed &&
+                localShellExitCode(_detail) == 0)) &&
         !_exitClosing &&
         !normal.closing &&
-        normal.error.isEmpty &&
-        _state == SessionState.closed &&
-        localShellExitCode(_detail) == 0) {
+        normal.error.isEmpty) {
       _exitClosing = true;
       SchedulerBinding.instance.addPostFrameCallback((_) {
         if (mounted) widget.onClose();
@@ -682,6 +687,7 @@ class _TerminalPaneState extends State<TerminalPane> {
       _scope?.ownsTerminalInput(_controller, false);
       normal.removeListener(_normalChanged);
       normal.performAction = null;
+      normal.readClipboard = null;
       normal.showPrompt = null;
       normal.onClipboard = null;
       unawaited(normal.detach());
@@ -1219,10 +1225,6 @@ class _TerminalPaneState extends State<TerminalPane> {
   /// 只有触屏选区显示浮动菜单；鼠标选区仅高亮，由右键直接复制或粘贴。
   void _onSelectionChanged() {
     if (!mounted) return;
-    if (_normal != null) {
-      _selectionMenu.remove();
-      return;
-    }
     if (!_inputMode.touch) {
       _selectionMenu.remove();
       return;
@@ -1319,8 +1321,13 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   /// 系统剪贴板 → 远端（bracketed paste 等由 Rust 按远端模式处理；V2 经有序 Paste）。
   Future<void> _pasteClipboard() async {
+    final normal = _normal;
+    if (normal != null) {
+      await normal.pasteClipboard();
+      return;
+    }
     final text = (await Clipboard.getData('text/plain'))?.text;
-    if (text == null || text.isEmpty) return;
+    if (!mounted || text == null || text.isEmpty) return;
     _terminal.paste(text);
   }
 

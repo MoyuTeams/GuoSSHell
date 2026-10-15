@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -247,6 +249,18 @@ void main() {
     await f.dispose();
   });
 
+  test('InputTooLarge 拆分起始代理对时保持完整字符', () async {
+    final f = _Fixture();
+    await f.start();
+    f.hold();
+    f.session.send(const DesktopEventPaste(text: '🙂a'));
+    f.reply(f.held.removeAt(0), failure: DesktopFailure.inputTooLarge);
+    expect(f.events.last, const DesktopEventPaste(text: '🙂'));
+    f.reply(f.held.removeAt(0));
+    expect(f.events.last, const DesktopEventPaste(text: 'a'));
+    await f.dispose();
+  });
+
   test('按键回报的壳动作交窗格；Copy 结果回调剪贴板', () async {
     final f = _Fixture();
     await f.start();
@@ -281,6 +295,123 @@ void main() {
     );
     expect(await closed, isTrue);
     expect(f.gateway.orderedEvents, isEmpty);
+    await f.dispose();
+  });
+
+  test('粘贴读取完成前 Enter 不得越过，迟到剪贴板不能跨 attempt', () async {
+    final f = _Fixture();
+    await f.start();
+    f.gateway.lifecycle(NativeLifecycleState.authenticated);
+    final clipboard = Completer<String?>();
+    f.session.readClipboard = () => clipboard.future;
+    f.hold();
+    f.session.send(_key('character:v'));
+    f.reply(f.held.removeAt(0), action: DesktopAction.paste);
+    f.session.send(_key('enter'));
+    expect(f.events, hasLength(1));
+    clipboard.complete('command');
+    await Future<void>.delayed(Duration.zero);
+    expect(f.events.last, const DesktopEventPaste(text: 'command'));
+    f.reply(f.held.removeAt(0));
+    expect(f.events.last, _key('enter'));
+    f.reply(f.held.removeAt(0));
+
+    final stale = Completer<String?>();
+    f.session.readClipboard = () => stale.future;
+    final paste = f.session.pasteClipboard();
+    f.gateway.lifecycle(
+      NativeLifecycleState.authenticated,
+      revision: 2,
+      attempt: 2,
+    );
+    stale.complete('old secret');
+    await paste;
+    expect(f.events.whereType<DesktopEventPaste>(), hasLength(1));
+    await f.dispose();
+  });
+
+  test('认证前排队有总量上限，超限不发送残余 Enter', () async {
+    final f = _Fixture();
+    f.session.send(
+      DesktopEventPaste(
+        text: 'x' * (DesktopOrderedSession.maxQueuedTextUnits + 1),
+      ),
+    );
+    f.session.send(_key('enter'));
+    expect(f.session.error, isNotEmpty);
+    await f.start();
+    expect(f.events, isEmpty);
+    await f.dispose();
+  });
+
+  test('菜单粘贴保持之前已排队的文本顺序', () async {
+    final f = _Fixture();
+    await f.start();
+    f.hold();
+    f.session
+      ..send(const DesktopEventText(text: 'one'))
+      ..send(const DesktopEventText(text: 'two'));
+    final clipboard = Completer<String?>();
+    f.session.readClipboard = () => clipboard.future;
+    final paste = f.session.pasteClipboard();
+    f.session.send(_key('enter'));
+    f.reply(f.held.removeAt(0));
+    expect(f.events.last, const DesktopEventText(text: 'two'));
+    f.reply(f.held.removeAt(0));
+    expect(f.events, hasLength(2));
+    clipboard.complete('three');
+    await paste;
+    expect(f.events.last, const DesktopEventPaste(text: 'three'));
+    f.reply(f.held.removeAt(0));
+    expect(f.events.last, _key('enter'));
+    await f.dispose();
+  });
+
+  test('认证前离散输入条目有上限', () async {
+    final f = _Fixture();
+    for (var i = 0; i <= DesktopOrderedSession.maxQueuedEvents; i++) {
+      f.session.send(_key('enter'));
+    }
+    expect(f.session.error, isNotEmpty);
+    await f.start();
+    expect(f.events, isEmpty);
+    await f.dispose();
+  });
+
+  testWidgets('Busy 输入不阻塞关闭，未消费的序号用于 Disconnect', (tester) async {
+    final f = _Fixture();
+    await f.start(tick: tester.pump);
+    f.gateway.onOrdered = (request) => DesktopSessionTestGateway.accept(
+      request,
+      failure: request.event is DesktopEventDisconnect
+          ? DesktopFailure.none
+          : DesktopFailure.busy,
+    );
+    f.session.send(const DesktopEventText(text: 'pending'));
+    final closed = f.session.close();
+    await tester.pump(const Duration(milliseconds: 25));
+    expect(f.events.last, const DesktopEventDisconnect());
+    expect(f.seqs, [1, 1]);
+    f.gateway.lifecycle(NativeLifecycleState.ended);
+    expect(await closed, isTrue);
+    await f.dispose();
+  });
+
+  testWidgets('关闭等待中的数据 Busy 回执会替换为 Disconnect，关闭超时后停止重试', (tester) async {
+    final f = _Fixture();
+    await f.start(tick: tester.pump);
+    f.hold();
+    f.session.send(const DesktopEventText(text: 'pending'));
+    final closed = f.session.close();
+    f.reply(f.held.removeAt(0), failure: DesktopFailure.busy);
+    expect(f.events.last, const DesktopEventDisconnect());
+    expect(f.seqs, [1, 1]);
+    f.reply(f.held.removeAt(0), failure: DesktopFailure.busy);
+    await tester.pump(const Duration(seconds: 10));
+    expect(await closed, isFalse);
+    final count = f.events.length;
+    await tester.pump(const Duration(seconds: 1));
+    expect(f.events, hasLength(count));
     await f.dispose();
   });
 

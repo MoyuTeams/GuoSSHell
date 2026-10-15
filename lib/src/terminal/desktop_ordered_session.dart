@@ -29,7 +29,8 @@ import 'session_target.dart';
 /// - None / InvalidEvent / PolicyUnavailable：seq 已消费，继续下一个；
 /// - Busy：seq 未推进，原事件用同一 seq 稍后重试（仅鼠标移动可丢弃）；
 /// - InputTooLarge：文本/粘贴对半拆分后用同一 seq 重发。
-/// Start 被接受前的输入在本地按序排队（type-ahead）。
+/// Start 被接受前的输入在本地按序排队（type-ahead），最多 1024 条、512 Ki UTF-16 单元。
+/// 关闭可用 Disconnect 替换明确收到 Busy 的输入，不等待数据预算。
 class DesktopOrderedSession extends ChangeNotifier {
   DesktopOrderedSession({
     required this.source,
@@ -54,6 +55,7 @@ class DesktopOrderedSession extends ChangeNotifier {
 
   /// Rust 按 profile 仲裁后回报的壳动作，由窗格执行。
   Future<void> Function(DesktopAction action)? performAction;
+  Future<String?> Function()? readClipboard;
   Future<void> Function(DesktopPrompt prompt)? showPrompt;
 
   /// Copy 事件取到的选区文字。
@@ -61,6 +63,8 @@ class DesktopOrderedSession extends ChangeNotifier {
 
   static const _busyRetry = Duration(milliseconds: 20);
   static const _resultTimeout = Duration(seconds: 10);
+  static const maxQueuedEvents = 1024;
+  static const maxQueuedTextUnits = 512 * 1024;
 
   final _subscriptions = <StreamSubscription>[];
   final _frames = <int, (DesktopFrame, Uint8List)>{};
@@ -84,6 +88,10 @@ class DesktopOrderedSession extends ChangeNotifier {
   bool _accepted = false;
   bool _closed = false;
   bool _disposed = false;
+  bool _inputBlocked = false;
+  bool _readingClipboard = false;
+  DesktopEvent? _clipboardMarker;
+  int _inputGeneration = 0;
   Future<bool>? _closeFuture;
   Completer<bool>? _ended;
   Timer? _closeTimer;
@@ -374,14 +382,51 @@ class DesktopOrderedSession extends ChangeNotifier {
   /// 按序发送；鼠标移动、视口、尺寸与帧确认只保留队尾最新一条。
   void send(DesktopEvent event) {
     if (_disposed || (_closed && event is! DesktopEventDisconnect)) return;
+    if (_inputBlocked &&
+        event is! DesktopEventDisconnect &&
+        event is! DesktopEventReconnect) {
+      return;
+    }
     if (_coalescible(event) &&
         _queue.isNotEmpty &&
         _coalescible(_queue.last) &&
         _queue.last.runtimeType == event.runtimeType) {
       _queue.removeLast();
     }
-    _queue.add(event);
+    if (!_enqueue(event)) return;
     _pump();
+  }
+
+  static int _textUnits(DesktopEvent? event) => switch (event) {
+    DesktopEventText(:final text) ||
+    DesktopEventPaste(:final text) => text.length,
+    DesktopEventKey(:final key) ||
+    DesktopEventSoftKey(:final key) => key.length,
+    _ => 0,
+  };
+
+  bool _enqueue(DesktopEvent event, {int? at}) {
+    final units =
+        _textUnits(event) +
+        _textUnits(_inflight) +
+        _queue.fold<int>(0, (total, item) => total + _textUnits(item));
+    if (event is! DesktopEventDisconnect &&
+        (_queue.length >= maxQueuedEvents || units > maxQueuedTextUnits)) {
+      // 丢弃整段未发送输入，避免仅丢文本后仍执行排队的 Enter。
+      _queue.clear();
+      _inputBlocked = true;
+      _fail('待发送输入超过上限，请重新连接');
+      return false;
+    }
+    if (at == null) {
+      _queue.add(event);
+    } else {
+      final events = _queue.toList()..insert(at, event);
+      _queue
+        ..clear()
+        ..addAll(events);
+    }
+    return true;
   }
 
   static bool _coalescible(DesktopEvent event) =>
@@ -395,7 +440,8 @@ class DesktopOrderedSession extends ChangeNotifier {
         !_accepted ||
         _inflight != null ||
         _retry != null ||
-        _queue.isEmpty) {
+        _queue.isEmpty ||
+        identical(_queue.first, _clipboardMarker)) {
       return;
     }
     _inflight = _queue.removeFirst();
@@ -440,10 +486,19 @@ class DesktopOrderedSession extends ChangeNotifier {
         _inflight = null;
         final action = message.action;
         if (message.failure == DesktopFailure.none && action != null) {
-          unawaited(performAction?.call(action));
+          if (action == DesktopAction.paste) {
+            unawaited(pasteClipboard(beforeQueued: true));
+          } else {
+            unawaited(performAction?.call(action));
+          }
         }
       case DesktopFailure.busy:
-        if (event is DesktopEventMouse && event.kind == 'move') {
+        if (_closed && event is! DesktopEventDisconnect) {
+          _queue.clear();
+          _inflight = const DesktopEventDisconnect();
+          _transmit();
+          return;
+        } else if (event is DesktopEventMouse && event.kind == 'move') {
           _inflight = null;
         } else {
           _retry = Timer(_busyRetry, () {
@@ -456,7 +511,10 @@ class DesktopOrderedSession extends ChangeNotifier {
         final halves = _split(event);
         if (halves != null) {
           _inflight = halves.$1;
-          _queue.addFirst(halves.$2);
+          if (!_enqueue(halves.$2, at: 0)) {
+            _inflight = null;
+            return;
+          }
           _transmit();
           return;
         }
@@ -481,10 +539,18 @@ class DesktopOrderedSession extends ChangeNotifier {
       _ => null,
     };
     if (text == null) return null;
-    final runes = text.runes.toList(growable: false);
-    if (runes.length < 2) return null;
-    final head = String.fromCharCodes(runes, 0, runes.length ~/ 2);
-    final tail = String.fromCharCodes(runes, runes.length ~/ 2);
+    if (text.length < 2) return null;
+    var middle = text.length ~/ 2;
+    if (text.codeUnitAt(middle) >= 0xdc00 &&
+        text.codeUnitAt(middle) <= 0xdfff &&
+        text.codeUnitAt(middle - 1) >= 0xd800 &&
+        text.codeUnitAt(middle - 1) <= 0xdbff) {
+      middle--;
+    }
+    if (middle == 0) middle = 2;
+    if (middle >= text.length) return null;
+    final head = text.substring(0, middle);
+    final tail = text.substring(middle);
     return event is DesktopEventPaste
         ? (DesktopEventPaste(text: head), DesktopEventPaste(text: tail))
         : (DesktopEventText(text: head), DesktopEventText(text: tail));
@@ -521,6 +587,8 @@ class DesktopOrderedSession extends ChangeNotifier {
 
   Future<bool> reconnect() async {
     if (_closed || !_startSent) return false;
+    _inputBlocked = false;
+    ++_inputGeneration;
     error = '';
     if (phase == DesktopPanePhase.failed && _accepted) {
       phase = DesktopPanePhase.running;
@@ -528,6 +596,54 @@ class DesktopOrderedSession extends ChangeNotifier {
     send(const DesktopEventReconnect());
     notifyListeners();
     return true;
+  }
+
+  /// 剪贴板读取属于当前输入顺序；完成前后续按键不能越过粘贴。
+  Future<void> pasteClipboard({bool beforeQueued = false}) async {
+    if (_closed || _disposed || _readingClipboard || _inputBlocked) return;
+    _readingClipboard = true;
+    final attempt = lifecycle?.attempt;
+    final generation = _inputGeneration;
+    // 占住输入位置：菜单粘贴排在已有输入后，按键裁决的粘贴排在后续按键前。
+    final marker = DesktopEventPaste(text: '');
+    _clipboardMarker = marker;
+    if (!_enqueue(marker, at: beforeQueued ? 0 : null)) {
+      _clipboardMarker = null;
+      _readingClipboard = false;
+      return;
+    }
+    _pump();
+    try {
+      final text = await readClipboard?.call();
+      final index = _queue.toList().indexWhere(
+        (event) => identical(event, marker),
+      );
+      if (index >= 0) _queue.removeWhere((event) => identical(event, marker));
+      if (!_closed &&
+          !_disposed &&
+          !_inputBlocked &&
+          generation == _inputGeneration &&
+          lifecycle?.attempt == attempt &&
+          index >= 0 &&
+          text != null &&
+          text.isNotEmpty) {
+        _enqueue(DesktopEventPaste(text: text), at: index);
+      }
+    } catch (_) {
+      if (!_closed &&
+          !_disposed &&
+          generation == _inputGeneration &&
+          lifecycle?.attempt == attempt) {
+        _queue.clear();
+        _inputBlocked = true;
+        _fail('无法读取剪贴板，请重新连接');
+      }
+    } finally {
+      _queue.removeWhere((event) => identical(event, marker));
+      _clipboardMarker = null;
+      _readingClipboard = false;
+      _pump();
+    }
   }
 
   /// Start 之前取消准备；之后有序 Disconnect，等 lifecycle ended 或 status closed。
@@ -557,6 +673,12 @@ class DesktopOrderedSession extends ChangeNotifier {
       );
     } else {
       _queue.clear();
+      // Busy 已明确拒绝该序号，允许以 Disconnect 替换，不等待数据预算。
+      if (_retry != null) {
+        _retry!.cancel();
+        _retry = null;
+        _inflight = null;
+      }
       send(const DesktopEventDisconnect());
     }
     return _ended!.future;
@@ -564,6 +686,11 @@ class DesktopOrderedSession extends ChangeNotifier {
 
   void _finishClose(bool success) {
     _closeTimer?.cancel();
+    _retry?.cancel();
+    _retry = null;
+    _resultTimer?.cancel();
+    _inflight = null;
+    _queue.clear();
     if (success) phase = DesktopPanePhase.ended;
     if (_ended?.isCompleted == false) _ended!.complete(success);
   }

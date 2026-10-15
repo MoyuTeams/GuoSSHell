@@ -41,7 +41,7 @@ Profile 参数（终端参数/协议/绑定/滚回）在新会话或显式重启
 
 - 应用内部使用有版本判别类型：`InheritTerminalSlot`（继承终端槽）、`ExplicitFamily`（显式 family）、`ExplicitCachedTtf { hash }`（显式缓存 TTF）；无元数据旧记录投影为 legacy，运行走旧终端槽，不猜测历史意图。
 - 绑定保存在 `TerminalSettingsV1.extensions["guosshell.font"]`（有版本载荷），与 profile 创建/复制/删除同属一个 configuration 事务，使用整体 revision CAS；未知版本/不可解析载荷原样保留并返回不可编辑原因，拒绝会改变 family 或绑定的写请求。
-- 显式绑定（含继承）用不可变会话快照，不被槽更新覆盖；legacy 路径保留旧终端槽即时监听。缓存 blob 保守不删：profile 删除、槽替换/重置、导入失败回滚都不移除可能被引用的文件。
+- V2 的 Prepared 字体一律使用不可变会话快照，包括从 legacy 终端槽捕获的来源，不被槽更新覆盖；仅 V1／未使用 Prepared 的 legacy 路径保留旧终端槽即时监听。缓存 blob 保守不删：profile 删除、槽替换/重置、导入失败回滚都不移除可能被引用的文件。
 - profile 选 TTF 不偷改全局槽：先持久化验证后的不可变 blob，再以 CAS 发布模式/hash；预览不持久化。
 - 移动渲染始终取终端槽，不受桌面模式影响。
 

@@ -89,6 +89,7 @@ class _PaneHarness {
   final clipboardWrites = <String>[];
   final executed = <DesktopAction>[];
   bool ownsInput = false;
+  int closeRequests = 0;
   int lifecycleRevision = 0;
   int attempt = 12;
   final paintKey = GlobalKey();
@@ -204,7 +205,7 @@ class _PaneHarness {
               controller: controller,
               desktopGateway: gateway,
               onActivate: () {},
-              onClose: () {},
+              onClose: () => closeRequests++,
             ),
           ),
         ),
@@ -307,6 +308,37 @@ class _PaneHarness {
 }
 
 void main() {
+  testWidgets('首次认证取消会回收 V2 窗格且只请求关闭一次', (tester) async {
+    final h = _PaneHarness();
+    await h.mount(tester);
+    h.status(SessionState.connecting);
+    h.status(SessionState.cancelled);
+    await tester.pumpAndSettle();
+    expect(h.closeRequests, 1);
+    h.status(SessionState.cancelled);
+    await tester.pumpAndSettle();
+    expect(h.closeRequests, 1);
+    await h.close(tester);
+  });
+
+  testWidgets('桌面触屏选区提供浮动复制入口并发送有序 Copy', (tester) async {
+    final h = _PaneHarness();
+    await h.mount(tester);
+    TerminalInputMode.shared.pointer(ui.PointerDeviceKind.touch);
+    h.frame(selection: true);
+    await tester.pumpAndSettle();
+    final toolbar = tester.widget<AdaptiveTextSelectionToolbar>(
+      find.byType(AdaptiveTextSelectionToolbar),
+    );
+    final copy = toolbar.buttonItems!.singleWhere(
+      (item) => item.type == ContextMenuButtonType.copy,
+    );
+    copy.onPressed!();
+    await tester.pumpAndSettle();
+    expect(h.where<DesktopEventCopy>(), hasLength(1));
+    TerminalInputMode.shared.keyboard();
+    await h.close(tester);
+  });
   testWidgets('桌面 V2：按键经有序通道发 Down/Up，seq 递增，本地快捷键交 Rust', (tester) async {
     final h = _PaneHarness();
     await h.mount(tester);
