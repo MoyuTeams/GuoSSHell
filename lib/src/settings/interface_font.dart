@@ -28,7 +28,42 @@ typedef FontTransport = Future<FontReply> Function(
 );
 typedef FontRegistrar = Future<void> Function(String family, Uint8List bytes);
 int _nextFontRequest = 1;
-final _loadedFonts = <String, Future<void>>{};
+final _fontRegistry = InterfaceFontRegistry(
+  register: (family, bytes) {
+    final loader = FontLoader(family)
+      ..addFont(Future.value(ByteData.sublistView(bytes)));
+    return loader.load();
+  },
+);
+
+/// Flutter 无字体卸载接口；预览与应用共用进程期额度，取消草稿不能退还已注册字体。
+class InterfaceFontRegistry {
+  InterfaceFontRegistry({
+    required this.register,
+    this.maxFonts = 32,
+    this.maxBytes = 128 * 1024 * 1024,
+  });
+  final FontRegistrar register;
+  final int maxFonts;
+  final int maxBytes;
+  final _loaded = <String, Future<void>>{};
+  int _bytes = 0;
+
+  Future<void> load(String family, Uint8List bytes) {
+    if (bytes.isEmpty) return Future.value();
+    final existing = _loaded[family];
+    if (existing != null) return existing;
+    if (_loaded.length >= maxFonts || bytes.length > maxBytes - _bytes) {
+      return Future.error(StateError('本次运行的字体加载额度已用尽，请重启应用后再选择'));
+    }
+    _bytes += bytes.length;
+    final completed = Completer<void>();
+    _loaded[family] = completed.future;
+    Future<void>.sync(() => register(family, bytes))
+        .then(completed.complete, onError: completed.completeError);
+    return completed.future;
+  }
+}
 
 Future<FontReply> _transport(
   String slot,
@@ -51,12 +86,7 @@ Future<FontReply> _transport(
 }
 
 Future<void> _register(String family, Uint8List bytes) {
-  if (bytes.isEmpty) return Future.value();
-  return _loadedFonts.putIfAbsent(family, () {
-    final loader = FontLoader(family)
-      ..addFont(Future.value(ByteData.sublistView(bytes)));
-    return loader.load();
-  });
+  return _fontRegistry.load(family, bytes);
 }
 
 /// 持久化与文件校验在 Rust，Flutter 只负责动态加载和显示。

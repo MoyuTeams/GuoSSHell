@@ -98,11 +98,42 @@ KeyBarButton? keyBarButton(String id) {
   return null;
 }
 
-Future<void> saveKeyBarLayout(List<List<String>> rows) async {
-  final result = KeyBarLayoutResult.rustSignalStream.first.timeout(
-    const Duration(seconds: 10),
-  );
-  SaveKeyBarLayout(rows: rows).sendSignalToRust();
-  final response = (await result).message;
-  if (!response.ok) throw StateError(response.detail);
+/// 旧协议没有请求编号；超时只结束等待，不释放未结算的写入槽。
+class KeyBarLayoutWriter {
+  KeyBarLayoutWriter({
+    required this.results,
+    required this.send,
+    this.timeout = const Duration(seconds: 10),
+  });
+
+  final Stream<KeyBarLayoutResult> results;
+  final void Function(List<List<String>>) send;
+  final Duration timeout;
+  Future<void>? _pending;
+
+  Future<void> save(List<List<String>> rows) {
+    if (_pending != null) {
+      return Future.error(StateError('上次保存尚未确认，请稍后再试'));
+    }
+    final completed = results.first.then<void>((response) {
+      if (!response.ok) throw StateError(response.detail);
+    });
+    _pending = completed;
+    completed.then(
+      (_) => _pending = null,
+      onError: (Object error, StackTrace stack) {
+        _pending = null;
+      },
+    );
+    send(rows);
+    return completed.timeout(timeout);
+  }
 }
+
+final _keyBarWriter = KeyBarLayoutWriter(
+  results: KeyBarLayoutResult.rustSignalStream.map((pack) => pack.message),
+  send: (rows) => SaveKeyBarLayout(rows: rows).sendSignalToRust(),
+);
+
+Future<void> saveKeyBarLayout(List<List<String>> rows) =>
+    _keyBarWriter.save(rows);

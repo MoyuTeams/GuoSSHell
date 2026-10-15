@@ -88,6 +88,7 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
   List<DesktopProfileOption> _profiles = const [];
   bool _profilesFailed = false;
   bool _profileIdFailed = false;
+  late bool _detailsLoaded = widget.existing == null;
 
   @override
   void initState() {
@@ -111,6 +112,7 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
             (connection) {
               if (!mounted) return;
               setState(() {
+                _detailsLoaded = true;
                 // 用户已显式选择或编辑则不覆盖。
                 _profileId ??= connection.profileId;
                 if (!_identityEdited) {
@@ -200,6 +202,7 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
   }
 
   Future<void> _submit() async {
+    if (!widget.quick && _systemSsh && !_detailsLoaded) return;
     if (widget.quick) {
       Navigator.of(context).pop(
         SessionTarget.quick(
@@ -312,8 +315,12 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
           runSpacing: DesktopSpacing.md,
           children: [
             FilledButton(
-              // 已有连接的 profile 引用未读到前不保存，避免误清空。
-              onPressed: _busy || (!widget.quick && _profileId == null)
+              // 完整详情未读到前不保存，不能把尚未加载的私钥路径当成清空。
+              onPressed:
+                  _busy ||
+                      (!widget.quick &&
+                          ((_systemSsh && !_detailsLoaded) ||
+                              _profileId == null))
                   ? null
                   : _submit,
               child: Text(widget.quick ? '连接' : '保存'),
@@ -555,10 +562,13 @@ class _DesktopConnectionEditorState extends State<DesktopConnectionEditor> {
                     if (value != null) setState(() => _profileId = value);
                   },
           ),
-          if (_profileIdFailed && _profileId == null) ...[
+          if (_profileIdFailed &&
+              (_profileId == null || (_systemSsh && !_detailsLoaded))) ...[
             const SizedBox(height: DesktopSpacing.sm),
             Text(
-              '无法读取该连接当前的终端配置；请重新选择后再保存。',
+              _systemSsh
+                  ? '无法读取连接详情与私钥路径；请关闭后重新打开编辑页面。'
+                  : '无法读取该连接当前的终端配置；请重新选择后再保存。',
               style: FluentTheme.of(context).typography.caption,
             ),
           ] else if (_profilesFailed) ...[

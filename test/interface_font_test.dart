@@ -46,6 +46,20 @@ class FontFixture {
 }
 
 void main() {
+  test('预览字体注册共享额度，相同字体复用且超限不调用引擎', () async {
+    final loaded = <String>[];
+    final registry = InterfaceFontRegistry(
+      register: (family, _) async => loaded.add(family),
+      maxFonts: 2,
+      maxBytes: 6,
+    );
+    await registry.load('one', Uint8List(4));
+    await registry.load('one', Uint8List(4));
+    await expectLater(registry.load('large', Uint8List(3)), throwsStateError);
+    await registry.load('two', Uint8List(2));
+    await expectLater(registry.load('third', Uint8List(1)), throwsStateError);
+    expect(loaded, ['one', 'two']);
+  });
   for (final platform in [
     TargetPlatform.iOS,
     TargetPlatform.android,

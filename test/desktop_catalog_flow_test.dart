@@ -69,9 +69,11 @@ class FakeCatalog implements DesktopCatalogGateway {
   DesktopTransport currentTransport = DesktopTransport.nativeSsh;
   String currentIdentityPath = '';
   bool systemAvailable = true;
+  Completer<void>? pendingDetails;
 
   @override
   Future<DesktopConnectionSummary> connection(String id) async {
+    await pendingDetails?.future;
     if (profileIdFail) throw StateError('读取失败');
     return DesktopConnectionSummary(
       id: id,
@@ -761,6 +763,55 @@ void main() {
     await tester.tap(find.text('System OpenSSH').last, warnIfMissed: false);
     await tester.pumpAndSettle();
     expect(find.byKey(const fluent.Key('catalog-auth')), findsOneWidget);
+  });
+
+  testWidgets('System 详情迟到时选择 profile 不得清空私钥路径', (tester) async {
+    final fake = FakeCatalog()
+      ..profiles = profiles
+      ..currentTransport = DesktopTransport.systemOpenSsh
+      ..currentIdentityPath = '/keys/work'
+      ..pendingDetails = Completer<void>()
+      ..saveError = CatalogError.storage;
+    await pumpEditor(
+      tester,
+      fake,
+      existing: saved.copyWith(transport: DesktopTransport.systemOpenSsh),
+    );
+    await pickProfile(tester, '终端甲');
+    expect(
+      tester
+          .widget<fluent.FilledButton>(
+            find.widgetWithText(fluent.FilledButton, '保存'),
+          )
+          .onPressed,
+      isNull,
+    );
+    fake.pendingDetails!.complete();
+    await tester.pumpAndSettle();
+    await save(tester);
+    expect(fake.drafts.single.systemIdentityPath, '/keys/work');
+    expect(fake.drafts.single.profileId, 'p1');
+  });
+
+  testWidgets('System 详情读取失败后选择 profile 仍不得保存', (tester) async {
+    final fake = FakeCatalog()
+      ..profiles = profiles
+      ..profileIdFail = true;
+    await pumpEditor(
+      tester,
+      fake,
+      existing: saved.copyWith(transport: DesktopTransport.systemOpenSsh),
+    );
+    await pickProfile(tester, '终端甲');
+    expect(
+      tester
+          .widget<fluent.FilledButton>(
+            find.widgetWithText(fluent.FilledButton, '保存'),
+          )
+          .onPressed,
+      isNull,
+    );
+    expect(fake.drafts, isEmpty);
   });
 
   testWidgets('编辑已有 System 连接读回私钥文件路径，打开时 Prepare 走 SystemOpenSsh', (
