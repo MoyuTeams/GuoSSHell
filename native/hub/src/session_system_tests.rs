@@ -322,8 +322,10 @@ async fn system_ssh_asks_in_the_terminal_echoes_and_reports_exit_codes() {
         .expect("输入密码");
     read_until(transport.as_mut(), &mut seen, BANNER).await;
     transport.write(b"hello-42").await.expect("输入");
+    // 不同 ssh 实现转发输入的分块不同（整段或逐字节），对端回显随之为
+    // `[echo:hello-42]` 或逐字节的 `...[echo:2]`；只认末字节回显，不依赖分块。
     read_until(transport.as_mut(), &mut seen, b"[echo:").await;
-    read_until(transport.as_mut(), &mut seen, b"42]").await;
+    read_until(transport.as_mut(), &mut seen, b"2]").await;
     transport.write(EXIT_TRIGGER).await.expect("请求对端退出");
     let (code, _) = read_exit(transport.as_mut()).await;
     assert_eq!(
