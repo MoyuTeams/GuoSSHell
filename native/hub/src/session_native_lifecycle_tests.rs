@@ -152,6 +152,75 @@ fn close_original(port: &InputPort, close: &watch::Sender<bool>, request_id: u64
     close.send_replace(true);
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn legacy_system_ssh_reconnect_keeps_transport_for_quick_and_saved_targets() {
+    for saved in [false, true] {
+        let fixture = Fixture::new();
+        // 解析本轮配置即退出，不读取用户 SSH 配置、不连接网络或 agent。
+        let config = fixture.root.join("ssh_config");
+        std::fs::write(&config, "GuoshRegressionInvalidOption yes\n").expect("隔离 ssh 配置");
+        let session_id = if saved { 8511 } else { 8510 };
+        let root = registration(session_id);
+        let mut events = root.0.observe_lifecycle();
+        let settings = root.0.profile.as_ref().clone();
+        let mut profile = ConnectionProfile::new("System 重连", "127.0.0.1");
+        profile.username = "fixture".into();
+        profile.transport = TransportKind::SystemOpenSsh;
+        profile.authentication = AuthenticationKind::Agent;
+        let mut request = request(session_id);
+        if saved {
+            request.connection_id = profile.id.0.to_string();
+            fixture
+                .context
+                .credentials
+                .apply_catalog(
+                    rshell_m0::rshell_core::CatalogMutation::Create(profile.clone()),
+                    rshell_m0::rshell_core::SecretUpdate::Unchanged,
+                )
+                .expect("System 目录目标");
+        }
+        let target = connect::Target::system(profile, saved, Some(config));
+        let (commands_tx, commands) = unbounded_channel();
+        let (_replies_tx, replies) = unbounded_channel();
+        let (close, closing) = watch::channel(false);
+        let context = fixture.context.clone();
+        let task = tokio::spawn(async move {
+            // CURRENT 仅观察生命周期；不设置 V2 SOURCE，实际执行 V1 重连分支。
+            desktop_input_port::CURRENT
+                .scope(
+                    root.0.clone(),
+                    crate::transport_lifecycle::owner(
+                        closing,
+                        run_session_inner(
+                            context,
+                            request,
+                            Some(target),
+                            Some(settings),
+                            None,
+                            commands,
+                            replies,
+                        ),
+                    ),
+                )
+                .await;
+            drop(root);
+        });
+        for attempt in 0..2 {
+            state(&mut events, NativeLifecycleState::Authenticated).await;
+            state(&mut events, NativeLifecycleState::Disconnected).await;
+            if attempt == 0 {
+                assert!(commands_tx.send(SessionCommand::Reconnect).is_ok());
+            }
+        }
+        close.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("关闭 watchdog")
+            .expect("System actor");
+    }
+}
+
 #[tokio::test]
 async fn lifecycle_attempt_is_queryable_before_password_wait_and_connecting_close() {
     let fixture = Fixture::new();

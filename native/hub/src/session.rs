@@ -944,11 +944,11 @@ async fn run_session_inner(
     let mut backlog = VecDeque::new();
     // 回答通道跨重连复用，提示编号也必须跨重连唯一，旧回答不能命中新提示。
     let mut prompts = PromptIds::default();
-    // V2 会话与本地 shell 重连都沿用最初的目标；本地 shell 无法按请求字段重新解析。
-    let frozen_target = if desktop_runtime::SOURCE.try_with(|_| ()).is_ok()
+    // V2 与本地进程沿用最初目标；旧 ConnectRequest 不携带 System SSH 的传输类型。
+    let mut frozen_target = if desktop_runtime::SOURCE.try_with(|_| ()).is_ok()
         || prepared_target
             .as_ref()
-            .is_some_and(connect::Target::is_local)
+            .is_some_and(|target| target.is_local() || target.is_system())
     {
         prepared_target.take()
     } else {
@@ -1042,6 +1042,10 @@ async fn run_session_inner(
                 }
             }
         };
+        if let Some(target) = &mut frozen_target {
+            // 仅接回本次成功认证所保存的引用，目标和终端配置继续保持冻结。
+            target.profile.credential_ref = profile.credential_ref.clone();
+        }
         debug_print!("[session {session_id}] connected");
         let _ = crate::desktop_input_port::CURRENT.try_with(|port| port.connected());
         report(session_id, SessionState::Connected, described);

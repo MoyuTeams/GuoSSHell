@@ -64,8 +64,10 @@ pub async fn run(context: Arc<AppContext>) {
             }
             pack = save_rx.recv() => {
                 let Some(pack) = pack else { break };
-                let request_id = pack.message.request_id;
-                let result = blocking(&context, move |context| save(context, pack.message)).await;
+                let mut request = pack.message;
+                let password = SecretString::from(std::mem::take(&mut request.password));
+                let request_id = request.request_id;
+                let result = blocking(&context, move |context| save_secured(context, request, password)).await;
                 reply(request_id, result);
             }
             pack = delete_rx.recv() => {
@@ -344,7 +346,17 @@ fn apply(
 }
 
 /// 新建或修改一条连接，返回它的 id。
-fn save(context: &AppContext, request: SaveConnection) -> Result<String, CatalogError> {
+#[cfg(test)]
+fn save(context: &AppContext, mut request: SaveConnection) -> Result<String, CatalogError> {
+    let password = SecretString::from(std::mem::take(&mut request.password));
+    save_secured(context, request, password)
+}
+
+fn save_secured(
+    context: &AppContext,
+    request: SaveConnection,
+    password: SecretString,
+) -> Result<String, CatalogError> {
     let _operations = context
         .key_operations
         .lock()
@@ -372,7 +384,7 @@ fn save(context: &AppContext, request: SaveConnection) -> Result<String, Catalog
             return Err(CatalogError::KeyRequired);
         }
     }
-    let secret = secret_update(&request, creating)?;
+    let secret = secret_update_secured(&request, creating, password)?;
     let id = profile.id;
     let mutation = if creating {
         CatalogMutation::Create(profile)
@@ -676,17 +688,30 @@ fn profile_from_request(
 
 /// 表单里的密码操作 → 上游的 `SecretUpdate`。私钥与 keyboard-interactive 不存密码
 /// （修改时清掉可能存过的；私钥的口令跟着私钥存）；新建时没有可「保留」或「清除」的旧密码。
+#[cfg(test)]
 fn secret_update(request: &SaveConnection, creating: bool) -> Result<SecretUpdate, CatalogError> {
+    secret_update_secured(
+        request,
+        creating,
+        SecretString::from(request.password.clone()),
+    )
+}
+
+fn secret_update_secured(
+    request: &SaveConnection,
+    creating: bool,
+    password: SecretString,
+) -> Result<SecretUpdate, CatalogError> {
     Ok(match (request.auth, request.password_action) {
         (AuthMethod::PublicKey | AuthMethod::KeyboardInteractive, _) if creating => {
             SecretUpdate::Unchanged
         }
         (AuthMethod::PublicKey | AuthMethod::KeyboardInteractive, _) => SecretUpdate::Clear,
         (AuthMethod::Password, PasswordAction::Set) => {
-            if request.password.is_empty() {
+            if password.expose_secret().is_empty() {
                 return Err(CatalogError::PasswordRequired);
             }
-            SecretUpdate::Set(SecretString::from(request.password.clone()))
+            SecretUpdate::Set(password)
         }
         (AuthMethod::Password, PasswordAction::Keep) => SecretUpdate::Unchanged,
         (AuthMethod::Password, PasswordAction::Clear) if creating => SecretUpdate::Unchanged,
@@ -695,6 +720,10 @@ fn secret_update(request: &SaveConnection, creating: bool) -> Result<SecretUpdat
 }
 
 fn delete(context: &AppContext, id: &str) -> Result<(), CatalogError> {
+    let _operations = context
+        .key_operations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     let id = parse_id(id)?;
     if !load(context)?.connections.contains_key(&id) {
         return Err(CatalogError::NotFound);
@@ -812,6 +841,78 @@ mod tests {
             system_identity_path: String::new(),
             command: String::new(),
             profile_id: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn remembered_password_only_updates_the_authenticated_catalog_record() {
+        for change in [
+            "host",
+            "user",
+            "port",
+            "auth",
+            "credential",
+            "deleted",
+            "unchanged",
+        ] {
+            let (context, vault) = context();
+            let context = Arc::new(context);
+            let mut original = ConnectionProfile::new("认证目标", "original.test");
+            original.username = "original".into();
+            original.transport = TransportKind::NativeSsh;
+            original.authentication = AuthenticationKind::Password;
+            let catalog = context
+                .credentials
+                .apply_catalog(
+                    CatalogMutation::Create(original.clone()),
+                    SecretUpdate::Unchanged,
+                )
+                .expect("创建目标");
+            let original = catalog.connections[&original.id].clone();
+            let mut edited = original.clone();
+            match change {
+                "host" => edited.host = "other.test".into(),
+                "user" => edited.username = "other".into(),
+                "port" => edited.port = 2222,
+                "auth" => edited.authentication = AuthenticationKind::KeyboardInteractive,
+                _ => {}
+            }
+            let mutation = if change == "deleted" {
+                CatalogMutation::Delete(original.id)
+            } else {
+                CatalogMutation::Update(edited)
+            };
+            let secret = if change == "credential" {
+                SecretUpdate::Set(secrecy::SecretString::from("new secret".to_owned()))
+            } else {
+                SecretUpdate::Unchanged
+            };
+            let before = context
+                .credentials
+                .apply_catalog(mutation, secret)
+                .expect("编辑目标");
+            let stored = crate::connect::store_password(
+                &context,
+                original.clone(),
+                secrecy::SecretString::from("authenticated secret".to_owned()),
+            )
+            .await;
+            let after = context.repository.load_catalog().expect("读取目录");
+            if change == "unchanged" {
+                let stored = stored.expect("未修改的目标允许记住密码");
+                let reference = stored.credential_ref.expect("新引用返回同一会话");
+                assert_eq!(
+                    vault
+                        .get(&reference)
+                        .expect("读取凭据")
+                        .expect("密码")
+                        .expose_secret(),
+                    "authenticated secret"
+                );
+            } else {
+                assert!(stored.is_none(), "{change}");
+                assert_eq!(before, after, "{change}");
+            }
         }
     }
 

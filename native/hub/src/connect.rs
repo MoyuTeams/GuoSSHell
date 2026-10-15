@@ -642,7 +642,7 @@ pub async fn establish(
 ) -> Result<Connected, Abort> {
     let described = target.describe();
     let Target {
-        profile,
+        mut profile,
         saved,
         kind,
     } = target;
@@ -791,7 +791,11 @@ pub async fn establish(
                 }
                 return Err(Abort::Closed);
             }
-            () = store_password(context, profile.id, password) => {}
+            stored = store_password(context, profile.clone(), password) => {
+                if let Some(stored) = stored {
+                    profile.credential_ref = stored.credential_ref;
+                }
+            }
         }
     }
     Ok(Connected { transport, profile })
@@ -1470,33 +1474,48 @@ fn broker_response(kind: PromptKind, mut reply: ProtectedReply) -> InteractionRe
 
 /// 连接成功后把用户输入的密码存进钥匙串（目录与钥匙串的一致性由上游
 /// `CredentialCoordinator` 保证）。存不进去不影响本次会话。
-async fn store_password(context: &Arc<AppContext>, id: ConnectionId, password: SecretString) {
+pub(crate) async fn store_password(
+    context: &Arc<AppContext>,
+    authenticated: ConnectionProfile,
+    password: SecretString,
+) -> Option<ConnectionProfile> {
     let task_context = context.clone();
     let stored = spawn_blocking(move || {
+        // 与目录编辑、删除使用同一锁：比较和提交之间不得切换目标或凭据。
+        let _operations = task_context
+            .key_operations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let catalog = task_context
             .repository
             .load_catalog()
             .map_err(|error| format!("{error:?}"))?;
-        // 取目录里的当前版本：连接期间用户可能刚改过这条连接。
-        let Some(profile) = catalog.connections.get(&id).cloned() else {
-            return Ok(false);
+        let Some(profile) = catalog.connections.get(&authenticated.id).cloned() else {
+            return Ok(None);
         };
+        if profile != authenticated {
+            return Ok(None);
+        }
         task_context
             .credentials
             .apply_catalog(
                 CatalogMutation::Update(profile),
                 SecretUpdate::Set(password),
             )
-            .map(|_| true)
+            .map(|catalog| catalog.connections.get(&authenticated.id).cloned())
             .map_err(|error| format!("{error:?}"))
     })
     .await;
     match stored {
-        Ok(Ok(true)) => context.catalog_changed.notify_one(),
-        Ok(Ok(false)) => {}
+        Ok(Ok(Some(profile))) => {
+            context.catalog_changed.notify_one();
+            return Some(profile);
+        }
+        Ok(Ok(None)) => {}
         Ok(Err(error)) => debug_print!("[connect] saving password: {error}"),
         Err(error) => debug_print!("[connect] saving password task: {error}"),
     }
+    None
 }
 
 /// 上游的失败分类 → 边界上的分类。

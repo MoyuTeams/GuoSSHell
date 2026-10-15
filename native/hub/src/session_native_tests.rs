@@ -376,17 +376,22 @@ fn prepare(connection: &ConnectionProfile) -> DesktopPrepare {
 
 #[tokio::test]
 async fn native_prepared_auth_pty_answerback_io_reconnect_and_last_font_owner() {
-    prepared_session_io(None).await;
+    prepared_session_io(None, false).await;
 }
 
 #[tokio::test]
 async fn native_prepared_zlib_auth_pty_answerback_io_reconnect_and_last_font_owner() {
-    prepared_session_io(Some(russh::compression::ZLIB)).await;
+    prepared_session_io(Some(russh::compression::ZLIB), false).await;
 }
 
 #[tokio::test]
 async fn native_prepared_delayed_zlib_auth_pty_answerback_io_reconnect_and_last_font_owner() {
-    prepared_session_io(Some(russh::compression::ZLIB_LEGACY)).await;
+    prepared_session_io(Some(russh::compression::ZLIB_LEGACY), false).await;
+}
+
+#[tokio::test]
+async fn native_prepared_remembered_password_is_used_on_same_pane_reconnect() {
+    prepared_session_io(None, true).await;
 }
 
 #[test]
@@ -418,7 +423,7 @@ fn russh_compression_preserves_each_channel_data_packet() {
     }
 }
 
-async fn prepared_session_io(compression: Option<russh::compression::Name>) {
+async fn prepared_session_io(compression: Option<russh::compression::Name>, remember: bool) {
     let fixture = Fixture::new();
     let peer = Peer::with_compression(compression).await;
     peer.trust(&fixture);
@@ -445,7 +450,11 @@ async fn prepared_session_io(compression: Option<russh::compression::Name>) {
         .credentials
         .apply_catalog(
             CatalogMutation::Create(connection.clone()),
-            SecretUpdate::Set(SecretString::from(PASSWORD.to_owned())),
+            if remember {
+                SecretUpdate::Unchanged
+            } else {
+                SecretUpdate::Set(SecretString::from(PASSWORD.to_owned()))
+            },
         )
         .expect("虚构凭证目录");
 
@@ -478,14 +487,16 @@ async fn prepared_session_io(compression: Option<russh::compression::Name>) {
     profile.settings.terminal_type = "xterm".into();
     profile.settings.answerback = "不能用于旧会话".into();
     fixture.save(profile);
-    connection.host = "changed.invalid".into();
-    connection.username = "changed-user".into();
-    connection.remote_command = Some("changed-command".into());
-    fixture
-        .context
-        .credentials
-        .apply_catalog(CatalogMutation::Update(connection), SecretUpdate::Unchanged)
-        .expect("编辑目录");
+    if !remember {
+        connection.host = "changed.invalid".into();
+        connection.username = "changed-user".into();
+        connection.remote_command = Some("changed-command".into());
+        fixture
+            .context
+            .credentials
+            .apply_catalog(CatalogMutation::Update(connection), SecretUpdate::Unchanged)
+            .expect("编辑目录");
+    }
     fixture.font("reset");
 
     let start = DesktopStart {
@@ -517,6 +528,22 @@ async fn prepared_session_io(compression: Option<russh::compression::Name>) {
     assert_eq!(table.budget.usage(), running_usage);
     let (commands_tx, commands) = unbounded_channel();
     let (replies_tx, replies) = unbounded_channel();
+    if remember {
+        // 已预置信任；只回答首次密码问题，重连不得再次索取答案。
+        assert!(
+            replies_tx
+                .send(crate::protected_reply::ProtectedReply::from(
+                    crate::signals::interaction::InteractionReply {
+                        session_id: request.source.session_id,
+                        prompt_id: 1,
+                        accept: true,
+                        answers: vec![PASSWORD.to_owned()],
+                        remember: true,
+                    }
+                ))
+                .is_ok()
+        );
+    }
     let (close, closing) = watch::channel(false);
     let context = fixture.context.clone();
     let context_weak = Arc::downgrade(&context);
