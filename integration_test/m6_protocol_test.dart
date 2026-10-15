@@ -212,8 +212,9 @@ void main() {
           if (listEquals(bytes, expected)) break;
         }
         received[name] = _hex(bytes);
-        if (!listEquals(bytes, expected))
+        if (!listEquals(bytes, expected)) {
           wrong.add('$name：期望 ${_hex(expected)}，收到 ${_hex(bytes)}');
+        }
       }
       await app.dispose();
     }

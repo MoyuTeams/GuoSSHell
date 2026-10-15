@@ -383,8 +383,9 @@ class M6App {
     final deadline = DateTime.now().add(const Duration(seconds: 2));
     while (controller.lastFrameSeq != check.seq) {
       if (controller.lastFrameSeq > check.seq ||
-          DateTime.now().isAfter(deadline))
+          DateTime.now().isAfter(deadline)) {
         return null;
+      }
       await tester.pump(const Duration(milliseconds: 16));
     }
     // 同一轮事件里比对：此刻行池正是这一帧。
