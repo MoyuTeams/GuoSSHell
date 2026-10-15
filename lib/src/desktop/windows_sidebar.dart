@@ -6,6 +6,7 @@ import '../bindings/bindings.dart';
 import '../catalog/catalog_requests.dart';
 import 'desktop_widgets.dart';
 import 'windows_chrome.dart';
+import 'desktop_theme.dart';
 
 class WindowsSidebar extends StatelessWidget {
   const WindowsSidebar({
@@ -90,7 +91,7 @@ class WindowsSidebar extends StatelessWidget {
                   child: SizedBox(
                     width: 22,
                     height: 22,
-                    child: f.ProgressRing(strokeWidth: 2),
+                    child: _SidebarWaiting(),
                   ),
                 )
               : connections!.isEmpty
@@ -168,6 +169,7 @@ class _ConnectionRowState extends State<_ConnectionRow> {
         items: [
           for (final entry in [
             ('open', '连接', f.FluentIcons.plug_connected),
+            ('profile', '选择 profile 连接', f.FluentIcons.command_prompt),
             ('edit', '编辑', f.FluentIcons.edit),
             ('duplicate', '复制', f.FluentIcons.copy),
             ('delete', '删除', f.FluentIcons.delete),
@@ -237,7 +239,9 @@ class _ConnectionRowState extends State<_ConnectionRow> {
             style: const TextStyle(fontSize: 13),
           ),
           subtitle: Text(
-            '${widget.item.username}@${widget.item.host}',
+            widget.item.transport == DesktopTransport.systemOpenSsh
+                ? '${widget.item.username}@${widget.item.host} · 系统 ssh'
+                : '${widget.item.username}@${widget.item.host}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 11, color: desktopMuted),
@@ -251,4 +255,14 @@ class _ConnectionRowState extends State<_ConnectionRow> {
       ),
     ),
   );
+}
+
+class _SidebarWaiting extends StatelessWidget {
+  const _SidebarWaiting();
+  @override
+  Widget build(BuildContext context) =>
+      MediaQuery.disableAnimationsOf(context) ||
+          MediaQuery.accessibleNavigationOf(context)
+      ? const Icon(f.FluentIcons.history, size: DesktopMetrics.icon)
+      : const f.ProgressRing(strokeWidth: DesktopMetrics.focus);
 }

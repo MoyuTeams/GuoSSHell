@@ -7,6 +7,9 @@ import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../bindings/bindings.dart';
+import 'desktop_app_color_scheme.dart';
+import 'desktop_theme.dart';
+import 'settings/resources/desktop_resources_contracts.dart';
 
 bool get isWindowsDesktop =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
@@ -14,6 +17,24 @@ bool get isWindowsDesktop =>
 const desktopAccent = Color(0xff76c9ff);
 const desktopBackground = Color(0xff191d25);
 const desktopMuted = Color(0xffa7b1c2);
+
+/// 默认配色下的弹层底色（fluent_ui 深色 menuColor）。
+const desktopMenu = Color(0xff2c2c2c);
+
+/// dev 工作区的透明表面与分隔色，不改变既有 Windows 材质方向。
+abstract final class DesktopWorkspaceColors {
+  static final surface = const Color(0xff10141b).withValues(alpha: 0.3);
+  static const border = Colors.white10;
+  static const divider = Color(0xff323b4b);
+}
+
+/// 保留 dev 工具栏高度，窄工作区横向滚动而不压缩动作命中区。
+abstract final class DesktopWorkspaceMetrics {
+  static const toolbarHeight = 40.0;
+  static const toolbarMinWidth = 360.0;
+  static const terminalBackgroundOpacity = 0.12;
+}
+
 const desktopFontFallback = [
   'Microsoft YaHei UI',
   'Microsoft YaHei',
@@ -21,14 +42,69 @@ const desktopFontFallback = [
 ];
 
 /// Segoe UI 不包含中文字形，显式选择 Windows 的无衬线中文界面字体。
-f.FluentThemeData desktopFluentTheme({String? fontFamily}) {
-  final ramp = f.Typography.fromBrightness(brightness: Brightness.dark);
+/// [colorScheme] 为应用配色：`default` 保持设计 token，其余由终端配色派生，
+/// 高对比度时忽略。窗口画布见 [desktopCanvas]。
+f.FluentThemeData desktopFluentTheme({
+  String? fontFamily,
+  bool highContrast = false,
+  bool reduceMotion = false,
+  String colorScheme = 'default',
+}) {
+  final palette = highContrast ? null : desktopAppPalette(colorScheme);
+  final ramp = f.Typography.fromBrightness(
+    brightness: palette?.brightness ?? Brightness.dark,
+    color: palette?.text,
+  );
   TextStyle? cjk(TextStyle? style) =>
       style?.copyWith(fontFamilyFallback: desktopFontFallback);
+  final accessibility = desktopTheme(
+    highContrast: highContrast,
+    reduceMotion: reduceMotion,
+    fontFamily: fontFamily ?? DesktopType.family,
+  );
+  // 弹层（菜单、下拉、选择工具栏）底色：不透明，跟随应用配色。fluent_ui 在其上
+  // 叠加 menuColor × 0.65，二者取同色使弹层呈现单一实色。
+  final menu = highContrast
+      ? DesktopColors.highContrastCanvas
+      : palette?.surface ?? desktopMenu;
   return f.FluentThemeData(
-    brightness: Brightness.dark,
-    accentColor: f.Colors.blue,
-    fontFamily: fontFamily ?? 'Segoe UI',
+    menuColor: menu,
+    acrylicBackgroundColor: menu,
+    brightness: palette?.brightness ?? Brightness.dark,
+    accentColor: highContrast
+        ? accessibility.accentColor
+        : palette == null
+        ? f.Colors.blue
+        : f.AccentColor.swatch({
+            for (final shade in [
+              'darkest',
+              'darker',
+              'dark',
+              'normal',
+              'light',
+              'lighter',
+              'lightest',
+            ])
+              shade: palette.accent,
+          }),
+    resources: highContrast ? accessibility.resources : null,
+    focusTheme: highContrast
+        ? accessibility.focusTheme
+        : f.FocusThemeData(
+            primaryBorder: BorderSide(
+              color: palette?.accent ?? desktopAccent,
+              width: DesktopMetrics.focus,
+            ),
+            secondaryBorder: BorderSide(
+              color: palette?.canvas ?? desktopBackground,
+            ),
+          ),
+    micaBackgroundColor: palette?.canvas,
+    fasterAnimationDuration: accessibility.fasterAnimationDuration,
+    fastAnimationDuration: accessibility.fastAnimationDuration,
+    mediumAnimationDuration: accessibility.mediumAnimationDuration,
+    slowAnimationDuration: accessibility.slowAnimationDuration,
+    fontFamily: fontFamily ?? DesktopType.family,
     typography: f.Typography.raw(
       display: cjk(ramp.display),
       titleLarge: cjk(ramp.titleLarge),
@@ -39,8 +115,15 @@ f.FluentThemeData desktopFluentTheme({String? fontFamily}) {
       body: cjk(ramp.body),
       caption: cjk(ramp.caption)?.copyWith(fontWeight: FontWeight.normal),
     ),
+    scaffoldBackgroundColor: highContrast
+        ? DesktopColors.highContrastCanvas
+        : palette?.surface,
   );
 }
+
+/// 窗口画布：应用配色为 `default` 或高对比度时保持 [desktopBackground]。
+Color desktopCanvas(String colorScheme) =>
+    desktopAppPalette(colorScheme)?.canvas ?? desktopBackground;
 
 /// 原生窗口操作集中在 Windows 入口，其他平台不初始化桌面插件。
 class WindowsDesktopWindow {
@@ -65,23 +148,59 @@ class WindowsDesktopWindow {
   }
 }
 
-/// 这里只保留外观预览；持久化及合法值校验由 Rust 完成。
+/// 外观预览与全应用唯一的持久化写入口；合法值校验由 Rust 完成。
 class WindowsAppearance extends ChangeNotifier {
+  WindowsAppearance({
+    Stream<WindowsAppearanceState>? states,
+    void Function(SaveWindowsAppearance request)? send,
+  }) : _states =
+           states ??
+           WindowsAppearanceState.rustSignalStream.map((pack) => pack.message),
+       _send = send ?? ((request) => request.sendSignalToRust());
   static final instance = WindowsAppearance();
   // 由 Windows 宿主 windows/runner/window_material.cpp 实现。
   static const _material = MethodChannel('guosshell/window_material');
+  final Stream<WindowsAppearanceState> _states;
+  final void Function(SaveWindowsAppearance request) _send;
   bool acrylicEnabled = true;
   double opacity = 0.78;
   bool materialAvailable = false;
-  String? error;
+
+  /// 最近一次 Rust 回报的持久值；预览不改变它。
+  DesktopAppearanceValue saved = const DesktopAppearanceValue(
+    acrylic: true,
+    opacity: 0.78,
+  );
+
+  /// 查询固定使用的 request_id；保存从 1 起全应用递增，查询回包不会被当成保存结果。
+  static const queryRequestId = 0;
+  static int _lastRequestId = queryRequestId;
+
+  /// 超时后保持隔离，直到同一 request_id 的迟到回报结算该写入。
+  int verification = 0;
+  bool _sending = false;
+  bool _timedOut = false;
+  int? _pendingRequestId;
+  bool get writeReady => !_sending && !_timedOut;
   StreamSubscription? _subscription;
   Future<void> _effectQueue = Future.value();
 
+  static int _nextRequestId() =>
+      _lastRequestId = _lastRequestId % 0xffffffff + 1;
+
   void connect() {
-    _subscription ??= WindowsAppearanceState.rustSignalStream.listen((pack) {
-      acrylicEnabled = pack.message.acrylic;
-      opacity = pack.message.opacity;
-      error = pack.message.error.isEmpty ? null : pack.message.error;
+    _subscription ??= _states.listen((state) {
+      acrylicEnabled = state.acrylic;
+      opacity = state.opacity;
+      saved = DesktopAppearanceValue(
+        acrylic: state.acrylic,
+        opacity: state.opacity,
+      );
+      if (_timedOut && state.requestId == _pendingRequestId) {
+        _timedOut = false;
+        _pendingRequestId = null;
+        ++verification;
+      }
       notifyListeners();
       unawaited(applyMaterial());
     });
@@ -96,10 +215,52 @@ class WindowsAppearance extends ChangeNotifier {
     if (changedEffect) unawaited(applyMaterial());
   }
 
-  void save() => SaveWindowsAppearance(
-    acrylic: acrylicEnabled,
-    opacity: opacity,
-  ).sendSignalToRust();
+  /// 先订阅再发送，只接受同一 request_id 的回包；error 非空为已关联失败，
+  /// 超时为结果待核实。
+  Future<DesktopResourceWriteResult<DesktopAppearanceValue>> persist(
+    DesktopAppearanceValue value,
+  ) async {
+    if (!writeReady) throw StateError('上一外观写入尚未结算');
+    _sending = true;
+    final requestId = _pendingRequestId = _nextRequestId();
+    notifyListeners();
+    final reply = _states
+        .firstWhere((state) => state.requestId == requestId)
+        .timeout(const Duration(seconds: 10));
+    try {
+      _send(
+        SaveWindowsAppearance(
+          requestId: requestId,
+          acrylic: value.acrylic,
+          opacity: value.opacity,
+        ),
+      );
+    } catch (_) {
+      // 发送异常不能证明 Rust 未收到，按待核实处理。
+      reply.ignore();
+      _timedOut = true;
+      _sending = false;
+      notifyListeners();
+      return const DesktopResourceWriteResult.uncertain();
+    }
+    try {
+      final state = await reply;
+      _pendingRequestId = null;
+      saved = DesktopAppearanceValue(
+        acrylic: state.acrylic,
+        opacity: state.opacity,
+      );
+      return state.error.isEmpty
+          ? DesktopResourceWriteResult.confirmed(saved)
+          : const DesktopResourceWriteResult.failed();
+    } on TimeoutException {
+      _timedOut = true;
+      return const DesktopResourceWriteResult.uncertain();
+    } finally {
+      _sending = false;
+      notifyListeners();
+    }
+  }
 
   Future<void> applyMaterial() {
     if (!materialAvailable) return Future.value();
@@ -108,10 +269,9 @@ class WindowsAppearance extends ChangeNotifier {
         await _material.invokeMethod<void>('setMaterial', {
           'acrylic': acrylicEnabled,
           // 原生层只提供模糊，色调透明度统一由 Flutter 背景遮罩控制。
-          'color': (acrylicEnabled
-                  ? const Color(0x01191d25)
-                  : desktopBackground)
-              .toARGB32(),
+          'color':
+              (acrylicEnabled ? const Color(0x01191d25) : desktopBackground)
+                  .toARGB32(),
         });
       } catch (_) {
         materialAvailable = false;
@@ -124,8 +284,15 @@ class WindowsAppearance extends ChangeNotifier {
 
 /// 包在 Navigator 外面，设置页及认证对话框打开时也保留自绘窗口控件。
 class WindowsFrame extends StatefulWidget {
-  const WindowsFrame({super.key, required this.child});
+  const WindowsFrame({
+    super.key,
+    required this.child,
+    this.background = desktopBackground,
+  });
   final Widget child;
+
+  /// 窗口画布色，随应用配色变化；透明度仍由外观设置控制。
+  final Color background;
 
   @override
   State<WindowsFrame> createState() => _WindowsFrameState();
@@ -176,8 +343,12 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
             appearance.acrylicEnabled &&
             appearance.materialAvailable &&
             !MediaQuery.highContrastOf(context);
+        // 浅色画布（如日晒浅色）上标题与窗口按钮改用深色。
+        final brightness = ThemeData.estimateBrightnessForColor(
+          widget.background,
+        );
         return ColoredBox(
-          color: desktopBackground.withValues(
+          color: widget.background.withValues(
             alpha: transparent ? appearance.opacity : 1,
           ),
           child: Column(
@@ -200,19 +371,25 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
                                 excludeFromSemantics: true,
                               ),
                               const SizedBox(width: 12),
-                              const Text(
+                              Text(
                                 'GuoSSHell',
                                 style: TextStyle(
                                   fontSize: 12,
                                   fontWeight: FontWeight.w600,
+                                  color: brightness == Brightness.light
+                                      ? Colors.black87
+                                      : null,
                                 ),
                               ),
                               const SizedBox(width: 16),
-                              const Text(
-                                'SSH 工作区',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: desktopMuted,
+                              const Flexible(
+                                child: Text(
+                                  'SSH 工作区',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: desktopMuted,
+                                  ),
                                 ),
                               ),
                             ],
@@ -224,7 +401,7 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
                       '最小化',
                       WindowCaptionButton.minimize(
                         onPressed: windowManager.minimize,
-                        brightness: Brightness.dark,
+                        brightness: brightness,
                       ),
                     ),
                     _caption(
@@ -232,18 +409,18 @@ class _WindowsFrameState extends State<WindowsFrame> with WindowListener {
                       _maximized
                           ? WindowCaptionButton.unmaximize(
                               onPressed: windowManager.unmaximize,
-                              brightness: Brightness.dark,
+                              brightness: brightness,
                             )
                           : WindowCaptionButton.maximize(
                               onPressed: windowManager.maximize,
-                              brightness: Brightness.dark,
+                              brightness: brightness,
                             ),
                     ),
                     _caption(
                       '关闭窗口',
                       WindowCaptionButton.close(
                         onPressed: windowManager.close,
-                        brightness: Brightness.dark,
+                        brightness: brightness,
                       ),
                     ),
                   ],

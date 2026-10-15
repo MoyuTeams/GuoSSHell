@@ -57,8 +57,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bda177466b9524d59f1b12f0dd30b68696788e9992a7e959021c4a0ed96fcf59"
+source = "git+https://github.com/MoyuTeams/alacritty?rev=78f36350907b9145a16a6f12e01bfec34ad5b3dd#78f36350907b9145a16a6f12e01bfec34ad5b3dd"
 dependencies = [
  "base64",
  "bitflags",
@@ -659,8 +658,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 [[package]]
 name = "crypto-bigint"
 version = "0.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+source = "git+https://github.com/MoyuTeams/crypto-bigint?rev=9a4f70ace040b57f5f5cffc0d4389d2676baee9d#9a4f70ace040b57f5f5cffc0d4389d2676baee9d"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -1346,6 +1344,7 @@ dependencies = [
 name = "hub"
 version = "0.1.0"
 dependencies = [
+ "allo-isolate",
  "android-native-keyring-store",
  "apple-native-keyring-store",
  "async-trait",
@@ -1365,9 +1364,12 @@ dependencies = [
  "objc2-ui-kit",
  "openpgp-card",
  "p256",
+ "portable-pty-psmux",
  "rinf",
  "rsa",
  "rshell-m0",
+ "rshell-platform",
+ "russh",
  "secrecy",
  "security-framework",
  "serde",
@@ -1967,9 +1969,8 @@ dependencies = [
 
 [[package]]
 name = "pageant"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d8eab09a361a4afe0b1668be978cd97e4f052e927a92b0b608cf902965d49ce"
+version = "0.2.1"
+source = "git+https://github.com/MoyuTeams/russh?rev=392265d2b622fdce3fd57f836db134773c475950#392265d2b622fdce3fd57f836db134773c475950"
 dependencies = [
  "base16ct",
  "byteorder",
@@ -2154,7 +2155,7 @@ dependencies = [
 [[package]]
 name = "portable-pty-psmux"
 version = "0.9.6"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=991ca32f7219c7506a1d8183c5e6dc69a1589b87#991ca32f7219c7506a1d8183c5e6dc69a1589b87"
 dependencies = [
  "anyhow",
  "downcast-rs",
@@ -2384,12 +2385,13 @@ dependencies = [
 [[package]]
 name = "rshell-core"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=991ca32f7219c7506a1d8183c5e6dc69a1589b87#991ca32f7219c7506a1d8183c5e6dc69a1589b87"
 dependencies = [
  "async-channel",
  "async-trait",
  "secrecy",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "uuid",
@@ -2417,7 +2419,7 @@ dependencies = [
 [[package]]
 name = "rshell-platform"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=991ca32f7219c7506a1d8183c5e6dc69a1589b87#991ca32f7219c7506a1d8183c5e6dc69a1589b87"
 dependencies = [
  "directories",
  "thiserror 2.0.20",
@@ -2427,7 +2429,7 @@ dependencies = [
 [[package]]
 name = "rshell-session"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=991ca32f7219c7506a1d8183c5e6dc69a1589b87#991ca32f7219c7506a1d8183c5e6dc69a1589b87"
 dependencies = [
  "alacritty_terminal",
  "async-channel",
@@ -2448,7 +2450,7 @@ dependencies = [
 [[package]]
 name = "rshell-storage"
 version = "0.1.0"
-source = "git+https://github.com/hugefiver/rsHell?rev=718d9b62a8f062af8f5787b5fc27f6c5bbb4f268#718d9b62a8f062af8f5787b5fc27f6c5bbb4f268"
+source = "git+https://github.com/MoyuTeams/rsHell?rev=991ca32f7219c7506a1d8183c5e6dc69a1589b87#991ca32f7219c7506a1d8183c5e6dc69a1589b87"
 dependencies = [
  "async-trait",
  "keyring",
@@ -2482,8 +2484,7 @@ dependencies = [
 [[package]]
 name = "russh"
 version = "0.62.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da7c230e0ed9cbeb92fbad6c8848985d6df2a1464c0dc247a021abd666e9005e"
+source = "git+https://github.com/MoyuTeams/russh?rev=392265d2b622fdce3fd57f836db134773c475950#392265d2b622fdce3fd57f836db134773c475950"
 dependencies = [
  "aes",
  "bitflags",
@@ -2554,8 +2555,7 @@ dependencies = [
 [[package]]
 name = "russh-cryptovec"
 version = "0.62.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aec6cb630dbe85d72ffd7bcd95f07e1bd69f9f270ee8adfa1afe443a6331438"
+source = "git+https://github.com/MoyuTeams/russh?rev=392265d2b622fdce3fd57f836db134773c475950#392265d2b622fdce3fd57f836db134773c475950"
 dependencies = [
  "log",
  "nix",
@@ -2566,8 +2566,7 @@ dependencies = [
 [[package]]
 name = "russh-util"
 version = "0.52.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "668424a5dde0bcb45b55ba7de8476b93831b4aa2fa6947e145f3b053e22c60b6"
+source = "git+https://github.com/MoyuTeams/russh?rev=392265d2b622fdce3fd57f836db134773c475950#392265d2b622fdce3fd57f836db134773c475950"
 dependencies = [
  "chrono",
  "tokio",

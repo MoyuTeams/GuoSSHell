@@ -1,8 +1,14 @@
 # GuoSSHell
 
-一个 **纯 SSH 客户端**，覆盖 iPhone / iPad、macOS、Windows、Linux 与 Android。
+一个跨平台终端客户端：iPhone / iPad 与 Android 仅提供远端 SSH；macOS、Windows、
+Linux 的产品范围包括远端 SSH、桌面本地 shell 与 System OpenSSH（在本地终端中运行系统
+`ssh`，使用用户自己的 ssh 配置、agent 与 known_hosts）。
+桌面使用统一的 Fluent 工作区与设置页；终端 profile（TERM、字体、配色、滚回、按键绑定、左右 Alt、
+鼠标上报等）已可用，连接可选择 profile。桌面本地 shell（Ctrl+Shift+L 或侧栏打开）与 System OpenSSH
+（连接编辑器与快速连接中选择「连接方式」）均已可用。macOS/Linux 的 GUI 尚未实跑，范围见
+[桌面扩展](docs/desktop-expansion.md)。
 业务与终端语义跑在 **Rust**
-（上游 [rsHell](https://github.com/hugefiver/rsHell) 的内核，直接作为固定提交的 git 依赖），
+（[rsHell](https://github.com/hugefiver/rsHell) 的内核，经团队 fork 以固定提交的 git 依赖使用），
 只有渲染与交互用 **Flutter** 重写。Dart 不写业务逻辑。
 
 > **实现期的唯一参考是 [`PLAN.md`](PLAN.md)。** 动代码之前先读它。
@@ -14,11 +20,11 @@ GuoSSHell/
 ├── PLAN.md              实现规划：铁律 / 架构 / 实测事实 / 性能预算 / M0–M6 / 复用清单 / 陷阱
 ├── docs/                调研报告、验收文档、followups/（「存在但不马上修」的问题）
 ├── lib/                 Flutter app（纯展示与交互，无终端状态）
-│   ├── main.dart        入口：initializeRust + 许可登记 + MaterialApp
+│   ├── main.dart        入口：initializeRust + 许可登记 + 平台 UI 分流
 │   └── src/
 │       ├── bindings/    rinf gen 生成的 Dart 绑定（**不手改**；rinf 默认不入库）
+│       ├── desktop/     Fluent 目录／密钥／认证、终端设置与三桌面统一工作区
 │       ├── catalog/     连接目录与编辑
-│       ├── desktop/     Windows Fluent 工作区、自绘标题栏与窗口材质
 │       ├── keys/        私钥、OpenPGP 卡、安全密钥
 │       ├── settings/    设置与开源许可页
 │       ├── terminal/    帧解码与帧驱动的终端适配器、窗格、键位条、交互对话框
@@ -30,7 +36,7 @@ GuoSSHell/
 ├── native/hub/          rinf 的 Rust 侧：信号层、会话、连接与认证、钥匙串、卡、安全密钥
 │   └── src/             lib.rs · signals/ · session.rs · connect.rs · keys.rs · card/ · security_key/ …
 ├── rust/                rshell-m0：上游内核的 pin 点（再导出 rshell-core/session）+ M0 探针与示例
-│   ├── Cargo.toml       上游走 git 依赖，rev 只在这里 pin 这一处
+│   ├── Cargo.toml       上游内核的 git 依赖与固定 rev（native/hub 的平台接缝固定同一提交）
 │   └── examples/        m0.rs · m0_loopback.rs · bench_frame.rs · demo_server.rs
 ├── Cargo.toml           根 workspace（members = native/*, rust）+ release profile
 ├── UPSTREAM.md          上游依赖的来源、固定版本与改动记录（规则见 AGENTS.md）
@@ -95,6 +101,7 @@ flutter run -d <模拟器id 或 macos> \
 ## 持续集成与发版
 
 PR 与普通分支只做静态检查；`main`、`dev` 执行单元测试及多平台应用构建，下载产物见 Actions Artifacts。
+`feat-desktop` 另有三平台检查、单元测试和未签名 debug 构建，范围见[桌面开发验证](docs/desktop-validation-ci.md)。
 推送 `vX.Y.Z` 或 `vX.Y.Z-rc.1` 标签，提交已包含在发布仓库的 `main` 或 `dev` 且完整矩阵通过后发布 GitHub Release。
 Android 发布密钥仅存放于受分支与标签规则限制的 Environment；平台架构、签名状态和发版命令见 [CI 与 GitHub Release](docs/ci-and-release.md)。
 
@@ -103,7 +110,7 @@ Linux 需要 Secret Service；Windows 私钥使用 DPAPI，Android 使用 Keysto
 
 ## 缩放与功能按钮
 
-Windows 的 Fluent 工作区、沉浸标题栏、桌面快捷键和亚克力设置见 [Windows 桌面界面](docs/windows-desktop.md)。其他平台保留各自的导航与窗口行为。
+Windows 的 Fluent 工作区、常驻管理面板、沉浸标题栏、桌面快捷键和统一设置页（亚克力在「外观与字体」页）见 [Windows 桌面界面](docs/windows-desktop.md)。窗口插件与材质仅在 Windows 初始化；移动端保留原有导航。
 
 终端支持屏幕或触控板双指捏合；Apple 平台使用 `⌘+` / `⌘−` / `⌘0` 缩放和恢复字号，Windows 使用 `Ctrl` 对应组合。
 下方编辑图标打开可视化双排预览：直接拖动排序、跨排移动、从目录拖入按钮或拖出删除，保存后立即生效。
@@ -132,9 +139,12 @@ Android 13 起的主题图标使用单色层，按壁纸主题色着色。
 
 GuoSSHell 以 [MIT 许可](LICENSE) 发布。
 
-直接依赖官方 `hugefiver/rsHell` @ `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268`，MIT。
-该提交包含 GuoSSHell 所需的认证、连接与终端接口，以及顶部滚动区域的稳定行号修复。
-接口与平台依赖边界见 [`UPSTREAM.md`](UPSTREAM.md)。
+桌面 UI 使用 [`fluent_ui` 4.16.1](https://pub.dev/packages/fluent_ui/versions/4.16.1)
+（BSD-3-Clause）；Dart 依赖许可由 Flutter 许可注册表收集，发行界面需提供查看入口。
+
+Rust 内核使用团队 fork `MoyuTeams/rsHell`（基于 `hugefiver/rsHell`，MIT），
+以 git 依赖固定到精确提交。固定提交、fork 改动、所需接口扩展与平台依赖边界统一见
+[`UPSTREAM.md`](UPSTREAM.md)。
 
 终端渲染使用团队 fork `MoyuTeams/terminal_view`（基于 `Termphin/terminal_view`，MIT），
 以 git 依赖固定到精确提交，改动与理由同样记录在 `UPSTREAM.md`。

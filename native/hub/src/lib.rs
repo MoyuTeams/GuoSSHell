@@ -19,34 +19,76 @@ mod app;
 mod card;
 mod catalog;
 mod connect;
+mod desktop_input_policy;
+mod desktop_input_port;
+mod desktop_native_binding;
+mod desktop_prepare;
+mod desktop_runtime;
 mod external_signer;
+mod font_resources;
 mod fonts;
 mod frame_codec;
 mod keys;
 mod lifecycle;
 mod local_network;
+#[cfg(all(
+    feature = "native-input-spike",
+    any(target_os = "windows", target_os = "macos", target_os = "linux")
+))]
+mod native_input_spike;
+#[cfg(all(
+    feature = "native-input-spike",
+    target_os = "windows",
+    target_pointer_width = "64"
+))]
+mod native_input_spike_sdk;
+mod profile_fonts;
+mod protected_reply;
 mod security_key;
 mod session;
 mod settings;
+mod shutdown;
 mod signals;
+mod status_sink;
 #[cfg(any(test, target_os = "android", target_os = "linux"))]
 mod system_keys;
+mod transport_lifecycle;
 #[cfg(target_os = "windows")]
 mod windows_keys;
 
 use rinf::{dart_shutdown, write_interface};
-use tokio::spawn;
 
 write_interface!();
 
 // multi_thread 是 M0 验证过的形态（rust/src/lib.rs 的 blocking_smoke 用
 // worker_threads=2）。current_thread 下 TOFU 交互回合会饿死（实测：
 // TCP 连上后握手无限挂起；换 multi_thread 立即通过）。
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() {
-    // 等 Dart 给出数据目录后打开存储，再起目录、设置与会话的处理任务。
-    spawn(app::run());
-    spawn(lifecycle::run());
-
-    dart_shutdown().await;
+fn main() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("[shutdown] runtime unavailable: {error}");
+            return;
+        }
+    };
+    #[cfg(all(
+        feature = "native-input-spike",
+        target_os = "windows",
+        target_pointer_width = "64"
+    ))]
+    if native_input_spike_sdk::fixture_only_mode() {
+        runtime.block_on(native_input_spike_sdk::run_fixture_only_until_shutdown());
+        runtime.shutdown_timeout(shutdown::RUNTIME_LIMIT);
+        return;
+    }
+    if let Err(error) = runtime.block_on(shutdown::run_until(dart_shutdown())) {
+        // Dart 桥此时可能已关闭；不可只依赖 debug 构建或已断开的 signal 出口。
+        eprintln!("[shutdown] incomplete: {error:?}");
+    }
+    // Tokio 默认析构会无限等待 spawn_blocking；有限退出不等于底层 I/O 已停止。
+    runtime.shutdown_timeout(shutdown::RUNTIME_LIMIT);
 }

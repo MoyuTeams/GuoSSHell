@@ -56,57 +56,6 @@ Future<bool> desktopConfirm(
     ) ??
     false;
 
-/// 辅助页面使用有界的独立导航栈，不卸载背后的会话与分屏。
-Future<T?> showDesktopPage<T>(BuildContext context, Widget page) =>
-    showDialog<T>(
-      context: context,
-      builder: (context) => Dialog(
-        clipBehavior: Clip.antiAlias,
-        child: SizedBox(
-          width: 760,
-          height: MediaQuery.sizeOf(context).height * 0.82,
-          child: Navigator(
-            observers: [
-              _PanelNavigatorObserver(() => Navigator.of(context).pop()),
-            ],
-            onGenerateInitialRoutes: (_, _) => [
-              MaterialPageRoute<void>(
-                settings: const RouteSettings(name: 'panel-sentinel'),
-                builder: (_) => const SizedBox.shrink(),
-              ),
-              MaterialPageRoute<void>(
-                builder: (inner) => Column(
-                  children: [
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: DesktopIconButton(
-                        icon: f.FluentIcons.chrome_close,
-                        label: '关闭面板',
-                        onPressed: () => Navigator.of(context).pop(),
-                      ),
-                    ),
-                    Expanded(child: page),
-                  ],
-                ),
-              ),
-            ],
-            onGenerateRoute: (_) => null,
-          ),
-        ),
-      ),
-    );
-
-class _PanelNavigatorObserver extends NavigatorObserver {
-  _PanelNavigatorObserver(this.close);
-  final VoidCallback close;
-  @override
-  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
-    if (previousRoute?.settings.name == 'panel-sentinel') {
-      WidgetsBinding.instance.addPostFrameCallback((_) => close());
-    }
-  }
-}
-
 class ShortcutHint extends StatelessWidget {
   const ShortcutHint(this.label, this.keys, {super.key});
   final String label;

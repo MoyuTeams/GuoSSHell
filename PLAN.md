@@ -3,9 +3,8 @@
 > GuoSSHell 使用 rsHell 的 **Rust 业务内核**和 Flutter 前端，提供跨平台纯 SSH 客户端。
 > 这份文件是实现期的唯一参考。所有结论都标注了证据来源；标「实测」的都是本机跑出来的，可复现。
 
-- 当前上游：官方 `hugefiver/rsHell` @ `718d9b62a8f062af8f5787b5fc27f6c5bbb4f268`
-  （2026-09-27，MIT），**作为固定提交的 git 依赖**。上游源码不进本仓库，
-  所需认证与终端接口均已合并到官方仓库；依赖边界见 `UPSTREAM.md`。
+- 当前上游：团队 fork `MoyuTeams/rsHell`（基于 `hugefiver/rsHell`，MIT），**作为固定提交的 git 依赖**。
+  固定提交、接口扩展和依赖边界统一见根 `UPSTREAM.md`；上游源码不进本仓库。
   **改上游的原则**：按 AGENTS.md「上游依赖」一节执行——优先复用官方接口，能在应用侧
   实现就不改上游；必须改时放在团队 fork，并记入根 `UPSTREAM.md`。升级时同步更新 `rev`
   与根锁文件，按 §9.2 第 3 条验证后再使用。
@@ -44,12 +43,13 @@
 
 ## 1. 项目定义
 
-**GuoSSHell 是跨平台的纯 SSH 客户端。** 当前平台见本文开头；早期 iOS 可行性分析保留为架构背景。
+**GuoSSHell = 移动端纯 SSH、桌面端远端 SSH 与本地终端的跨平台客户端。**
 
-明确不做的事：**不做本地 shell 面板**。上游 rsHell 的「本地终端」是一等公民，
-但 iOS 上不可能（没有 `fork`、没有 `openpty`、沙箱禁止 spawn 进程），所以 iOS 版
-把产品模型收窄为「远端 SSH 终端」。Rust 侧零改动——只要 Flutter 侧不暴露
-`UiCommand::NewLocalTab` / `UiCommand::StartLocal` 就行。
+当前平台见本文开头；早期 iOS 可行性分析保留为架构背景。
+
+移动端不提供本地 shell 面板，仍只显示 SSH 入口；桌面端本地 shell 与 System OpenSSH
+（在本地 PTY 中运行系统 `ssh`，使用用户自己的 ssh 配置、agent 与 known_hosts）属于桌面专项
+范围，已在桌面可用，范围与进度见 `docs/desktop-expansion.md`。移动现有认证与交互保持不变。
 
 上游是 MIT，fork 与改名合规，但**必须保留原始版权与许可声明**。
 
@@ -540,12 +540,10 @@ rinf 单向信号流、Flutter 只画不解析）本身就与平台无关。
 
 需要注意的（都不是拦路虎，是「别写反」）：
 
-1. **不要在 Dart 层写 `Platform.isIOS` 分支。** 平台差异属于 Rust 侧
-   （`rshell-platform` 已经是这个形状）。Dart 侧一旦开始判断平台，就说明有逻辑漏到前端了。
-2. **「本地 shell 面板」按平台开关，而不是从协议里删掉。** iOS 上不暴露入口即可
-   （`UiCommand::NewLocalTab` / `StartLocal` 都还在协议里）。macOS / Android 上
-   `fork`+`openpty` 都在，**这两个平台可以白拿上游的本地面板能力**——那是产品的加分项。
-   **这条直接决定了现在不要为了 iOS 去改上游删传输**（见 §9.2）。
+1. **平台 UI 根由 Flutter 目标平台分流，业务能力由 Rust 判定。** Dart 只选择桌面 Fluent
+   或移动 Material 外壳，不能据此开启传输；桌面能力必须按 Rust 编译目标与运行条件验证。
+2. **「本地 shell 面板」只在桌面开放。** iOS/iPadOS、Android 不暴露入口，Rust 仍需拒绝
+   移动端伪造请求。不能把桌面 PTY 能力推断成 Android 产品功能（见 §9.2）。
 3. **帧协议与度量回传保持平台中立。** `TerminalSize{cols,rows,pixel_width,pixel_height,dpi}`
    由前端量完回传，天然适用于任何平台。
 4. **明文命名别带 `ios_` 前缀**，构建脚本按 `PLATFORM_NAME` 分派（`ios-host/build-rust.sh`
@@ -815,7 +813,7 @@ LoginGraceTime 把关，与 OpenSSH 客户端一致；交给传输层的连接�
 |---|---|
 | 桥用 **rinf**，不用 flutter_rust_bridge | 统一信号规约；单向信号流天然防止业务滑向 Dart。注意 rinf v8 已改用 serde + bincode（不再是 protobuf）；需要 protobuf 语义时用 `prost` 编码后塞进 `RustSignalBinary.binary` |
 | 边界类型**沿用** `rshell-core::protocol` | 上游已有完整可序列化协议，重建等于在 Dart 写业务模型（违反铁律 1） |
-| **不做本地 shell 面板** | iOS 不可能；Rust 侧零改动，Flutter 侧不暴露入口即可 |
+| **移动端不做本地 shell 面板；桌面端纳入专项范围** | 移动保持纯 SSH；桌面本地 Shell 与 System OpenSSH（本地 PTY 运行系统 ssh）已在桌面可用 |
 | 帧格式：**结构化帧 + run 压缩 + 脏行增量** | §4.3 实测 |
 | **帧流控：Dart 处理完回 `FrameAck`，同一时刻至多一帧在途** | rinf 的队列无界，逐块出帧会在高输出下积压；在途期间的变化只保留最新状态。两帧渲染起点至少相隔 8 ms（不合并 60 Hz 刷新），ACK 缺失 250 ms 后照发；选区、尺寸变化与断线后的末帧共用同一节拍，关闭窗格直接释放会话 |
 | 度量权威归 **Flutter** | 字体度量只有一个权威，就是实际画字的那一方。`TerminalSize{cols,rows,pixel_width,pixel_height,dpi}` 由 Flutter 测完回传 |
@@ -824,9 +822,9 @@ LoginGraceTime 把关，与 OpenSSH 客户端一致；交给传输层的连接�
 | M0 主机密钥策略：**TOFU 自动接受并落盘** | M0 前提是「不接 UI」，走完整确认会自相矛盾。**明确的技术债，M3 还清** |
 | release profile **不要设 `panic = "abort"`** | 上游 actor 靠 `catch_unwind` 把 panic 转成 `SessionEvent::Crashed`（有 `actor_panic_gtk_survival_macos` 测试守着），abort 会毁掉这条韧性设计 |
 | iPad 优先，iPhone 作为子项 | iPad 有大屏 + 硬件键盘 + 指针支持，能把最难的 IME/软键盘问题推到 M1-b |
-| **仓库形态：独立仓库 + 官方上游 git 依赖** | 本仓库只装应用自己的代码。上游固定到官方仓库的具体 `rev`，根 `Cargo.lock` 进版本控制保证复现；升级需通过内核与应用回归，见 `UPSTREAM.md` |
+| **仓库形态：独立仓库 + 上游 git 依赖** | 本仓库只装应用自己的代码。上游固定到团队 fork `MoyuTeams/rsHell` 的具体 `rev`，根 `Cargo.lock` 进版本控制保证复现；升级需通过内核与应用回归，见 `UPSTREAM.md` |
 | **keyring 的 iOS feature 从我们这边打开** | 不用改上游 `Cargo.toml`——Cargo 的 feature 是按包统一的。见 §3.2 |
-| **使用上游仓内的 `portable-pty-psmux`** | Cargo 从同一官方提交解析 path 依赖，无需本仓库另设 root patch；Windows 专用代码不参与 iOS / macOS 编译 |
+| **使用上游仓内的 `portable-pty-psmux`** | Cargo 从同一 rsHell 固定提交解析 path 依赖，无需本仓库另设 root patch；Windows 专用代码不参与 iOS / macOS 编译 |
 | **iOS 上不删上游的本地传输，靠 `-Wl,-dead_strip` 裁符号** | 保留了 M5 里 macOS/Android 白拿本地面板的可能；将来真要摘掉就得 fork 上游（见 §9.2） |
 | **链接可行性用命令行验，不用 Xcode** | `scripts/link-check.sh`：两个切片各链进一个 iOS 可执行文件 + 符号审计 |
 | **连接方式：手工填写，不做自动发现** | 范围收窄，M0-c 只做「手填内网地址能连 + 权限处理 + 清晰失败提示」。mDNS/Bonjour 插件候选留在 §6.1 备查，不作为本期依赖 |

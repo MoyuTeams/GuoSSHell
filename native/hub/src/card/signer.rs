@@ -17,14 +17,12 @@ use tokio::sync::oneshot;
 use tokio::task::spawn_blocking;
 
 use super::{CardContext, CardFailure, lock};
-use crate::external_signer::{PinQuestion, SignerRequest, send_hint};
+use crate::external_signer::{HintSink, PinQuestion, SignerRequest};
 use crate::signals::ConnectHint;
 
 pub struct CardSigner {
     cards: Arc<CardContext>,
-    session_id: u32,
-    /// 连接中状态里显示的目标。
-    target: String,
+    hints: HintSink,
     key_name: String,
     ident: String,
     public_key: PublicKey,
@@ -44,8 +42,7 @@ impl CardSigner {
     ) -> Self {
         Self {
             cards,
-            session_id,
-            target,
+            hints: HintSink::capture(session_id, target),
             key_name,
             ident,
             public_key,
@@ -81,7 +78,7 @@ impl CardSigner {
         let mut provided = None;
         loop {
             if nfc {
-                send_hint(self.session_id, &self.target, ConnectHint::TapCard);
+                self.hints.send(ConnectHint::TapCard);
             }
             let _ = self.requests.send(SignerRequest::Waiting(true));
             let result = {
@@ -90,12 +87,11 @@ impl CardSigner {
                 let key = self.public_key.clone();
                 let pin = provided.take();
                 let data = data.to_vec();
-                let session_id = self.session_id;
-                let target = self.target.clone();
+                let hints = self.hints.clone();
                 spawn_blocking(move || {
                     cards.sign_with_pin(&ident, &key, pin, &data, hash, nfc, &|touch| {
                         if touch {
-                            send_hint(session_id, &target, ConnectHint::TouchCard);
+                            hints.send(ConnectHint::TouchCard);
                         }
                     })
                 })
@@ -103,7 +99,7 @@ impl CardSigner {
                 .map_err(|error| CardFailure::Io(error.to_string()))?
             };
             let _ = self.requests.send(SignerRequest::Waiting(false));
-            send_hint(self.session_id, &self.target, ConnectHint::None);
+            self.hints.send(ConnectHint::None);
             match result {
                 Ok(Some(blob)) => return Ok(blob),
                 Ok(None) => provided = Some(self.ask_pin(tries_left, retry).await?),

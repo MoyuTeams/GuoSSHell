@@ -31,6 +31,9 @@ class Attr {
 
   /// run 后面带逐格布局（有宽字符或多码点的格子）。
   static const int layout = 64;
+
+  /// SGR 2（dim/faint）。
+  static const int dim = 128;
 }
 
 /// 一段连续同属性单元格。`start`/`len` 以列计。
@@ -58,6 +61,7 @@ class FrameRun {
   bool get strike => attrs & Attr.strike != 0;
   bool get reverse => attrs & Attr.reverse != 0;
   bool get selected => attrs & Attr.selected != 0;
+  bool get dim => attrs & Attr.dim != 0;
 }
 
 class FrameRow {

@@ -12,6 +12,23 @@ add_executable(${BINARY_NAME} WIN32
   "utils.cpp"
   "win32_window.cpp"
   "window_material.cpp"
+  "desktop_native_input/runtime_module.cpp"
+  "desktop_native_input/channel.cpp"
+  "desktop_native_input/raw_input.cpp"
+  "desktop_native_input/geometry.cpp"
+  "desktop_native_input/host.cpp"
+  "desktop_native_input/pane.cpp"
+  "desktop_native_input/pane_channel.cpp"
+  "desktop_native_input/pane_input.cpp"
+  "native_input_surface/native_surface.cpp"
+  "native_input_surface/text_store.cpp"
+  "native_input_surface/layout_metadata.cpp"
+  "native_input_spike_sdk_channel.cpp"
+  "native_input_spike_sdk/bootstrap_host.cpp"
+  "native_input_spike_live_source/source_fixture_host.cpp"
+  "native_input_spike_bridge/native_input_spike_bridge.cpp"
+  "native_input_spike/window_source.cpp"
+  "native_input_spike/tsf_probe.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
   "Runner.rc"
   "runner.exe.manifest"
@@ -20,6 +37,11 @@ add_executable(${BINARY_NAME} WIN32
 # Apply the standard set of build settings. This can be removed for applications
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
+
+# 明确源码与执行字符集，避免 UTF-8 中文注释受系统代码页影响。
+if(MSVC)
+  target_compile_options(${BINARY_NAME} PRIVATE /utf-8)
+endif()
 
 # Add preprocessor definitions for the build version.
 target_compile_definitions(${BINARY_NAME} PRIVATE "FLUTTER_VERSION=\"${FLUTTER_VERSION}\"")
@@ -35,6 +57,8 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "psapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "ole32.lib" "oleaut32.lib" "uuid.lib" "user32.lib" "gdi32.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

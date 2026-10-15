@@ -23,6 +23,70 @@ fn pin(value: &str) -> SecretString {
     SecretString::from(value.to_owned())
 }
 
+#[tokio::test]
+async fn card_touch_from_blocking_thread_and_clear_keep_captured_source_or_legacy_exit() {
+    for desktop in [false, true] {
+        let card = VirtualCard::new(CardKey::ed25519([7; 32]), true);
+        let (requests, mut questions) = mpsc::unbounded_channel();
+        let (events, mut observed) = mpsc::unbounded_channel();
+        let construct = crate::status_sink::OBSERVER.scope(events, async {
+            CardSigner::new(
+                cards(&card),
+                1,
+                "测试目标".into(),
+                "测试卡".into(),
+                IDENT.into(),
+                card.public_key(),
+                requests,
+            )
+        });
+        let signer = if desktop {
+            crate::desktop_runtime::SOURCE
+                .scope(
+                    crate::desktop_runtime::Source {
+                        source: crate::signals::desktop_session::DesktopSource {
+                            session_id: 1,
+                            generation: 7,
+                        },
+                        identity: "旧准备身份".into(),
+                    },
+                    construct,
+                )
+                .await
+        } else {
+            construct.await
+        };
+        let answers = tokio::spawn(async move {
+            while let Some(request) = questions.recv().await {
+                if let SignerRequest::Pin { reply, .. } = request {
+                    let _ = reply.send(Some((pin(PIN), false)));
+                }
+            }
+        });
+        // 新任务不继承 task_local；TouchCard 还会再进入 spawn_blocking。
+        tokio::spawn(async move { signer.sign(b"test", None).await })
+            .await
+            .expect("签名任务")
+            .expect("卡签名");
+        answers.await.expect("PIN 任务释放");
+        let mut hints = Vec::new();
+        while let Ok((wrapped, event)) = observed.try_recv() {
+            assert_eq!(wrapped, desktop);
+            let status = if desktop {
+                assert_eq!(event["source"]["generation"], 7);
+                assert_eq!(event["identity"], "旧准备身份");
+                event["status"].clone()
+            } else {
+                assert!(event.get("source").is_none());
+                event
+            };
+            hints.push(status["hint"].as_str().expect("提示类型").to_owned());
+        }
+        assert!(hints.iter().any(|hint| hint == "TouchCard"));
+        assert_eq!(hints.last().map(String::as_str), Some("None"));
+    }
+}
+
 #[test]
 fn scanning_reads_the_authentication_key_and_pin_state() {
     let card = VirtualCard::new(CardKey::ed25519([7; 32]), false);

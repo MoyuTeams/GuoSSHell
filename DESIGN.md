@@ -1,0 +1,137 @@
+# GuoSSHell 桌面设计系统
+
+## 0. 设计依据
+
+桌面采用 Flutter `fluent_ui`，视觉方向是安静、紧凑的终端工作台，不复制 GTK 代码。
+现有移动界面使用深色 Material 与 teal 派生色，常见间距为 8、12、16、24；终端内置
+`MesloLGS NF`。桌面保留青绿色识别与间距节奏，移动样式不在本设计系统的修改范围内。
+设计候选为现有 Material（仅保留兼容入口）、Fluent（桌面组件与交互基准）、GTK
+Fluent 风格工作台（只作视觉交互参考）。选择 Fluent 原生组件和克制的层次，不引入 Web
+样式、React 工具、窗口管理或玻璃特效插件。执行依据为设计系统与交互状态规则。
+
+## 1. 氛围与识别
+
+深石墨导航与略亮的工作表面形成清晰层次。页面左对齐，少量青绿色只标记操作、选择和
+焦点。保留系统标题栏，页面不采用居中宣传口号、渐变、浮动卡片或装饰性动效。
+桌面根只表示 UI 能力，不表示本地 shell、System SSH 或完整配置已经可用。
+
+## 2. 颜色
+
+集中定义于 `lib/src/desktop/desktop_theme.dart`，组件不得另设颜色常量。
+
+| Token | 暗色 | 用途 |
+|---|---|---|
+| `canvas` | `#202020` | 导航、应用底色 |
+| `surface` | `#292929` | 内容表面 |
+| `text` | `#F5F5F5` | 标题、正文 |
+| `muted` | `#C2C2C2` | 说明文字，保持高对比度 |
+| `accent` | `#80CBC4` | 主操作、选中项、焦点 |
+| `onAccent` | `#102523` | 强调按钮文字 |
+| `border` | `#858585` | 自定义分隔与边界 |
+| 高对比度覆盖 | 黑背景、白正文及边界 | 跟随 `MediaQuery.highContrast` |
+
+Fluent 控件的 hover、pressed、disabled 与成功／警告／错误语义色使用包内暗色主题，
+不以单独色块替代文字说明。高对比度主题将控件边界提升为白色。应用主题不改写终端
+`TerminalThemes`、帧配色或 profile。
+
+### 终端静态 profile tokens
+
+终端展示资源独立于 Fluent 壳颜色，RGB 数据唯一定义于
+`lib/src/terminal/desktop_terminal_theme.dart`。`themeForProfile` 按冻结的
+`Prepared.snapshot.profile.colorScheme` 精确选择不可变 `TerminalTheme`；不读取全局设置，
+不覆盖移动端或其他 pane。未知名称抛出 `ArgumentError`，由 pane 报告失败；此资源层
+不允许静默 fallback。重连保留原快照，新准备才重新选择。
+
+| Profile ID | GuoSSHell 展示资源色调 |
+|---|---|
+| `default` | 原样使用 `TerminalThemes.defaultTheme`，不复制 preset |
+| `one_dark` | 蓝灰底、浅灰正文，柔和红绿与天蓝 ANSI |
+| `solarized_dark` | 深青底、浅青灰正文，黄／橙／青色 ANSI |
+| `solarized_light` | 暖纸底、深青灰正文，与深色版本共用 Solarized 色调 |
+| `dracula` | 蓝黑底、近白正文，粉红／紫／荧绿 ANSI |
+| `monokai` | 暖炭底、暖白正文，玫红／酸绿／金黄 ANSI |
+| `nord` | 极地蓝灰底、冰白正文，低饱和蓝／青 ANSI |
+| `gruvbox_dark` | 暖炭底、奶油正文，土黄／砖红／橄榄 ANSI |
+| `tokyo_night` | 夜蓝底、淡蓝正文，蓝紫／青／桃红 ANSI |
+| `campbell_powershell` | 深海军蓝底、浅灰正文，明晰控制台 ANSI |
+
+`terminal.defaultForeground/defaultBackground` 对应 theme 的 `foreground/background`；
+`terminal.ansi[0..15]` 按黑、红、绿、黄、蓝、品红、青、白及其 bright 顺序对应完整
+16 色字段。`terminal.cursor/cursorAccent`、`selection/selectionForeground` 和
+`searchHitBackground/searchHitBackgroundCurrent/searchHitForeground` 也由同一资源提供。
+九套命名资源是应用自有 RGB 展示数据，不复制第三方实现或扩展 provider。
+
+画布底色与 `Color::Default` 使用同一 theme；ANSI 0–15 使用对应字段，扩展 ANSI
+沿 renderer 的现有规则，`Color::Rgb` 保留帧值。命名资源的默认正文及选区、搜索文字
+目标为至少 4.5:1；远端任意 ANSI/RGB 组合不保证该对比度，不通过自动改色破坏帧值。
+此处仅定义静态颜色，不证明动态 OSC 设置、复位或颜色查询同步；相关限制见
+`docs/followups/20260926_终端颜色查询一律答黑色.md`。
+
+## 3. 字体
+
+正文字体为 `Microsoft YaHei UI`，按 `PingFang SC`、`Noto Sans CJK SC`、
+`Segoe UI` 回退，避免为 UI 额外下载字体。平台实际字形由原生字体可用性决定。
+等宽终端仍使用原有 `MesloLGS NF` 与用户字体设置，状态页不创建终端状态机。
+
+| Token | 字号／字重 | 用途 |
+|---|---|---|
+| `body` | 14／400，行高 1.5 | 正文、按钮 |
+| `caption` | 12／400，行高 1.5 | 次要元信息 |
+| `subtitle` | 20／600，行高 1.4 | 状态标题 |
+| `title` | 28／600，行高 1.3 | 页面标题 |
+
+正文不低于 14；遵循系统文字缩放，内容可纵向滚动，不锁定正文高度。
+
+## 4. 间距与布局
+
+`DesktopSpacing` 为 4／8／12／16／24／32（`xs/sm/md/lg/xl/xxl`）；
+页面边距标准 24、窄窗 16，内容最大宽度 880，状态块间距 16，节间距 32。
+`DesktopMetrics` 提供圆角 4、边线 1、焦点线 2、状态图标 24、导航展开宽度 232。
+宽度小于 640 为折叠菜单，640–999 为紧凑图标导航，1000 起展开文字导航。
+仅改变导航密度，平台入口始终由真实运行目标决定；375 宽的桌面窗口仍为 Fluent。
+内容保持左上阅读轴，避免在大屏上将短句拉得过宽。
+
+## 5. 组件与状态页
+
+### 状态页验证基元
+
+| 基元 | 必须展示／测试的状态 |
+|---|---|
+| `NavigationView`／`PaneItem` | 选择、指针悬停、键盘焦点、三种导航密度 |
+| `Button`／`FilledButton` | 默认、悬停、按下、Tab 焦点、Enter 激活、禁用 |
+| `TextBox` | 命名、输入、焦点、禁用；只存本地演示草稿 |
+| `DesktopStatus` | 加载、无数据、失败，图标与文字同时呈现 |
+| 旧版入口 | 明确标记未迁移，打开与返回，不重复启动后端 |
+
+“组件状态”是纯 UI 样例，不查询或保存配置，不启动会话。失败样例的重试仅更新样例
+提示；真实启动失败说明重新启动应用，不提供无法保证幂等性的重复初始化按钮。
+
+### 共用模式
+
+- `DesktopStatus`：用于启动与样例状态；左对齐图标、标题、说明，间距 `lg/sm`；
+  加载与失败使用 live-region 语义。减少动画时显示静态等待图标与原有文字。
+- `DesktopPage`：用于桌面首页与状态页；自适应边距、最大内容宽度与纵向滚动，标题
+  使用 `title`，说明使用 `body/muted`。不承担业务状态或路由请求。
+
+## 6. 动效与交互
+
+`controlDuration` 为 100ms，`pageDuration` 为 200ms，只用于 Fluent 控件反馈。
+跟随 `MediaQuery.disableAnimations`／`accessibleNavigation` 将两者置零；不添加
+进场装饰，页面选择即时生效。焦点使用 Fluent `FocusThemeData` 的 2 单位青色外环，
+高对比度使用白色。Tab 顺序遵循阅读顺序，按钮保留键盘激活；旧版返回入口不能跳过
+工作区已有关闭确认。不得把终端快捷键全局劫持为壳导航。
+
+## 7. 深度与表面
+
+采用色阶分层，不创建自定义阴影。Fluent 按钮／输入框保留组件边界及圆角，内容区域
+不包进堆叠卡片；系统标题栏与应用导航各负其责。旧版路径拥有独立 Material 主题和
+Navigator，属于兼容界面，不计入 Fluent 页面覆盖。
+
+## 8. 可访问性与验证边界
+
+目标为 WCAG AA：正文至少 4.5:1，焦点与可操作边界至少 3:1，主体正文争取 7:1。
+图标按钮有中文语义名称，状态使用文字，不以颜色单独传达失败或禁用。
+Widget QA 覆盖 375／768／1280 宽、文字缩放、高对比度、减少动画及鼠标／键盘；
+原生桌面还需分别验证真实字体、屏幕阅读器、窗口缩放与系统焦点。
+Flutter 原生应用不适用浏览器 Lighthouse 或 React 检查；Widget 测试不能代替三平台
+原生运行验收。未运行的宿主／辅助技术必须明确报告，不能登记为通过。

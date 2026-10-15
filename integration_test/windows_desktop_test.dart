@@ -11,8 +11,8 @@ import 'package:path_provider_platform_interface/path_provider_platform_interfac
 import 'package:window_manager/window_manager.dart';
 import 'package:guosh_shell/main.dart' as app;
 import 'package:guosh_shell/src/desktop/windows_chrome.dart';
+import 'package:guosh_shell/src/desktop/settings/desktop_settings_page.dart';
 import 'package:guosh_shell/src/desktop/windows_shell.dart';
-import 'package:guosh_shell/src/desktop/windows_settings.dart';
 import 'package:guosh_shell/src/bindings/bindings.dart';
 import 'package:guosh_shell/src/settings/interface_font.dart';
 import 'package:guosh_shell/src/settings/interface_font_setting.dart';
@@ -59,7 +59,7 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.comma);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
     await tester.pumpAndSettle();
-    expect(find.byType(WindowsSettings), findsOneWidget);
+    expect(find.byType(DesktopSettingsPage), findsOneWidget);
     final fontBytes = (await rootBundle.load(
       'assets/fonts/MesloLGS-NF-Regular.ttf',
     )).buffer.asUint8List();
@@ -69,7 +69,7 @@ void main() {
           ? InterfaceTypography.terminal
           : InterfaceTypography.instance;
       final modal = showDialog<void>(
-        context: tester.element(find.byType(WindowsSettings)),
+        context: tester.element(find.byType(DesktopSettingsPage)),
         builder: (_) => Dialog(
           child: SizedBox(
             width: 600,
@@ -102,18 +102,34 @@ void main() {
       await tester.pumpAndSettle();
       await modal;
     }
-    final stateFuture = WindowsAppearanceState.rustSignalStream.first;
-    final slider = tester.widget<f.Slider>(find.byType(f.Slider).first);
+    await tester.tap(find.byKey(const ValueKey('settings-nav-appearance')));
+    await tester.pumpAndSettle();
+    final stateFuture = WindowsAppearanceState.rustSignalStream.firstWhere(
+      (pack) => pack.message.requestId != WindowsAppearance.queryRequestId,
+    );
+    final slider = tester.widget<f.Slider>(
+      find.byKey(const ValueKey('resource-transparency-slider')),
+    );
     slider.onChanged!(35);
-    slider.onChangeEnd!(35);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('save-resource-appearance')),
+    );
+    await tester.tap(find.byKey(const ValueKey('save-resource-appearance')));
     final saved = (await stateFuture.timeout(const Duration(seconds: 10)))
         .message;
     expect(saved.opacity, closeTo(0.65, 0.001));
     expect(saved.error, isEmpty);
     await tester.pumpAndSettle();
-    expect(find.text('35%'), findsOneWidget);
-    await tester.tap(find.text('完成'));
+    expect(find.text('外观已确认保存，当前窗口即时生效。'), findsOneWidget);
+    final transparency = tester.widget<f.TextBox>(
+      find.byKey(const ValueKey('resource-transparency')),
+    );
+    expect(double.parse(transparency.controller!.text), closeTo(35, 0.001));
+    expect(WindowsAppearance.instance.saved.opacity, closeTo(0.65, 0.001));
+    await tester.tap(find.byKey(const ValueKey('close-settings')));
     await tester.pumpAndSettle();
+    expect(find.byType(DesktopSettingsPage), findsNothing);
     await tester.tap(find.widgetWithText(f.FilledButton, '快速连接'));
     await tester.pumpAndSettle();
     expect(find.text('身份验证'), findsNothing);

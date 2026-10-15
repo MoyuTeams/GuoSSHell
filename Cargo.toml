@@ -7,6 +7,9 @@
 resolver = "3"
 members = ["native/*", "rust"]
 
+[patch.crates-io]
+crypto-bigint = { git = "https://github.com/MoyuTeams/crypto-bigint", rev = "9a4f70ace040b57f5f5cffc0d4389d2676baee9d", version = "=0.7.5" }
+
 [profile.release]
 # 与 rust/Cargo.toml 的 release 形态一致（M0 实测：体积主要由这两项决定）。
 # 绝不设 panic = "abort" —— 上游 actor 靠 catch_unwind 把 panic 转成

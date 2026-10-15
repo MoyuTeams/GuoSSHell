@@ -2,22 +2,26 @@
 //! `CredentialCoordinator` 进钥匙串（目录与钥匙串之间的两阶段提交由它负责）。
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rinf::{DartSignal, RustSignal, debug_print};
 use rshell_m0::rshell_core::{
     AuthenticationKind, CatalogMutation, ConnectionCatalog, ConnectionId, ConnectionProfile,
-    SecretUpdate, TransportKind,
+    SecretUpdate, TerminalProfileId, TransportKind,
 };
 use rshell_m0::rshell_storage::CredentialOperationError;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use tokio::task::spawn_blocking;
 
 use crate::app::AppContext;
 use crate::keys::{self, Item};
 use crate::signals::catalog::{
     AuthMethod, CatalogError, CatalogQuery, CatalogResult, CatalogState, ConnectionSummary,
-    DeleteConnection, DuplicateConnection, PasswordAction, SaveConnection,
+    DESKTOP_CATALOG_VERSION, DeleteConnection, DesktopAuthMethod, DesktopCatalogError,
+    DesktopCatalogQuery, DesktopCatalogResult, DesktopCatalogState, DesktopCatalogTargetKind,
+    DesktopConnectionSummary, DesktopSaveConnection, DesktopTransport, DuplicateConnection,
+    PasswordAction, SaveConnection,
 };
 
 pub async fn run(context: Arc<AppContext>) {
@@ -25,9 +29,35 @@ pub async fn run(context: Arc<AppContext>) {
     let save_rx = SaveConnection::get_dart_signal_receiver();
     let delete_rx = DeleteConnection::get_dart_signal_receiver();
     let duplicate_rx = DuplicateConnection::get_dart_signal_receiver();
+    let desktop_query_rx = DesktopCatalogQuery::get_dart_signal_receiver();
+    let desktop_save_rx = DesktopSaveConnection::get_dart_signal_receiver();
     let mut query = String::new();
     loop {
         tokio::select! {
+            pack = desktop_query_rx.recv() => {
+                let Some(pack) = pack else { break };
+                let request = pack.message;
+                let request_id = request.request_id;
+                let result = match desktop_gate(request.version) {
+                    Ok(()) => {
+                        blocking(&context, move |context| {
+                            let catalog = load(context).map_err(desktop_error)?;
+                            let query = request.query;
+                            Ok(desktop_summaries(&catalog, &query))
+                        }).await
+                    }
+                    Err(error) => Err(error),
+                };
+                desktop_state(request_id, result);
+            }
+            pack = desktop_save_rx.recv() => {
+                let Some(pack) = pack else { break };
+                // 解码后即转移明文所有权；版本、目标及存储失败均只释放清零容器。
+                let draft = DesktopSaveDraft::new(pack.message);
+                let request_id = draft.request.request_id;
+                let result = blocking(&context, move |context| desktop_save_secured(context, draft)).await;
+                desktop_reply(request_id, result);
+            }
             pack = query_rx.recv() => {
                 let Some(pack) = pack else { break };
                 query = pack.message.query;
@@ -57,14 +87,84 @@ pub async fn run(context: Arc<AppContext>) {
 }
 
 /// 在阻塞线程上跑一次目录操作（SQLite 与钥匙串调用都会阻塞）。
-async fn blocking<T: Send + 'static>(
+async fn blocking<T, E>(
     context: &Arc<AppContext>,
-    operation: impl FnOnce(&AppContext) -> Result<T, CatalogError> + Send + 'static,
-) -> Result<T, CatalogError> {
+    operation: impl FnOnce(&AppContext) -> Result<T, E> + Send + 'static,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + From<CatalogError> + 'static,
+{
     let context = context.clone();
     spawn_blocking(move || operation(&context))
         .await
-        .unwrap_or(Err(CatalogError::Storage))
+        .unwrap_or_else(|_| Err(CatalogError::Storage.into()))
+}
+
+impl From<CatalogError> for DesktopCatalogError {
+    fn from(value: CatalogError) -> Self {
+        desktop_error(value)
+    }
+}
+
+fn desktop_error(value: CatalogError) -> DesktopCatalogError {
+    match value {
+        CatalogError::None => DesktopCatalogError::None,
+        CatalogError::HostRequired => DesktopCatalogError::HostRequired,
+        CatalogError::HostInvalid => DesktopCatalogError::HostInvalid,
+        CatalogError::PortInvalid => DesktopCatalogError::PortInvalid,
+        CatalogError::UsernameRequired => DesktopCatalogError::UsernameRequired,
+        CatalogError::PasswordRequired => DesktopCatalogError::PasswordRequired,
+        CatalogError::KeyRequired => DesktopCatalogError::KeyRequired,
+        CatalogError::NotFound => DesktopCatalogError::NotFound,
+        CatalogError::Keychain => DesktopCatalogError::Keychain,
+        CatalogError::Storage => DesktopCatalogError::Storage,
+    }
+}
+
+fn desktop_gate(version: u16) -> Result<(), DesktopCatalogError> {
+    if version != DESKTOP_CATALOG_VERSION {
+        return Err(DesktopCatalogError::UnsupportedVersion);
+    }
+    if !cfg!(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux"
+    )) {
+        return Err(DesktopCatalogError::DesktopOnly);
+    }
+    Ok(())
+}
+
+fn desktop_state(
+    request_id: u32,
+    result: Result<Vec<DesktopConnectionSummary>, DesktopCatalogError>,
+) {
+    let (error, connections) = match result {
+        Ok(connections) => (DesktopCatalogError::None, connections),
+        Err(error) => (error, Vec::new()),
+    };
+    DesktopCatalogState {
+        version: DESKTOP_CATALOG_VERSION,
+        request_id,
+        error,
+        connections,
+    }
+    .send_signal_to_dart();
+}
+
+fn desktop_reply(request_id: u32, result: Result<String, DesktopCatalogError>) {
+    let (error, connection_id) = match result {
+        Ok(connection_id) => (DesktopCatalogError::None, connection_id),
+        Err(error) => (error, String::new()),
+    };
+    DesktopCatalogResult {
+        version: DESKTOP_CATALOG_VERSION,
+        request_id,
+        error,
+        connection_id,
+    }
+    .send_signal_to_dart();
 }
 
 fn reply(request_id: u32, result: Result<String, CatalogError>) {
@@ -110,9 +210,31 @@ fn summaries(catalog: &ConnectionCatalog, query: &str) -> Vec<ConnectionSummary>
         .collect()
 }
 
-/// 边界上的连接摘要。只有本 App 写这个目录：私钥认证总是引用钥匙串里的私钥，
+/// 边界上的连接摘要。只有本 App 写这个目录：Native 的私钥认证总是引用钥匙串里的私钥，
 /// 也不会有 agent 认证。
 fn summary(profile: &ConnectionProfile) -> Option<ConnectionSummary> {
+    summary_for(profile, crate::connect::desktop_supported())
+}
+
+fn summary_for(profile: &ConnectionProfile, desktop: bool) -> Option<ConnectionSummary> {
+    if profile.transport == TransportKind::SystemOpenSsh {
+        // 移动旧列表不能展示移动端无法编辑或连接的 System 项；桌面由桌面编辑器与 V2 会话处理。
+        if !desktop {
+            return None;
+        }
+        return Some(ConnectionSummary {
+            id: profile.id.0.to_string(),
+            name: profile.name.clone(),
+            host: profile.host.clone(),
+            port: profile.port,
+            username: profile.username.clone(),
+            auth: AuthMethod::Password,
+            password_saved: false,
+            key_id: String::new(),
+            command: profile.remote_command.clone().unwrap_or_default(),
+            transport: DesktopTransport::SystemOpenSsh,
+        });
+    }
     let auth = match profile.authentication {
         AuthenticationKind::Password => AuthMethod::Password,
         AuthenticationKind::PublicKey => {
@@ -132,7 +254,63 @@ fn summary(profile: &ConnectionProfile) -> Option<ConnectionSummary> {
         password_saved: auth == AuthMethod::Password && profile.credential_ref.is_some(),
         key_id: keys::key_id(profile).unwrap_or_default().to_owned(),
         command: profile.remote_command.clone().unwrap_or_default(),
+        transport: DesktopTransport::NativeSsh,
     })
+}
+
+fn desktop_summaries(catalog: &ConnectionCatalog, query: &str) -> Vec<DesktopConnectionSummary> {
+    catalog
+        .search(query)
+        .into_iter()
+        .filter_map(|id| catalog.connections.get(&id))
+        .map(desktop_summary)
+        .collect()
+}
+
+fn desktop_summary(profile: &ConnectionProfile) -> DesktopConnectionSummary {
+    let transport = match profile.transport {
+        TransportKind::NativeSsh => DesktopTransport::NativeSsh,
+        TransportKind::SystemOpenSsh => DesktopTransport::SystemOpenSsh,
+    };
+    let auth = match profile.authentication {
+        AuthenticationKind::Password => DesktopAuthMethod::Password,
+        AuthenticationKind::PublicKey => DesktopAuthMethod::PublicKey,
+        AuthenticationKind::KeyboardInteractive => DesktopAuthMethod::KeyboardInteractive,
+        AuthenticationKind::Agent => DesktopAuthMethod::Agent,
+    };
+    DesktopConnectionSummary {
+        id: profile.id.0.to_string(),
+        name: profile.name.clone(),
+        target_kind: DesktopCatalogTargetKind::Ssh,
+        transport,
+        host: profile.host.clone(),
+        port: profile.port,
+        username: profile.username.clone(),
+        auth,
+        password_saved: profile.transport == TransportKind::NativeSsh
+            && profile.authentication == AuthenticationKind::Password
+            && profile.credential_ref.is_some(),
+        key_id: if profile.transport == TransportKind::NativeSsh {
+            keys::key_id(profile).unwrap_or_default().to_owned()
+        } else {
+            String::new()
+        },
+        system_identity_path: if profile.transport == TransportKind::SystemOpenSsh {
+            profile
+                .identity_file
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .filter(|path| valid_system_identity_path(path))
+                .unwrap_or_default()
+                .to_owned()
+        } else {
+            String::new()
+        },
+        command: profile.remote_command.clone().unwrap_or_default(),
+        profile_id: profile
+            .terminal_profile_id
+            .map_or_else(String::new, |id| id.0.to_string()),
+    }
 }
 
 fn parse_id(id: &str) -> Result<ConnectionId, CatalogError> {
@@ -205,6 +383,231 @@ fn save(context: &AppContext, request: SaveConnection) -> Result<String, Catalog
     Ok(id.0.to_string())
 }
 
+/// 入口在任何可失败的校验前接管密码分配；空置请求字段防止普通 String 离开作用域时
+/// 留下明文。这里只保证 Rust 已解码请求的所有权，不保证跨语言缓冲和分配器无副本。
+struct DesktopSaveDraft {
+    request: DesktopSaveConnection,
+    password: SecretString,
+}
+
+impl DesktopSaveDraft {
+    fn new(mut request: DesktopSaveConnection) -> Self {
+        let password = SecretString::from(std::mem::take(&mut request.password));
+        Self { request, password }
+    }
+}
+
+/// 测试也走同一条所有权转移路径，不绕过入口保护。
+#[cfg(test)]
+fn desktop_save(
+    context: &AppContext,
+    request: DesktopSaveConnection,
+) -> Result<String, DesktopCatalogError> {
+    desktop_save_secured(context, DesktopSaveDraft::new(request))
+}
+
+/// 桌面保存仅提交目录本身；profile 存在性在保存前验证，设置/profile 与
+/// CredentialCoordinator 没有跨存储原子事务，不把目录结果标成设置 revision。
+fn desktop_save_secured(
+    context: &AppContext,
+    draft: DesktopSaveDraft,
+) -> Result<String, DesktopCatalogError> {
+    let DesktopSaveDraft { request, password } = draft;
+    desktop_gate(request.version)?;
+    let _operations = context
+        .key_operations
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let existing = if request.id.is_empty() {
+        None
+    } else {
+        let id = uuid::Uuid::parse_str(&request.id)
+            .map(ConnectionId::from)
+            .map_err(|_| DesktopCatalogError::InvalidConnectionId)?;
+        Some(
+            load(context)
+                .map_err(desktop_error)?
+                .connections
+                .get(&id)
+                .cloned()
+                .ok_or(DesktopCatalogError::NotFound)?,
+        )
+    };
+    let creating = existing.is_none();
+    let (profile, secret) = desktop_profile_from_request(context, existing, &request, password)?;
+    if profile.transport == TransportKind::NativeSsh
+        && profile.authentication == AuthenticationKind::PublicKey
+    {
+        let found = context
+            .keys
+            .get(Item::Key, request.key_id.trim())
+            .map_err(|_| DesktopCatalogError::Keychain)?;
+        if found.is_none() {
+            return Err(DesktopCatalogError::KeyRequired);
+        }
+    }
+    let id = profile.id;
+    let mutation = if creating {
+        CatalogMutation::Create(profile)
+    } else {
+        CatalogMutation::Update(profile)
+    };
+    apply(context, mutation, secret).map_err(desktop_error)?;
+    Ok(id.0.to_string())
+}
+
+fn desktop_profile_from_request(
+    context: &AppContext,
+    existing: Option<ConnectionProfile>,
+    request: &DesktopSaveConnection,
+    password: SecretString,
+) -> Result<(ConnectionProfile, SecretUpdate), DesktopCatalogError> {
+    if request.target_kind == DesktopCatalogTargetKind::LocalShell
+        && request.transport == DesktopTransport::LocalShell
+    {
+        return Err(DesktopCatalogError::UnsupportedTransport);
+    }
+    if request.target_kind != DesktopCatalogTargetKind::Ssh {
+        return Err(DesktopCatalogError::TargetMismatch);
+    }
+    let transport = match request.transport {
+        DesktopTransport::NativeSsh => TransportKind::NativeSsh,
+        DesktopTransport::SystemOpenSsh => TransportKind::SystemOpenSsh,
+        DesktopTransport::LocalShell => return Err(DesktopCatalogError::UnsupportedTransport),
+    };
+    let authentication = match request.auth {
+        DesktopAuthMethod::Password => AuthenticationKind::Password,
+        DesktopAuthMethod::PublicKey => AuthenticationKind::PublicKey,
+        DesktopAuthMethod::KeyboardInteractive => AuthenticationKind::KeyboardInteractive,
+        DesktopAuthMethod::Agent => AuthenticationKind::Agent,
+    };
+    if !matches!(
+        (transport, authentication),
+        (
+            TransportKind::SystemOpenSsh,
+            AuthenticationKind::Agent | AuthenticationKind::PublicKey
+        ) | (
+            TransportKind::NativeSsh,
+            AuthenticationKind::Password
+                | AuthenticationKind::PublicKey
+                | AuthenticationKind::KeyboardInteractive
+        )
+    ) {
+        return Err(DesktopCatalogError::InvalidAuthentication);
+    }
+    let (host, username) =
+        validate_target(&request.host, request.port, &request.username).map_err(desktop_error)?;
+    if host.chars().any(char::is_control) {
+        return Err(DesktopCatalogError::HostInvalid);
+    }
+    if username.chars().any(char::is_control) {
+        return Err(DesktopCatalogError::UsernameInvalid);
+    }
+    let profile_id = if request.profile_id.is_empty() {
+        None
+    } else {
+        let id = uuid::Uuid::parse_str(&request.profile_id)
+            .map(TerminalProfileId::from)
+            .map_err(|_| DesktopCatalogError::InvalidProfileId)?;
+        let found = context
+            .repository
+            .load_terminal_profiles()
+            .map_err(|_| DesktopCatalogError::Storage)?
+            .iter()
+            .any(|profile| profile.id == id);
+        if !found {
+            return Err(DesktopCatalogError::ProfileNotFound);
+        }
+        Some(id)
+    };
+
+    let native_key = request.key_id.trim();
+    let system_path = request.system_identity_path.trim();
+    if !password.expose_secret().is_empty() && request.password_action != PasswordAction::Set {
+        return Err(DesktopCatalogError::CredentialMismatch);
+    }
+    let identity = match (transport, authentication) {
+        (TransportKind::NativeSsh, AuthenticationKind::PublicKey) => {
+            if native_key.is_empty() {
+                return Err(DesktopCatalogError::KeyRequired);
+            }
+            if !system_path.is_empty() {
+                return Err(DesktopCatalogError::CredentialMismatch);
+            }
+            Some(keys::key_ref(native_key))
+        }
+        (TransportKind::SystemOpenSsh, AuthenticationKind::PublicKey) => {
+            if !native_key.is_empty() {
+                return Err(DesktopCatalogError::CredentialMismatch);
+            }
+            if !valid_system_identity_path(system_path) {
+                return Err(DesktopCatalogError::InvalidIdentity);
+            }
+            Some(PathBuf::from(system_path))
+        }
+        _ => {
+            if !native_key.is_empty() || !system_path.is_empty() {
+                return Err(DesktopCatalogError::CredentialMismatch);
+            }
+            None
+        }
+    };
+    let saved_secret = existing
+        .as_ref()
+        .is_some_and(|profile| profile.credential_ref.is_some());
+    if saved_secret
+        && request.password_action == PasswordAction::Keep
+        && existing
+            .as_ref()
+            .is_some_and(|profile| profile.transport != transport)
+    {
+        // 不允许跨 transport 复用来源不明的旧 credential_ref。
+        return Err(DesktopCatalogError::CredentialMismatch);
+    }
+    let secret = if authentication == AuthenticationKind::Password {
+        match request.password_action {
+            PasswordAction::Set if password.expose_secret().is_empty() => {
+                return Err(DesktopCatalogError::PasswordRequired);
+            }
+            PasswordAction::Set => SecretUpdate::Set(password),
+            PasswordAction::Keep => SecretUpdate::Unchanged,
+            PasswordAction::Clear if saved_secret => SecretUpdate::Clear,
+            PasswordAction::Clear => SecretUpdate::Unchanged,
+        }
+    } else {
+        if request.password_action == PasswordAction::Set
+            || saved_secret && request.password_action != PasswordAction::Clear
+        {
+            return Err(DesktopCatalogError::CredentialMismatch);
+        }
+        if saved_secret {
+            SecretUpdate::Clear
+        } else {
+            SecretUpdate::Unchanged
+        }
+    };
+    let mut profile = existing.unwrap_or_else(|| ConnectionProfile::new("", host));
+    profile.name = request.name.trim().to_owned();
+    profile.host = host.to_owned();
+    profile.port = request.port;
+    profile.username = username.to_owned();
+    profile.transport = transport;
+    profile.authentication = authentication;
+    profile.identity_file = identity;
+    profile.terminal_profile_id = profile_id;
+    profile.remote_command =
+        Some(request.command.trim().to_owned()).filter(|value| !value.is_empty());
+    Ok((profile, secret))
+}
+
+fn valid_system_identity_path(path: &str) -> bool {
+    let path = path.trim();
+    !path.is_empty()
+        && !path.starts_with('-')
+        && !path.chars().any(char::is_control)
+        && !path.to_ascii_lowercase().starts_with(keys::KEY_REF_PREFIX)
+}
+
 /// 连接目标的校验（目录与快速连接共用）：主机非空、不像命令行选项、不含空白；
 /// 端口非零；用户名非空。返回去掉首尾空白的主机与用户名。
 pub fn validate_target<'a>(
@@ -229,20 +632,31 @@ pub fn validate_target<'a>(
     Ok((host, username))
 }
 
-/// 表单 → 连接配置。修改时从目录里的版本出发，表单之外的字段（分组、标签、
-/// 终端覆盖项、已存密码的引用）原样保留。
+/// 旧表单只修改 Native SSH；其他传输不经旧表单转换认证与凭据。
+/// 修改时从目录里的版本出发，表单之外的字段原样保留。
 fn profile_from_request(
     existing: Option<ConnectionProfile>,
     request: &SaveConnection,
 ) -> Result<ConnectionProfile, CatalogError> {
+    if existing
+        .as_ref()
+        .is_some_and(|profile| profile.transport != TransportKind::NativeSsh)
+    {
+        // 公开协议暂无专用错误；只记录固定原因，不记录条目或凭据。
+        debug_print!("[catalog] legacy save: unsupported transport");
+        return Err(CatalogError::Storage);
+    }
     let (host, username) = validate_target(&request.host, request.port, &request.username)?;
 
-    let mut profile = existing.unwrap_or_else(|| ConnectionProfile::new("", host));
+    let mut profile = existing.unwrap_or_else(|| {
+        let mut profile = ConnectionProfile::new("", host);
+        profile.transport = TransportKind::NativeSsh;
+        profile
+    });
     profile.name = request.name.trim().to_owned();
     profile.host = host.to_owned();
     profile.port = request.port;
     profile.username = username.to_owned();
-    profile.transport = TransportKind::NativeSsh;
     profile.authentication = match request.auth {
         AuthMethod::Password => AuthenticationKind::Password,
         AuthMethod::PublicKey => AuthenticationKind::PublicKey,
@@ -330,14 +744,26 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use super::{delete, duplicate, load, profile_from_request, save, secret_update, summary};
+    use super::{
+        DesktopSaveDraft, delete, desktop_gate, desktop_profile_from_request, desktop_save,
+        desktop_save_secured, desktop_summaries, duplicate, load, profile_from_request, save,
+        secret_update, summary,
+    };
     use crate::app::AppContext;
     use crate::card::{CardContext, NoCards};
     use crate::keys::{MemoryKeyStore, PreferenceFile};
-    use crate::signals::catalog::{AuthMethod, CatalogError, PasswordAction, SaveConnection};
-    use rshell_m0::rshell_core::{AuthenticationKind, CredentialRef, SecretUpdate, TransportKind};
+    use crate::signals::catalog::{
+        AuthMethod, CatalogError, DESKTOP_CATALOG_VERSION, DesktopAuthMethod, DesktopCatalogError,
+        DesktopCatalogTargetKind, DesktopSaveConnection, DesktopTransport, PasswordAction,
+        SaveConnection,
+    };
+    use rshell_m0::rshell_core::{
+        AuthenticationKind, CatalogMutation, ConnectionProfile, CredentialRef, SecretUpdate,
+        TerminalProfile, TransportKind,
+    };
     use rshell_m0::rshell_storage::{
-        CredentialCoordinator, CredentialVault, MemoryCredentialVault, SqliteRepository,
+        ConfigurationChange, CredentialCoordinator, CredentialVault, MemoryCredentialVault,
+        SqliteRepository, StorageError,
     };
     use secrecy::ExposeSecret;
     use tokio::sync::Notify;
@@ -346,6 +772,10 @@ mod tests {
     fn context() -> (AppContext, Arc<MemoryCredentialVault>) {
         let repository = Arc::new(SqliteRepository::open_in_memory().expect("in-memory catalog"));
         repository.migrate().expect("migrate");
+        context_for(repository)
+    }
+
+    fn context_for(repository: Arc<SqliteRepository>) -> (AppContext, Arc<MemoryCredentialVault>) {
         let vault = Arc::new(MemoryCredentialVault::new());
         let context = AppContext {
             credentials: CredentialCoordinator::new(repository.clone(), vault.clone()),
@@ -362,6 +792,453 @@ mod tests {
             keys_changed: Notify::new(),
         };
         (context, vault)
+    }
+
+    fn desktop_request() -> DesktopSaveConnection {
+        DesktopSaveConnection {
+            version: DESKTOP_CATALOG_VERSION,
+            request_id: 42,
+            id: String::new(),
+            name: "测试".into(),
+            target_kind: DesktopCatalogTargetKind::Ssh,
+            transport: DesktopTransport::NativeSsh,
+            host: "test.example".into(),
+            port: 22,
+            username: "tester".into(),
+            auth: DesktopAuthMethod::Password,
+            password_action: PasswordAction::Set,
+            password: "secret-canary-not-for-projection".into(),
+            key_id: String::new(),
+            system_identity_path: String::new(),
+            command: String::new(),
+            profile_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn desktop_roundtrip_and_old_native_patch_preserve_profile_reference() {
+        let (context, vault) = context();
+        let mut terminal = TerminalProfile::p0_default();
+        terminal.id = uuid::Uuid::new_v4().into();
+        context
+            .repository
+            .save_terminal_profile(terminal.clone())
+            .expect("保存 profile");
+        let mut form = desktop_request();
+        form.profile_id = terminal.id.0.to_string();
+        let id = desktop_save(&context, form).expect("桌面创建");
+        let catalog = load(&context).expect("读取目录");
+        let entry = &desktop_summaries(&catalog, "test.example")[0];
+        assert_eq!(entry.profile_id, terminal.id.0.to_string());
+        assert!(entry.password_saved);
+        assert!(entry.system_identity_path.is_empty());
+        let projection = serde_json::to_string(entry).expect("投影序列化");
+        assert!(!projection.contains("secret-canary"));
+        assert!(!projection.contains("credential_ref"));
+        assert_eq!(
+            saved_password(&context, &vault, &id).as_deref(),
+            Some("secret-canary-not-for-projection")
+        );
+
+        let mut legacy = request(AuthMethod::Password, PasswordAction::Keep, "");
+        legacy.id = id.clone();
+        legacy.name = "修改名称".into();
+        save(&context, legacy).expect("旧版 Native patch");
+        let after_legacy = load(&context).expect("目录");
+        let updated = &after_legacy.connections[&super::parse_id(&id).expect("id")];
+        assert_eq!(updated.terminal_profile_id, Some(terminal.id));
+        assert_eq!(updated.transport, TransportKind::NativeSsh);
+        assert_eq!(
+            saved_password(&context, &vault, &id).as_deref(),
+            Some("secret-canary-not-for-projection")
+        );
+
+        let mut advanced = after_legacy.connections[&super::parse_id(&id).expect("id")].clone();
+        advanced.note = "目录额外字段".into();
+        advanced.tags.insert("原标签".into());
+        context
+            .credentials
+            .apply_catalog(CatalogMutation::Update(advanced), SecretUpdate::Unchanged)
+            .expect("保存附加字段");
+
+        let mut desktop_edit = desktop_request();
+        desktop_edit.id = id.clone();
+        desktop_edit.name = "桌面修改".into();
+        desktop_edit.profile_id = terminal.id.0.to_string();
+        desktop_edit.password_action = PasswordAction::Keep;
+        desktop_edit.password.clear();
+        desktop_save(&context, desktop_edit).expect("桌面增量编辑");
+        let after_desktop = load(&context).expect("目录");
+        let saved = &after_desktop.connections[&super::parse_id(&id).expect("id")];
+        assert_eq!(saved.note, "目录额外字段");
+        assert!(saved.tags.contains("原标签"));
+        assert_eq!(saved.terminal_profile_id, Some(terminal.id));
+    }
+
+    #[test]
+    fn referenced_profile_cannot_be_deleted_after_catalog_save() {
+        let (context, _) = context();
+        let mut terminal = TerminalProfile::p0_default();
+        terminal.id = uuid::Uuid::new_v4().into();
+        context
+            .repository
+            .save_terminal_profile(terminal.clone())
+            .expect("保存独立 profile");
+        let mut form = desktop_request();
+        form.profile_id = terminal.id.0.to_string();
+        form.password.clear();
+        form.password_action = PasswordAction::Keep;
+        let id = desktop_save(&context, form).expect("目录引用 profile");
+        let snapshot = context
+            .repository
+            .load_configuration()
+            .expect("加载配置快照");
+        assert_eq!(
+            context
+                .repository
+                .commit_configuration(ConfigurationChange {
+                    expected_revision: snapshot.revision,
+                    settings: snapshot.settings,
+                    upsert_profiles: vec![],
+                    delete_profiles: vec![terminal.id],
+                }),
+            Err(StorageError::Constraint)
+        );
+        assert_eq!(
+            load(&context).expect("目录未删除").connections[&super::parse_id(&id).expect("id")]
+                .terminal_profile_id,
+            Some(terminal.id)
+        );
+    }
+
+    #[test]
+    fn desktop_system_identity_never_reuses_app_key_or_saved_password() {
+        let (context, vault) = context();
+        let native_id = desktop_save(&context, desktop_request()).expect("Native 创建");
+        let mut system = desktop_request();
+        system.id = native_id.clone();
+        system.transport = DesktopTransport::SystemOpenSsh;
+        system.auth = DesktopAuthMethod::PublicKey;
+        system.password_action = PasswordAction::Clear;
+        system.password.clear();
+        system.system_identity_path = "user selected identity".into();
+        assert_eq!(desktop_save(&context, system), Ok(native_id.clone()));
+        assert!(vault.is_empty());
+        let entry = &desktop_summaries(&load(&context).expect("目录"), "")[0];
+        assert_eq!(entry.transport, DesktopTransport::SystemOpenSsh);
+        assert_eq!(entry.system_identity_path, "user selected identity");
+        assert!(!entry.password_saved);
+        assert!(entry.key_id.is_empty());
+        // 旧列表：移动端隐藏 System 项；桌面列出且不带凭据信息。
+        let profile = load(&context)
+            .expect("目录")
+            .connections
+            .into_values()
+            .next()
+            .expect("System 项");
+        assert!(super::summary_for(&profile, false).is_none());
+        let listed = super::summary_for(&profile, true).expect("桌面列出 System 项");
+        assert_eq!(listed.transport, DesktopTransport::SystemOpenSsh);
+        assert!(!listed.password_saved);
+        assert!(listed.key_id.is_empty());
+
+        let mut legacy = request(AuthMethod::Password, PasswordAction::Clear, "");
+        legacy.id = native_id.clone();
+        assert_eq!(save(&context, legacy), Err(CatalogError::Storage));
+        assert_eq!(
+            desktop_summaries(&load(&context).expect("目录"), "")[0].system_identity_path,
+            "user selected identity"
+        );
+
+        let mut corrupt = ConnectionProfile::new("旧数据", "test.example");
+        corrupt.authentication = AuthenticationKind::PublicKey;
+        corrupt.identity_file = Some(PathBuf::from("keychain:private-key-id"));
+        assert!(
+            super::desktop_summary(&corrupt)
+                .system_identity_path
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn desktop_never_inherits_a_system_entry_credential_as_native_password() {
+        let (context, vault) = context();
+        let mut system = ConnectionProfile::new("旧条目", "test.example");
+        system.username = "tester".into();
+        system.authentication = AuthenticationKind::PublicKey;
+        system.identity_file = Some(PathBuf::from("user selected identity"));
+        let id = system.id;
+        context
+            .credentials
+            .apply_catalog(
+                CatalogMutation::Create(system),
+                SecretUpdate::Set("legacy-credential".into()),
+            )
+            .expect("导入旧条目");
+        let before = load(&context).expect("目录");
+        let mut edit = desktop_request();
+        edit.id = id.0.to_string();
+        edit.password.clear();
+        edit.password_action = PasswordAction::Keep;
+        assert_eq!(
+            desktop_save(&context, edit),
+            Err(DesktopCatalogError::CredentialMismatch)
+        );
+        assert_eq!(load(&context).expect("未修改目录"), before);
+        assert!(!vault.is_empty());
+    }
+
+    #[test]
+    fn desktop_invalid_targets_profiles_and_credentials_fail_before_mutation() {
+        let (context, vault) = context();
+        let id = desktop_save(&context, desktop_request()).expect("创建");
+        let before = load(&context).expect("目录");
+        type InvalidCase = (Box<dyn Fn(&mut DesktopSaveConnection)>, DesktopCatalogError);
+        let cases: Vec<InvalidCase> = vec![
+            (
+                Box::new(|form| form.version += 1),
+                DesktopCatalogError::UnsupportedVersion,
+            ),
+            (
+                Box::new(|form| form.target_kind = DesktopCatalogTargetKind::LocalShell),
+                DesktopCatalogError::TargetMismatch,
+            ),
+            (
+                Box::new(|form| form.transport = DesktopTransport::LocalShell),
+                DesktopCatalogError::UnsupportedTransport,
+            ),
+            (
+                Box::new(|form| form.profile_id = "not-an-id".into()),
+                DesktopCatalogError::InvalidProfileId,
+            ),
+            (
+                Box::new(|form| form.profile_id = uuid::Uuid::new_v4().to_string()),
+                DesktopCatalogError::ProfileNotFound,
+            ),
+            (
+                Box::new(|form| form.auth = DesktopAuthMethod::Agent),
+                DesktopCatalogError::InvalidAuthentication,
+            ),
+            (
+                Box::new(|form| form.key_id = "app-private-key".into()),
+                DesktopCatalogError::CredentialMismatch,
+            ),
+            (
+                Box::new(|form| form.system_identity_path = "keychain:any".into()),
+                DesktopCatalogError::CredentialMismatch,
+            ),
+            (
+                Box::new(|form| {
+                    form.transport = DesktopTransport::SystemOpenSsh;
+                    form.auth = DesktopAuthMethod::PublicKey;
+                    form.password.clear();
+                    form.password_action = PasswordAction::Clear;
+                    form.system_identity_path = "keychain:any".into();
+                }),
+                DesktopCatalogError::InvalidIdentity,
+            ),
+            (
+                Box::new(|form| {
+                    form.transport = DesktopTransport::SystemOpenSsh;
+                    form.auth = DesktopAuthMethod::Agent;
+                    form.password.clear();
+                    form.password_action = PasswordAction::Keep;
+                }),
+                DesktopCatalogError::CredentialMismatch,
+            ),
+            (
+                Box::new(|form| form.id = "malformed".into()),
+                DesktopCatalogError::InvalidConnectionId,
+            ),
+            (
+                Box::new(|form| form.id = uuid::Uuid::new_v4().to_string()),
+                DesktopCatalogError::NotFound,
+            ),
+        ];
+        for (change, expected) in cases {
+            let mut form = desktop_request();
+            form.id = id.clone();
+            change(&mut form);
+            assert_eq!(desktop_save(&context, form), Err(expected));
+            assert_eq!(load(&context).expect("未修改目录"), before);
+            assert_eq!(
+                saved_password(&context, &vault, &id).as_deref(),
+                Some("secret-canary-not-for-projection")
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_file_sqlite_survives_reopen_and_legacy_data_remains_native() {
+        let path =
+            std::env::temp_dir().join(format!("guosh-catalog-{}.sqlite", uuid::Uuid::new_v4()));
+        let repository = Arc::new(SqliteRepository::open(&path).expect("文件数据库"));
+        repository.migrate().expect("迁移");
+        let (context, _) = context_for(repository);
+        let mut request = desktop_request();
+        request.password_action = PasswordAction::Keep;
+        request.password.clear();
+        let id = desktop_save(&context, request).expect("保存文件数据库");
+        let mut system = desktop_request();
+        system.password_action = PasswordAction::Keep;
+        system.password.clear();
+        system.transport = DesktopTransport::SystemOpenSsh;
+        system.auth = DesktopAuthMethod::PublicKey;
+        system.system_identity_path = "用户选择的 identity".into();
+        let system_id = desktop_save(&context, system).expect("保存 System SSH");
+        drop(context);
+        let reopened = SqliteRepository::open(&path).expect("重开数据库");
+        let catalog = reopened.load_catalog().expect("持久化目录");
+        let profile = &catalog.connections[&super::parse_id(&id).expect("id")];
+        assert_eq!(profile.transport, TransportKind::NativeSsh);
+        assert_eq!(profile.terminal_profile_id, None);
+        let system_profile = &catalog.connections[&super::parse_id(&system_id).expect("id")];
+        assert_eq!(system_profile.transport, TransportKind::SystemOpenSsh);
+        assert_eq!(
+            system_profile.identity_file.as_deref(),
+            Some(std::path::Path::new("用户选择的 identity"))
+        );
+        drop(reopened);
+        std::fs::remove_file(&path).expect("清理临时数据库");
+    }
+
+    #[test]
+    fn desktop_password_canary_never_enters_file_sqlite_or_projection() {
+        let path = std::env::temp_dir().join(format!(
+            "guosh-catalog-secret-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let repository = Arc::new(SqliteRepository::open(&path).expect("文件数据库"));
+        repository.migrate().expect("迁移");
+        let (context, vault) = context_for(repository);
+        let id = desktop_save(&context, desktop_request()).expect("保存凭据引用");
+        let serialized =
+            serde_json::to_string(&desktop_summaries(&load(&context).expect("目录"), ""))
+                .expect("目录投影");
+        assert!(!serialized.contains("secret-canary-not-for-projection"));
+        assert_eq!(
+            saved_password(&context, &vault, &id).as_deref(),
+            Some("secret-canary-not-for-projection")
+        );
+        drop(context);
+        for suffix in ["", "-wal", "-shm"] {
+            let file = PathBuf::from(format!("{}{suffix}", path.display()));
+            if file.exists() {
+                let bytes = std::fs::read(&file).expect("扫描数据库文件");
+                assert!(
+                    !bytes
+                        .windows(b"secret-canary-not-for-projection".len())
+                        .any(|window| window == b"secret-canary-not-for-projection"),
+                    "凭据不能进入 SQLite 或日志"
+                );
+                std::fs::remove_file(file).expect("清理临时数据库文件");
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_gate_uses_compiled_platform_not_caller_claim() {
+        assert_eq!(
+            desktop_gate(0),
+            Err(DesktopCatalogError::UnsupportedVersion)
+        );
+        let current = desktop_gate(DESKTOP_CATALOG_VERSION);
+        if cfg!(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux"
+        )) {
+            assert_eq!(current, Ok(()));
+        } else {
+            assert_eq!(current, Err(DesktopCatalogError::DesktopOnly));
+        }
+    }
+
+    #[test]
+    fn desktop_secret_ownership_moves_before_failures_and_into_secret_update_without_clone() {
+        let (context, _) = context();
+        let form = desktop_request();
+        let source = form.password.as_ptr();
+        let mut draft = DesktopSaveDraft::new(form);
+        assert!(draft.request.password.is_empty());
+        assert_eq!(draft.password.expose_secret().as_ptr(), source);
+        draft.request.version = 0;
+        assert_eq!(
+            desktop_save_secured(&context, draft),
+            Err(DesktopCatalogError::UnsupportedVersion)
+        );
+
+        let form = desktop_request();
+        let source = form.password.as_ptr();
+        let draft = DesktopSaveDraft::new(form);
+        let (_, secret) =
+            desktop_profile_from_request(&context, None, &draft.request, draft.password)
+                .expect("构造保存变更");
+        match secret {
+            SecretUpdate::Set(secret) => assert_eq!(secret.expose_secret().as_ptr(), source),
+            _ => panic!("密码应通过 SecretUpdate 转移所有权"),
+        }
+
+        context.repository.shutdown().expect("关闭数据库");
+        let draft = DesktopSaveDraft::new(desktop_request());
+        assert_eq!(
+            desktop_save_secured(&context, draft),
+            Err(DesktopCatalogError::Storage)
+        );
+        // 指针一致只证明本层没有复制 String；不证明反序列化缓冲或分配器没有历史副本。
+    }
+
+    #[tokio::test]
+    async fn desktop_save_signal_uses_rinf_decoder_and_request_id() {
+        use rinf::DartSignal;
+        use zeroize::Zeroize;
+        let (context, vault) = context();
+        let receiver = DesktopSaveConnection::get_dart_signal_receiver();
+        let mut request = desktop_request();
+        let request_id = request.request_id;
+        let mut encoded = rinf::serialize(&request).expect("rinf 编码");
+        request.password.zeroize();
+        crate::signals::catalog::inject_desktop_save(&encoded);
+        encoded.zeroize();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("收到信号")
+            .expect("信号通道未关闭")
+            .message;
+        assert_eq!(received.request_id, request_id);
+        let source = received.password.as_ptr();
+        let draft = DesktopSaveDraft::new(received);
+        assert!(draft.request.password.is_empty());
+        assert_eq!(draft.password.expose_secret().as_ptr(), source);
+        let result = desktop_save_secured(&context, draft);
+        if cfg!(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux"
+        )) {
+            let id = result.expect("桌面目录写入");
+            assert!(
+                load(&context)
+                    .expect("真实目录")
+                    .connections
+                    .contains_key(&super::parse_id(&id).expect("id"))
+            );
+            let catalog = load(&context).expect("目录");
+            let credential = catalog.connections[&super::parse_id(&id).expect("id")]
+                .credential_ref
+                .as_ref()
+                .expect("凭据引用");
+            assert_eq!(
+                vault
+                    .get(credential)
+                    .expect("凭据读取")
+                    .expect("已保存凭据")
+                    .expose_secret(),
+                "secret-canary-not-for-projection"
+            );
+        } else {
+            assert_eq!(result, Err(DesktopCatalogError::DesktopOnly));
+        }
     }
 
     fn saved_password(
@@ -390,6 +1267,11 @@ mod tests {
             request(AuthMethod::Password, PasswordAction::Set, "first"),
         )
         .expect("create");
+        let connection_id = super::parse_id(&id).expect("id");
+        assert_eq!(
+            load(&context).expect("catalog").connections[&connection_id].transport,
+            TransportKind::NativeSsh
+        );
         assert_eq!(
             saved_password(&context, &vault, &id).as_deref(),
             Some("first")
@@ -399,6 +1281,9 @@ mod tests {
         keep.id = id.clone();
         keep.name = "renamed".to_owned();
         save(&context, keep).expect("keep");
+        let after_edit = &load(&context).expect("catalog").connections[&connection_id];
+        assert_eq!(after_edit.transport, TransportKind::NativeSsh);
+        assert_eq!(after_edit.name, "renamed");
         assert_eq!(
             saved_password(&context, &vault, &id).as_deref(),
             Some("first")
@@ -417,6 +1302,53 @@ mod tests {
         save(&context, forget).expect("forget");
         assert_eq!(saved_password(&context, &vault, &id), None);
         assert!(vault.is_empty());
+    }
+
+    #[test]
+    fn legacy_save_rejects_system_ssh_without_changing_profile_or_credential() {
+        let (context, vault) = context();
+        let mut profile = ConnectionProfile::new("system", "original.example");
+        profile.username = "original".to_owned();
+        profile.transport = TransportKind::SystemOpenSsh;
+        profile.authentication = AuthenticationKind::PublicKey;
+        profile.identity_file = Some(PathBuf::from("existing-key"));
+        let id = profile.id;
+        context
+            .credentials
+            .apply_catalog(
+                CatalogMutation::Create(profile),
+                SecretUpdate::Set("existing-secret".to_owned().into()),
+            )
+            .expect("create system entry");
+        let before = load(&context).expect("catalog").connections[&id].clone();
+        let reference = before.credential_ref.as_ref().expect("reference");
+        assert_eq!(
+            vault
+                .get(reference)
+                .expect("vault")
+                .expect("secret")
+                .expose_secret(),
+            "existing-secret"
+        );
+
+        let mut edit = request(AuthMethod::Password, PasswordAction::Clear, "");
+        edit.id = id.0.to_string();
+        edit.name = "changed".to_owned();
+        edit.host = "other.example".to_owned();
+        assert_eq!(save(&context, edit), Err(CatalogError::Storage));
+        assert_eq!(load(&context).expect("catalog").connections[&id], before);
+        assert_eq!(
+            vault
+                .get(reference)
+                .expect("vault")
+                .expect("secret")
+                .expose_secret(),
+            "existing-secret"
+        );
+
+        let mut missing = request(AuthMethod::Password, PasswordAction::Keep, "");
+        missing.id = uuid::Uuid::new_v4().to_string();
+        assert_eq!(save(&context, missing), Err(CatalogError::NotFound));
     }
 
     #[test]
