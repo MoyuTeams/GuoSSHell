@@ -483,8 +483,13 @@ class _WindowsShellState extends State<WindowsShell> {
     ),
   );
 
+  /// 只有用户在确认框取消（或已有对话框打开）才否决退出；关闭未确认的会话不否决，
+  /// 进程退出时由 Rust 终结。
   Future<bool> _confirmClose() async {
-    if (_dialogOpen) return false;
+    if (_dialogOpen) {
+      if (mounted) setState(() => _error = '请先完成当前对话框，再关闭 GuoSSHell。');
+      return false;
+    }
     final count = _workspace.panes
         .where(
           (pane) =>
@@ -493,8 +498,8 @@ class _WindowsShellState extends State<WindowsShell> {
         )
         .length;
     if (count == 0) {
-      if (!await _quietAll() || !mounted) return false;
-      return _closeAllSessions();
+      await _quietAll();
+      return true;
     }
     _dialogOpen = true;
     try {
@@ -505,19 +510,27 @@ class _WindowsShellState extends State<WindowsShell> {
         '这将断开工作区中的 $count 个会话。',
         action: '断开并关闭',
       );
-      return confirmed && await _closeAllSessions();
+      if (!confirmed) return false;
+      await _closeAllSessions();
+      return true;
     } finally {
       _dialogOpen = false;
       _focusActive();
     }
   }
 
-  Future<bool> _closeAllSessions() async {
-    final results = await Future.wait([
-      for (final pane in _workspace.panes) pane.controller.closeSession(),
-    ]);
-    return results.every((closed) => closed);
+  /// 尽力优雅断开，最多等 [_exitCloseTimeout]；结果不作为退出条件。
+  Future<void> _closeAllSessions() async {
+    try {
+      await Future.wait([
+        for (final pane in _workspace.panes) pane.controller.closeSession(),
+      ]).timeout(_exitCloseTimeout);
+    } catch (_) {
+      // 超时或关闭异常：用户已确认退出，不阻止。
+    }
   }
+
+  static const _exitCloseTimeout = Duration(seconds: 3);
 
   Future<void> _closeTab(WorkspaceTab tab) async {
     if (_dialogOpen) return;

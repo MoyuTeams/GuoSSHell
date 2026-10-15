@@ -111,8 +111,13 @@ class TerminalPaneController extends ChangeNotifier {
 
   Future<bool> quietNativeInput() async => true;
 
+  /// 测试用：替换 [closeSession] 的结果（模拟关闭失败或挂住的会话）。
+  @visibleForTesting
+  Future<bool> Function()? debugCloseSession;
+
   /// 桌面 V2 会话按序断开并等 Rust 确认结束；旧路径窗格随 widget 卸载断开。
-  Future<bool> closeSession() async => await _pane?._normal?.close() ?? true;
+  Future<bool> closeSession() async =>
+      await (debugCloseSession?.call() ?? _pane?._normal?.close()) ?? true;
 
   /// 当前会话编号（信号按它分流；重连换新编号）。窗格还没布局时为 0。
   int get sessionId => _pane?._sessionId ?? 0;
@@ -204,6 +209,10 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   /// V2 帧解码失败的提示；下一帧成功应用前保持可见。
   String _frameError = '';
+
+  /// V2 会话的瞬时提示（如本次粘贴被丢弃），数秒后自动消失。
+  String _notice = '';
+  Timer? _noticeTimer;
   bool _syncingNormalScroll = false;
 
   /// 本轮按键/文本刚交给 V2：渲染库随后把视图跳到底部，这一跳不是用户滚动，
@@ -357,6 +366,14 @@ class _TerminalPaneState extends State<TerminalPane> {
         (await Clipboard.getData('text/plain'))?.text;
     normal.onClipboard = (text) =>
         unawaited(_pointerClipboard.receiveCopy(text));
+    normal.onNotice = (text) {
+      if (!mounted) return;
+      _noticeTimer?.cancel();
+      _noticeTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _notice = '');
+      });
+      setState(() => _notice = text);
+    };
     normal.showPrompt = (message) async {
       if (!mounted) return;
       final attempt = normal.lifecycle?.attempt;
@@ -690,8 +707,10 @@ class _TerminalPaneState extends State<TerminalPane> {
       normal.readClipboard = null;
       normal.showPrompt = null;
       normal.onClipboard = null;
+      normal.onNotice = null;
       unawaited(normal.detach());
     }
+    _noticeTimer?.cancel();
     // 窗格从界面上移除（关窗格、关标签、离开工作区）即结束会话：连接中的一并取消，断开后
     // 还在等重连的也结束；只有连接前被取消的会话 Rust 那边已经收掉了。
     // 先告知桌面弹窗拒绝，再注销提示监听。弹窗路由可能位于仍存在的工作区 Navigator 上。
@@ -1452,6 +1471,10 @@ class _TerminalPaneState extends State<TerminalPane> {
           TextButton(onPressed: _reconnect, child: const Text('重新连接')),
           TextButton(onPressed: widget.onClose, child: const Text('关闭')),
         ],
+      ),
+      _ when _notice.isNotEmpty => _Banner(
+        icon: Icons.info_outline,
+        text: _notice,
       ),
       _ when _frameError.isNotEmpty => _Banner(
         icon: Icons.broken_image_outlined,

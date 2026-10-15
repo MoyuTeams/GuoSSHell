@@ -135,6 +135,12 @@ class WindowsDesktopWindow {
     if (defaultTargetPlatform == TargetPlatform.macOS) {
       _macClose.setMethodCallHandler((call) async {
         if (call.method != 'confirmClose') throw MissingPluginException();
+        // 先告知宿主已收到、正在询问用户：宿主据此取消无响应兜底，确认框不设时限。
+        unawaited(
+          _macClose
+              .invokeMethod<void>('confirmClosePending')
+              .catchError((Object _) {}),
+        );
         return await (confirmClose?.call() ?? Future.value(true));
       });
       return;

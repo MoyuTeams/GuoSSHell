@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:fluent_ui/fluent_ui.dart' as f;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -55,6 +57,42 @@ void main() {
       ),
       isNull,
     );
+  });
+
+  testWidgets('macOS 收到 confirmClose 先回报 confirmClosePending 再询问用户', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+    const channel = MethodChannel('guosshell/window_close');
+    final messenger = tester.binding.defaultBinaryMessenger;
+    final log = <String>[];
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      log.add(call.method);
+      return null;
+    });
+    addTearDown(() {
+      messenger.setMockMethodCallHandler(channel, null);
+      WindowsDesktopWindow.confirmClose = null;
+    });
+    await WindowsDesktopWindow.initialize();
+    final asking = Completer<bool>();
+    WindowsDesktopWindow.confirmClose = () {
+      log.add('dialog');
+      return asking.future;
+    };
+    ByteData? reply;
+    final handled = messenger.handlePlatformMessage(
+      channel.name,
+      channel.codec.encodeMethodCall(const MethodCall('confirmClose')),
+      (data) => reply = data,
+    );
+    await tester.pump();
+    expect(log, ['confirmClosePending', 'dialog']);
+    expect(reply, isNull);
+    asking.complete(false);
+    await handled;
+    expect(channel.codec.decodeEnvelope(reply!), isFalse);
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('非 Windows 桌面使用 Fluent，移动保持原入口且均不调用窗口插件', (tester) async {

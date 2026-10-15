@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -341,6 +342,168 @@ void main() {
     expect(f.session.error, isNotEmpty);
     await f.start();
     expect(f.events, isEmpty);
+    await f.dispose();
+  });
+
+  test('受理后超大粘贴按分片全部发出，不阻断后续输入', () async {
+    final f = _Fixture();
+    await f.start();
+    final notices = <String>[];
+    f.session.onNotice = notices.add;
+    // 与 Rust 准入一致：UTF-8 字节 ×3 + 512 超过 1 MiB 即 InputTooLarge。
+    f.gateway.onOrdered = (request) => DesktopSessionTestGateway.accept(
+      request,
+      failure: switch (request.event) {
+        DesktopEventPaste(:final text)
+            when utf8.encode(text).length * 3 + 512 > 1024 * 1024 =>
+          DesktopFailure.inputTooLarge,
+        _ => DesktopFailure.none,
+      },
+    );
+    final text = 'x${'中🙂' * (200 * 1024)}';
+    expect(text.length, greaterThan(600 * 1024));
+    f.session
+      ..send(DesktopEventPaste(text: text))
+      ..send(_key('enter'));
+    for (var i = 0; i < 64; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+    final parts = f.events.whereType<DesktopEventPaste>().toList();
+    expect(parts.length, greaterThan(1));
+    for (final part in parts) {
+      expect(
+        part.text.length,
+        lessThanOrEqualTo(DesktopOrderedSession.pasteChunkUnits),
+      );
+      final first = part.text.codeUnitAt(0);
+      expect(first >= 0xdc00 && first <= 0xdfff, isFalse);
+    }
+    expect(parts.map((part) => part.text).join(), text);
+    expect(f.events.last, _key('enter'));
+    // 每个分片一次即受理，seq 严格递增。
+    expect(f.seqs, [for (var i = 1; i <= parts.length + 1; i++) i]);
+    expect(f.session.error, isEmpty);
+    expect(notices, isEmpty);
+    f.session.send(const DesktopEventText(text: '继续'));
+    expect(f.events.last, const DesktopEventText(text: '继续'));
+    await f.dispose();
+  });
+
+  test('受理后待发条数超限只丢弃最新一条，不阻断，帧确认仍入队', () async {
+    final f = _Fixture();
+    await f.start();
+    final notices = <String>[];
+    f.session.onNotice = notices.add;
+    f.hold();
+    // 第一条在途，其余排队直到上限。
+    for (var i = 0; i <= DesktopOrderedSession.maxQueuedEvents; i++) {
+      f.session.send(_key('enter'));
+    }
+    f.session
+      ..send(const DesktopEventText(text: '丢弃'))
+      ..send(const DesktopEventFrameAck(frameSeq: 1));
+    expect(notices, hasLength(1));
+    expect(f.session.error, isEmpty);
+    while (f.held.isNotEmpty) {
+      f.reply(f.held.removeAt(0));
+    }
+    expect(f.events, hasLength(DesktopOrderedSession.maxQueuedEvents + 2));
+    expect(f.events.last, const DesktopEventFrameAck(frameSeq: 1));
+    expect(f.events.whereType<DesktopEventText>(), isEmpty);
+    await f.dispose();
+  });
+
+  test('受理前超限阻断期间，帧确认、尺寸与视口仍发送', () async {
+    final f = _Fixture();
+    f.session.send(
+      DesktopEventPaste(
+        text: 'x' * (DesktopOrderedSession.maxQueuedTextUnits + 1),
+      ),
+    );
+    expect(f.session.error, isNotEmpty);
+    await f.start();
+    f.hold();
+    f.session
+      ..send(const DesktopEventText(text: '丢弃'))
+      ..send(const DesktopEventFrameAck(frameSeq: 1))
+      ..send(const DesktopEventResize(geometry: _geometry))
+      ..send(
+        const DesktopEventViewport(
+          followBottom: true,
+          topStableRow: 0,
+          rows: 0,
+        ),
+      );
+    while (f.held.isNotEmpty) {
+      f.reply(f.held.removeAt(0));
+    }
+    expect(f.events, const [
+      DesktopEventFrameAck(frameSeq: 1),
+      DesktopEventResize(geometry: _geometry),
+      DesktopEventViewport(followBottom: true, topStableRow: 0, rows: 0),
+    ]);
+    await f.dispose();
+  });
+
+  test('剪贴板读取失败只丢弃本次粘贴，排队输入照常发送', () async {
+    final f = _Fixture();
+    await f.start();
+    final notices = <String>[];
+    f.session.onNotice = notices.add;
+    f.hold();
+    f.session.send(const DesktopEventText(text: 'one'));
+    f.session.readClipboard = () async =>
+        throw PlatformException(code: 'unavailable');
+    final paste = f.session.pasteClipboard();
+    f.session.send(_key('enter'));
+    await paste;
+    expect(notices, hasLength(1));
+    f.reply(f.held.removeAt(0));
+    expect(f.events.last, _key('enter'));
+    f.reply(f.held.removeAt(0));
+    expect(f.events.whereType<DesktopEventPaste>(), isEmpty);
+    expect(f.session.error, isEmpty);
+    f.session.send(const DesktopEventText(text: 'two'));
+    expect(f.events.last, const DesktopEventText(text: 'two'));
+    await f.dispose();
+  });
+
+  testWidgets('剪贴板读取超时按失败处理；读取期间再次粘贴给出提示', (tester) async {
+    final f = _Fixture();
+    await f.start(tick: tester.pump);
+    final notices = <String>[];
+    f.session.onNotice = notices.add;
+    f.session.readClipboard = () => Completer<String?>().future;
+    final paste = f.session.pasteClipboard();
+    f.session.send(_key('enter'));
+    await f.session.pasteClipboard();
+    expect(notices, hasLength(1));
+    expect(f.events, isEmpty);
+    await tester.pump(const Duration(seconds: 2));
+    await paste;
+    await tester.pump();
+    expect(notices, hasLength(2));
+    expect(f.events, [_key('enter')]);
+    expect(f.session.error, isEmpty);
+    await f.dispose();
+  });
+
+  testWidgets('关闭未确认后再次 close 重新发起 Disconnect', (tester) async {
+    final f = _Fixture();
+    await f.start(tick: tester.pump);
+    f.gateway.lifecycle(NativeLifecycleState.authenticated);
+    f.hold();
+    final first = f.session.close();
+    expect(f.events.last, const DesktopEventDisconnect());
+    await tester.pump(const Duration(seconds: 10));
+    expect(await first, isFalse);
+    final count = f.events.length;
+    final second = f.session.close();
+    expect(f.events, hasLength(count + 1));
+    expect(f.events.last, const DesktopEventDisconnect());
+    f.gateway.lifecycle(NativeLifecycleState.ended, revision: 2);
+    expect(await second, isTrue);
+    expect(identical(f.session.close(), second), isTrue);
     await f.dispose();
   });
 

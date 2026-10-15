@@ -29,7 +29,9 @@ import 'session_target.dart';
 /// - None / InvalidEvent / PolicyUnavailable：seq 已消费，继续下一个；
 /// - Busy：seq 未推进，原事件用同一 seq 稍后重试（仅鼠标移动可丢弃）；
 /// - InputTooLarge：文本/粘贴对半拆分后用同一 seq 重发。
-/// Start 被接受前的输入在本地按序排队（type-ahead），最多 1024 条、512 Ki UTF-16 单元。
+/// Start 被接受前的输入在本地按序排队（type-ahead），最多 1024 条、512 Ki UTF-16 单元，
+/// 超限丢弃整段并阻断输入直到重连。受理后超大粘贴按 [pasteChunkUnits] 分片全部入队；
+/// 待发条数超过上限时只丢弃最新一条并经 [onNotice] 提示，不阻断。
 /// 关闭可用 Disconnect 替换明确收到 Busy 的输入，不等待数据预算。
 class DesktopOrderedSession extends ChangeNotifier {
   DesktopOrderedSession({
@@ -61,10 +63,18 @@ class DesktopOrderedSession extends ChangeNotifier {
   /// Copy 事件取到的选区文字。
   void Function(String text)? onClipboard;
 
+  /// 不改变会话状态的瞬时提示（如本次粘贴被丢弃），由窗格短暂显示。
+  void Function(String text)? onNotice;
+
   static const _busyRetry = Duration(milliseconds: 20);
   static const _resultTimeout = Duration(seconds: 10);
+  static const _clipboardTimeout = Duration(seconds: 2);
   static const maxQueuedEvents = 1024;
   static const maxQueuedTextUnits = 512 * 1024;
+
+  /// 粘贴分片上限（UTF-16 单元）。每单元最多 3 字节 UTF-8，Rust 按 3 倍字节加 512
+  /// 预约，64 Ki 单元最坏约 576 KiB，低于 1 MiB 的单条准入预算。
+  static const pasteChunkUnits = 64 * 1024;
 
   final _subscriptions = <StreamSubscription>[];
   final _frames = <int, (DesktopFrame, Uint8List)>{};
@@ -382,19 +392,40 @@ class DesktopOrderedSession extends ChangeNotifier {
   /// 按序发送；鼠标移动、视口、尺寸与帧确认只保留队尾最新一条。
   void send(DesktopEvent event) {
     if (_disposed || (_closed && event is! DesktopEventDisconnect)) return;
-    if (_inputBlocked &&
-        event is! DesktopEventDisconnect &&
-        event is! DesktopEventReconnect) {
-      return;
-    }
+    if (_inputBlocked && !_control(event)) return;
     if (_coalescible(event) &&
         _queue.isNotEmpty &&
         _coalescible(_queue.last) &&
         _queue.last.runtimeType == event.runtimeType) {
       _queue.removeLast();
     }
-    if (!_enqueue(event)) return;
+    final parts = _chunks(event);
+    if (_accepted &&
+        !_control(event) &&
+        _queue.length + parts.length > maxQueuedEvents) {
+      onNotice?.call('待发送输入过多，已丢弃本次输入');
+      return;
+    }
+    if (!_enqueue(parts)) return;
     _pump();
+  }
+
+  /// 断开、重连与协议心跳/几何（帧确认、尺寸、视口）不是用户输入，不受输入阻断与条数上限影响。
+  static bool _control(DesktopEvent event) =>
+      event is DesktopEventDisconnect ||
+      event is DesktopEventReconnect ||
+      event is DesktopEventFrameAck ||
+      event is DesktopEventResize ||
+      event is DesktopEventViewport;
+
+  /// 超过 [pasteChunkUnits] 的粘贴反复对半拆分（保持代理对完整）；其他事件原样返回。
+  static List<DesktopEvent> _chunks(DesktopEvent event) {
+    if (event is! DesktopEventPaste || event.text.length <= pasteChunkUnits) {
+      return [event];
+    }
+    final halves = _split(event);
+    if (halves == null) return [event];
+    return [..._chunks(halves.$1), ..._chunks(halves.$2)];
   }
 
   static int _textUnits(DesktopEvent? event) => switch (event) {
@@ -405,26 +436,29 @@ class DesktopOrderedSession extends ChangeNotifier {
     _ => 0,
   };
 
-  bool _enqueue(DesktopEvent event, {int? at}) {
-    final units =
-        _textUnits(event) +
-        _textUnits(_inflight) +
-        _queue.fold<int>(0, (total, item) => total + _textUnits(item));
-    if (event is! DesktopEventDisconnect &&
-        (_queue.length >= maxQueuedEvents || units > maxQueuedTextUnits)) {
-      // 丢弃整段未发送输入，避免仅丢文本后仍执行排队的 Enter。
-      _queue.clear();
-      _inputBlocked = true;
-      _fail('待发送输入超过上限，请重新连接');
-      return false;
+  /// Start 受理前有总量上限，超限丢弃整段并阻断；受理后总是入队。
+  bool _enqueue(List<DesktopEvent> events, {int? at}) {
+    if (!_accepted && events.any((event) => event is! DesktopEventDisconnect)) {
+      final units =
+          events.fold<int>(0, (total, item) => total + _textUnits(item)) +
+          _textUnits(_inflight) +
+          _queue.fold<int>(0, (total, item) => total + _textUnits(item));
+      if (_queue.length + events.length > maxQueuedEvents ||
+          units > maxQueuedTextUnits) {
+        // 丢弃整段未发送输入，避免仅丢文本后仍执行排队的 Enter。
+        _queue.clear();
+        _inputBlocked = true;
+        _fail('待发送输入超过上限，请重新连接');
+        return false;
+      }
     }
     if (at == null) {
-      _queue.add(event);
+      _queue.addAll(events);
     } else {
-      final events = _queue.toList()..insert(at, event);
+      final queued = _queue.toList()..insertAll(at, events);
       _queue
         ..clear()
-        ..addAll(events);
+        ..addAll(queued);
     }
     return true;
   }
@@ -510,11 +544,9 @@ class DesktopOrderedSession extends ChangeNotifier {
       case DesktopFailure.inputTooLarge:
         final halves = _split(event);
         if (halves != null) {
+          // 一条换两条，不受排队上限约束，保证已受理的粘贴完整送达。
           _inflight = halves.$1;
-          if (!_enqueue(halves.$2, at: 0)) {
-            _inflight = null;
-            return;
-          }
+          _queue.addFirst(halves.$2);
           _transmit();
           return;
         }
@@ -600,21 +632,27 @@ class DesktopOrderedSession extends ChangeNotifier {
 
   /// 剪贴板读取属于当前输入顺序；完成前后续按键不能越过粘贴。
   Future<void> pasteClipboard({bool beforeQueued = false}) async {
-    if (_closed || _disposed || _readingClipboard || _inputBlocked) return;
+    if (_closed || _disposed || _inputBlocked) return;
+    if (_readingClipboard) {
+      onNotice?.call('正在读取剪贴板，请稍后再粘贴');
+      return;
+    }
     _readingClipboard = true;
     final attempt = lifecycle?.attempt;
     final generation = _inputGeneration;
     // 占住输入位置：菜单粘贴排在已有输入后，按键裁决的粘贴排在后续按键前。
     final marker = DesktopEventPaste(text: '');
     _clipboardMarker = marker;
-    if (!_enqueue(marker, at: beforeQueued ? 0 : null)) {
+    if (!_enqueue([marker], at: beforeQueued ? 0 : null)) {
       _clipboardMarker = null;
       _readingClipboard = false;
       return;
     }
     _pump();
     try {
-      final text = await readClipboard?.call();
+      final read = readClipboard?.call();
+      // 读取挂住按失败处理，不能让占位一直挡住后续输入。
+      final text = read == null ? null : await read.timeout(_clipboardTimeout);
       final index = _queue.toList().indexWhere(
         (event) => identical(event, marker),
       );
@@ -627,17 +665,11 @@ class DesktopOrderedSession extends ChangeNotifier {
           index >= 0 &&
           text != null &&
           text.isNotEmpty) {
-        _enqueue(DesktopEventPaste(text: text), at: index);
+        _enqueue(_chunks(DesktopEventPaste(text: text)), at: index);
       }
     } catch (_) {
-      if (!_closed &&
-          !_disposed &&
-          generation == _inputGeneration &&
-          lifecycle?.attempt == attempt) {
-        _queue.clear();
-        _inputBlocked = true;
-        _fail('无法读取剪贴板，请重新连接');
-      }
+      // 只丢弃本次粘贴，已排队的其他输入照常发送。
+      if (!_closed && !_disposed) onNotice?.call('无法读取剪贴板，本次粘贴已取消');
     } finally {
       _queue.removeWhere((event) => identical(event, marker));
       _clipboardMarker = null;
@@ -647,8 +679,13 @@ class DesktopOrderedSession extends ChangeNotifier {
   }
 
   /// Start 之前取消准备；之后有序 Disconnect，等 lifecycle ended 或 status closed。
-  Future<bool> close() => _closeFuture ??= _close();
+  /// 未确认（含超时）时清除缓存结果，下一次调用重新发起关闭。
+  Future<bool> close() => _closeFuture ??= _close().then((closed) {
+    if (!closed) _closeFuture = null;
+    return closed;
+  });
   Future<bool> _close() async {
+    if (_disposed) return false;
     _closed = true;
     phase = DesktopPanePhase.closing;
     dismissed.value = true;

@@ -754,6 +754,36 @@ void main() {
     other.dispose();
   });
 
+  for (final hang in [false, true]) {
+    testWidgets('确认退出后会话关闭${hang ? '挂住' : '失败'}也不否决退出；对话框打开时提示', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      final h = _Harness();
+      await h.mount(tester);
+      h.panes.single.controller.debugCloseSession = hang
+          ? () => Completer<bool>().future
+          : () async => false;
+      bool? result;
+      unawaited(
+        WindowsDesktopWindow.confirmClose!().then((value) => result = value),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('关闭 GuoSSHell？'), findsOneWidget);
+      // 确认框已打开：再次请求退出立即否决并提示，不静默。
+      expect(await WindowsDesktopWindow.confirmClose!(), isFalse);
+      await tester.pump();
+      expect(find.textContaining('请先完成当前对话框'), findsOneWidget);
+      await tester.tap(find.text('断开并关闭'));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 3));
+      await tester.pumpAndSettle();
+      expect(result, isTrue);
+      await tester.pumpWidget(const SizedBox());
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
   for (final platform in [TargetPlatform.windows, TargetPlatform.macOS]) {
     testWidgets('$platform 关闭 pane/tab/window 均确认，取消保留会话，最后窗格回到目录', (
       tester,

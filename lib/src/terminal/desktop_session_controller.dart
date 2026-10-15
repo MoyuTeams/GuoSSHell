@@ -1348,8 +1348,16 @@ class DesktopSessionController extends ChangeNotifier {
     );
   }
 
-  Future<bool> close() => _closeFuture ??= _close();
+  /// 未确认（含超时）时清除缓存结果并允许重发 Disconnect，下一次调用重新发起关闭。
+  Future<bool> close() => _closeFuture ??= _close().then((closed) {
+    if (!closed) {
+      _closeFuture = null;
+      _disconnectSent = false;
+    }
+    return closed;
+  });
   Future<bool> _close() async {
+    if (_disposed) return false;
     _closed = true;
     phase = DesktopPanePhase.closing;
     dismissed.value = true;
