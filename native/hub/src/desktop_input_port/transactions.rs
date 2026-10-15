@@ -391,8 +391,12 @@ impl InputPort {
                     gui.consumed_latches,
                 )
             }
+            // 原生路径的软件按键走 GuiIntent。
             NativeCommand::Event(
-                DesktopEvent::Key { .. } | DesktopEvent::Text { .. } | DesktopEvent::Mouse { .. },
+                DesktopEvent::Key { .. }
+                | DesktopEvent::SoftKey { .. }
+                | DesktopEvent::Text { .. }
+                | DesktopEvent::Mouse { .. },
             ) => return Err(Reject::InvalidEvent),
             NativeCommand::Event(DesktopEvent::Copy) => {
                 (EffectKind::Action(DesktopAction::Copy), EVENT_BYTES, 0)

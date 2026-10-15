@@ -1,9 +1,13 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guosh_shell/src/bindings/bindings.dart';
 import 'package:guosh_shell/src/terminal/desktop_font.dart';
 import 'package:guosh_shell/src/terminal/desktop_ordered_session.dart';
+import 'package:guosh_shell/src/terminal/frame_terminal.dart';
 import 'package:guosh_shell/src/terminal/session_target.dart';
+import 'package:guosh_shell/src/terminal/terminal_key_bar.dart';
 import 'package:rinf/rinf.dart';
 
 import 'desktop_session_controller_test.dart'
@@ -385,9 +389,36 @@ void main() {
       superKey: false,
     );
     expect(latched.altSource, DesktopAltSource.unknown);
-    final synthetic = _key('enter');
-    expect(synthetic.altSource, DesktopAltSource.unknown);
-    expect(synthetic.physical.toBigInt(), BigInt.zero);
+    // 没有硬件来源的按键不伪造物理键，改走 SoftKey，不带默认动作。
+    expect(
+      desktopOrderedKey(
+        KeyInputEvent('character:t', shift: true, control: true),
+        metaPressed: false,
+      ),
+      const DesktopEventSoftKey(
+        key: 'character:t',
+        shift: true,
+        control: true,
+        alt: false,
+      ),
+    );
+    expect(
+      desktopOrderedKey(
+        KeyInputEvent('arrow_left', alt: true, source: right),
+        metaPressed: false,
+      ),
+      isA<DesktopEventKey>()
+          .having(
+            (key) => key.physical.toBigInt(),
+            'physical',
+            isNot(BigInt.zero),
+          )
+          .having(
+            (key) => key.altSource,
+            'altSource',
+            DesktopAltSource.unknown,
+          ),
+    );
 
     DesktopEventKey chord(
       LogicalKeyboardKey logical, {
@@ -431,5 +462,165 @@ void main() {
       ).defaultAction,
       isNull,
     );
+  });
+
+  test('非法 Resize 由 Rust 按已消费回报，下一条有效事件用下一个 seq 继续', () async {
+    final f = _Fixture();
+    await f.start();
+    f.hold();
+    f.session
+      ..send(
+        const DesktopEventResize(
+          geometry: DesktopGeometry(
+            cols: 0,
+            rows: 24,
+            pixelWidth: 640,
+            pixelHeight: 480,
+            dpi: 96,
+          ),
+        ),
+      )
+      ..send(const DesktopEventText(text: 'ok'));
+    f.reply(f.held.removeAt(0), failure: DesktopFailure.invalidEvent);
+    f.reply(f.held.removeAt(0));
+    expect(f.seqs, [1, 2]);
+    expect(f.events.last, const DesktopEventText(text: 'ok'));
+    expect(f.session.error, isEmpty);
+    f.session.send(const DesktopEventText(text: '再来'));
+    expect(f.seqs, [1, 2, 3]);
+    await f.dispose();
+  });
+
+  testWidgets('键位条 Esc/Tab/方向/Ctrl+C 与挂住 Ctrl 的按钮经有序通道发 SoftKey', (
+    tester,
+  ) async {
+    final f = _Fixture();
+    await f.start(tick: tester.pump);
+    // 与 V2 窗格 _sendOrdered 相同的接线：适配器事件 → desktopOrderedKey → 有序通道。
+    final terminal = FrameTerminal(
+      onInput: (event) {
+        f.session.send(switch (event) {
+          KeyInputEvent() => desktopOrderedKey(event, metaPressed: false),
+          TextInputEvent(:final text) => DesktopEventText(text: text),
+          _ => throw StateError('键位条不产生 $event'),
+        });
+        return true;
+      },
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: TerminalKeyBar(
+            terminal: terminal,
+            canCopy: () => false,
+            onCopy: () {},
+            onPaste: () {},
+            onToggleKeyboard: () {},
+            onDisconnect: () {},
+            onEdit: () {},
+            onZoomIn: () {},
+            onZoomOut: () {},
+            onZoomReset: () {},
+            rows: const [
+              ['escape', 'tab', 'up', 'left', 'ctrlC', 'ctrl', 'alt'],
+            ],
+          ),
+        ),
+      ),
+    );
+    for (final label in ['Esc', 'Tab', '↑', '←', 'Ctrl+C', 'Ctrl', 'Tab']) {
+      await tester.tap(find.byTooltip(label));
+      await tester.pump();
+    }
+    await tester.tap(find.byTooltip('Alt'));
+    await tester.pump();
+    await tester.tap(find.byTooltip('Esc'));
+    await tester.pump();
+    DesktopEventSoftKey soft(
+      String key, {
+      bool control = false,
+      bool alt = false,
+    }) =>
+        DesktopEventSoftKey(key: key, shift: false, control: control, alt: alt);
+    // 键名与 Rust ordered_soft_keys_* 单测编码的相同（Esc→ESC、Tab→HT、↑→CSI A、^C→ETX）。
+    expect(f.events, [
+      soft('escape'),
+      soft('tab'),
+      soft('arrow_up'),
+      soft('arrow_left'),
+      soft('character:c', control: true),
+      soft('tab', control: true),
+      soft('escape', alt: true),
+    ]);
+    expect(f.seqs, [1, 2, 3, 4, 5, 6, 7]);
+    expect(f.session.error, isEmpty);
+    await f.dispose();
+  });
+
+  group('macOS ⌘ 默认候选', () {
+    tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+    DesktopAction? meta(LogicalKeyboardKey key, {bool shift = false}) =>
+        desktopDefaultAction(
+          key,
+          control: false,
+          shift: shift,
+          alt: false,
+          meta: true,
+        );
+
+    test('macOS：⌘⇧L 与 ⌘+/⌘−/⌘0 交壳', () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      expect(
+        meta(LogicalKeyboardKey.keyL, shift: true),
+        DesktopAction.newLocalTerminal,
+      );
+      expect(meta(LogicalKeyboardKey.equal), DesktopAction.zoomIn);
+      expect(meta(LogicalKeyboardKey.minus), DesktopAction.zoomOut);
+      expect(meta(LogicalKeyboardKey.digit0), DesktopAction.zoomReset);
+      final event = desktopKeyEvent(
+        key: 'character:=',
+        phase: DesktopKeyPhase.down,
+        source: const KeyDownEvent(
+          physicalKey: PhysicalKeyboardKey.equal,
+          logicalKey: LogicalKeyboardKey.equal,
+          timeStamp: Duration.zero,
+        ),
+        shift: false,
+        control: false,
+        alt: false,
+        leftAlt: false,
+        rightAlt: false,
+        superKey: true,
+      );
+      expect(event.defaultAction, DesktopAction.zoomIn);
+    });
+
+    test('其他平台：Win/Super 不触发壳快捷键与缩放，Ctrl 行为不变', () {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      expect(meta(LogicalKeyboardKey.keyL, shift: true), isNull);
+      expect(meta(LogicalKeyboardKey.equal), isNull);
+      expect(meta(LogicalKeyboardKey.digit0), isNull);
+      expect(
+        desktopDefaultAction(
+          LogicalKeyboardKey.equal,
+          control: true,
+          shift: false,
+          alt: false,
+          meta: false,
+        ),
+        DesktopAction.zoomIn,
+      );
+      expect(
+        desktopDefaultAction(
+          LogicalKeyboardKey.keyL,
+          control: true,
+          shift: true,
+          alt: false,
+          meta: false,
+        ),
+        DesktopAction.newLocalTerminal,
+      );
+    });
   });
 }

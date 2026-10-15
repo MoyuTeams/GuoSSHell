@@ -70,7 +70,7 @@ impl Protocol {
         }
         let payload = match &r.event {
             DesktopEvent::Text { text } | DesktopEvent::Paste { text } => text.len(),
-            DesktopEvent::Key { key, .. } => key.len(),
+            DesktopEvent::Key { key, .. } | DesktopEvent::SoftKey { key, .. } => key.len(),
             DesktopEvent::Mouse { kind, button, .. } => kind.len() + button.len(),
             _ => 0,
         };

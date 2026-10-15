@@ -583,6 +583,41 @@ pub(super) async fn apply_key(
     Ok(())
 }
 
+/// 文本与软件按键：按 profile 回到底部，引擎编码后写远端。窗口变了要出帧——
+/// 远端不回显时没有输出触发重绘，视口也必须回到底部。
+pub(super) async fn apply_input(
+    session_id: u32,
+    screen: &mut Screen,
+    transport: &mut dyn SessionTransport,
+    input: TerminalInput,
+) -> Result<(), SessionEnd> {
+    let previous_window = screen.window;
+    scroll_keypress(screen);
+    let bytes = screen.engine.encode_input(input).map_err(failure)?;
+    write(transport, &bytes).await?;
+    if screen.window != previous_window {
+        screen.changed(session_id).map_err(failure)?;
+    }
+    Ok(())
+}
+
+/// 粘贴：与文本相同的回底与出帧规则，按远端括号粘贴模式包裹。
+pub(super) async fn apply_paste(
+    session_id: u32,
+    screen: &mut Screen,
+    transport: &mut dyn SessionTransport,
+    text: &str,
+) -> Result<(), SessionEnd> {
+    let previous_window = screen.window;
+    scroll_keypress(screen);
+    let bytes = paste_bytes(text, screen.engine.display_modes().bracketed_paste);
+    write(transport, &bytes).await?;
+    if screen.window != previous_window {
+        screen.changed(session_id).map_err(failure)?;
+    }
+    Ok(())
+}
+
 async fn apply_pointer(
     session_id: u32,
     screen: &mut Screen,

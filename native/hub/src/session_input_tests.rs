@@ -3006,20 +3006,29 @@ impl OrderedKeys {
         )
     }
 
-    /// 执行 actor 收到的下一条按键意图，返回本次写出的字节；没有排队命令时为 None。
+    /// 按 actor 的同一入口执行下一条有序输入（按键、文本/软件按键、粘贴），返回本次写出的
+    /// 字节；没有排队命令时为 None。
     async fn apply(&mut self) -> Option<Vec<u8>> {
         let crate::session::SessionCommand::Ordered(command, _lease) =
             self.commands.try_recv().ok()?
         else {
             panic!("有序命令必须持有预算");
         };
-        let crate::session::SessionCommand::Key(intent) = *command else {
-            panic!("按键只产生 Key 命令");
-        };
         let session_id = self.root.0.source.source.session_id;
-        super::apply_key(session_id, &mut self.screen, &mut self.transport, intent)
-            .await
-            .unwrap_or_else(|end| panic!("按键执行失败：{}", end.detail));
+        let (screen, transport) = (&mut self.screen, &mut self.transport);
+        match *command {
+            crate::session::SessionCommand::Key(intent) => {
+                super::apply_key(session_id, screen, transport, intent).await
+            }
+            crate::session::SessionCommand::Input(input) => {
+                super::apply_input(session_id, screen, transport, input).await
+            }
+            crate::session::SessionCommand::Paste(text) => {
+                super::apply_paste(session_id, screen, transport, &text).await
+            }
+            _ => panic!("只执行输入类有序命令"),
+        }
+        .unwrap_or_else(|end| panic!("输入执行失败：{}", end.detail));
         Some(std::mem::take(
             &mut *self.wire.bytes.lock().expect("写出字节"),
         ))
@@ -3275,4 +3284,125 @@ async fn ordered_key_clear_scrollback_runs_in_actor_and_resets_selection_and_win
     assert_eq!(keys.screen.window, super::Window::Bottom);
     assert_eq!(keys.send(plain("f3", DesktopKeyPhase::Up, 41)), Ok(None));
     assert!(keys.apply().await.is_none());
+}
+
+fn soft(key: &str, control: bool, alt: bool) -> DesktopEvent {
+    DesktopEvent::SoftKey {
+        key: key.into(),
+        shift: false,
+        control,
+        alt,
+    }
+}
+
+#[tokio::test]
+async fn ordered_soft_keys_encode_without_physical_identity_bindings_or_shell_actions() {
+    use crate::signals::desktop_session::DesktopFailure;
+    let mut profile = bound_profile();
+    // 软件 Alt 是显式 Meta 请求，不受左右 Alt 的 Meta 设置约束。
+    profile.left_alt_as_meta = false;
+    profile.right_alt_as_meta = false;
+    let mut keys = OrderedKeys::new(9106, profile);
+    // 键位条 Esc / Tab / ↑ / Ctrl+C 与挂住 Alt 的字母。
+    for (event, expected) in [
+        (soft("escape", false, false), b"\x1b".as_slice()),
+        (soft("tab", false, false), b"\t".as_slice()),
+        (soft("arrow_up", false, false), b"\x1b[A".as_slice()),
+        (soft("character:c", true, false), b"\x03".as_slice()),
+        (soft("character:x", false, true), b"\x1bx".as_slice()),
+        // 物理 F1 绑定了 new_tab；软件 F1 不匹配绑定，也不回报壳动作，直接编码。
+        (soft("f1", false, false), b"\x1bOP".as_slice()),
+    ] {
+        assert_eq!(keys.send(event), Ok(None));
+        assert_eq!(keys.apply().await.as_deref(), Some(expected));
+    }
+    assert_eq!(
+        keys.send(soft("not_a_key", false, false)),
+        Err(DesktopFailure::InvalidEvent)
+    );
+    assert!(keys.apply().await.is_none());
+    // 软件按键不进入物理锁存。
+    let protocol = keys.sessions[&9106].protocol.as_ref().expect("有序协议");
+    assert!(protocol.keys == policy::InputPolicyState::default());
+}
+
+#[tokio::test]
+async fn ordered_invalid_resize_consumes_seq_and_next_event_still_runs() {
+    use crate::signals::desktop_session::{DesktopFailure, DesktopGeometry};
+    let mut keys = OrderedKeys::new(9107, bound_profile());
+    let invalid = DesktopEvent::Resize {
+        geometry: DesktopGeometry {
+            cols: 0,
+            rows: 24,
+            pixel_width: 640,
+            pixel_height: 480,
+            dpi: 96,
+        },
+    };
+    // 准入后拒绝按已消费语义回报，下一条事件用下一个 seq 仍被处理。
+    assert_eq!(keys.send(invalid), Err(DesktopFailure::InvalidEvent));
+    assert!(keys.apply().await.is_none());
+    assert_eq!(
+        keys.send(DesktopEvent::Text { text: "ok".into() }),
+        Ok(None)
+    );
+    assert_eq!(keys.apply().await.as_deref(), Some(b"ok".as_slice()));
+    assert_eq!(keys.send(soft("enter", false, false)), Ok(None));
+    assert_eq!(keys.apply().await.as_deref(), Some(b"\r".as_slice()));
+}
+
+#[tokio::test]
+async fn ordered_text_and_paste_return_to_bottom_and_publish_frame_without_remote_output() {
+    use rshell_m0::rshell_session::TerminalEngine as _;
+    for (index, keypress, event) in [
+        (0, true, DesktopEvent::Text { text: "字".into() }),
+        (
+            1,
+            true,
+            DesktopEvent::Paste {
+                text: "粘贴".into(),
+            },
+        ),
+        (2, true, soft("tab", false, false)),
+        (3, false, DesktopEvent::Text { text: "字".into() }),
+        (
+            4,
+            false,
+            DesktopEvent::Paste {
+                text: "粘贴".into(),
+            },
+        ),
+    ] {
+        let mut profile = bound_profile();
+        profile.scroll_on_keypress = keypress;
+        let session_id = 9110 + index;
+        let mut keys = OrderedKeys::new(session_id, profile);
+        keys.screen
+            .advance("滚回\r\n".repeat(40).as_bytes())
+            .expect("真实滚回");
+        let bounds = keys.screen.engine.viewport_bounds();
+        assert!(bounds.first_stable_row < bounds.bottom_top_stable_row);
+        let held = super::Window::At {
+            top: bounds.first_stable_row,
+            rows: size().rows,
+        };
+        keys.screen.window = held;
+        assert!(keys.screen.last_sent.is_none());
+        assert_eq!(keys.send(event), Ok(None));
+        let port = keys.root.0.clone();
+        let written = port::CURRENT.scope(port.clone(), keys.apply()).await;
+        assert!(
+            written.is_some_and(|bytes| !bytes.is_empty()),
+            "输入照常写远端"
+        );
+        if keypress {
+            // 远端无输出也要发布新帧，视口回到底部。
+            assert_eq!(keys.screen.window, super::Window::Bottom);
+            assert!(keys.screen.last_sent.is_some(), "回底必须出帧");
+            assert!(port.projection().expect("新投影").follow_bottom);
+        } else {
+            assert_eq!(keys.screen.window, held);
+            assert!(keys.screen.last_sent.is_none(), "视口未变不出帧");
+        }
+    }
 }

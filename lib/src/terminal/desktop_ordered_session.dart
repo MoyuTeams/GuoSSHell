@@ -19,6 +19,7 @@ import 'desktop_session_controller.dart'
     show DesktopPanePhase, DesktopPresentedFrame;
 import 'desktop_session_gateway.dart';
 import 'desktop_terminal_theme.dart';
+import 'frame_terminal.dart' show KeyInputEvent;
 import 'session_target.dart';
 
 /// 桌面 V2 的 Flutter 输入会话：Prepare → 字体 → 度量 → Start，之后键盘、文本、
@@ -618,8 +619,47 @@ int? localShellExitCode(String detail) {
   return match == null ? null : int.parse(match.group(1)!);
 }
 
-/// 由 fork 转来的按键（或窗格收到的 KeyUp）构造有序 Key 事件。
-/// [source] 为空表示软件合成（键位条等）：无物理键、Alt 来源未知、无默认动作。
+/// 适配器转来的按键 → 有序事件：带硬件 [KeyInputEvent.source] 的走物理 Key；
+/// 没有来源的是软件按键（键位条、软键盘合成、挂住修饰的单字符），走 SoftKey。
+DesktopEvent desktopOrderedKey(
+  KeyInputEvent event, {
+  required bool metaPressed,
+}) {
+  final source = event.source;
+  if (source == null) {
+    return desktopSoftKeyEvent(
+      key: event.key,
+      shift: event.shift,
+      control: event.control,
+      alt: event.alt,
+    );
+  }
+  return desktopKeyEvent(
+    key: event.key,
+    phase: source is KeyRepeatEvent
+        ? DesktopKeyPhase.repeat
+        : DesktopKeyPhase.down,
+    source: source,
+    shift: event.shift,
+    control: event.control,
+    alt: event.alt,
+    leftAlt: event.leftAlt,
+    rightAlt: event.rightAlt,
+    superKey: metaPressed,
+  );
+}
+
+/// 软件按键：不声称物理键身份，Rust 不做物理锁存、绑定匹配或壳默认动作，按键名与
+/// 按钮给出的修饰直接编码；挂住的 Alt 作为显式 Meta（ESC 前缀）。
+DesktopEventSoftKey desktopSoftKeyEvent({
+  required String key,
+  required bool shift,
+  required bool control,
+  required bool alt,
+}) => DesktopEventSoftKey(key: key, shift: shift, control: control, alt: alt);
+
+/// 由 fork 转来的硬件按键（或窗格收到的 KeyUp）构造有序 Key 事件。
+/// Rust 要求物理键身份；[source] 为空的事件会被拒绝，软件按键用 [desktopSoftKeyEvent]。
 DesktopEventKey desktopKeyEvent({
   required String key,
   required DesktopKeyPhase phase,
@@ -657,6 +697,8 @@ DesktopEventKey desktopKeyEvent({
 }
 
 /// 壳快捷键、缩放与终端复制/粘贴/全选的默认候选；Rust 按 profile 绑定优先裁决。
+/// macOS 上 ⌘ 与壳一致地参与壳快捷键（⌘⇧L）和缩放（⌘+/⌘−/⌘0）；其他平台 meta
+/// 只参与终端复制/粘贴/全选的匹配。
 DesktopAction? desktopDefaultAction(
   LogicalKeyboardKey key, {
   required bool control,
@@ -664,7 +706,14 @@ DesktopAction? desktopDefaultAction(
   required bool alt,
   required bool meta,
 }) {
-  final command = desktopCommand(key, control: control, shift: shift, alt: alt);
+  final shellMeta = meta && defaultTargetPlatform == TargetPlatform.macOS;
+  final command = desktopCommand(
+    key,
+    control: control,
+    shift: shift,
+    alt: alt,
+    meta: shellMeta,
+  );
   if (command != null) {
     return switch (command) {
       DesktopCommand.newTab => DesktopAction.newTab,
@@ -680,8 +729,9 @@ DesktopAction? desktopDefaultAction(
       DesktopCommand.localTerminal => DesktopAction.newLocalTerminal,
     };
   }
-  // 与 TerminalZoom.handleKey 相同：Ctrl（不含 Alt）加 =/+/-/0。
-  if (control && !alt) {
+  // 与 TerminalZoom.handleKey 的调用方相同：Windows 为 Ctrl（不含 Alt），
+  // Apple 平台为 ⌘，加 =/+/-/0。
+  if ((control && !alt) || shellMeta) {
     if (key == LogicalKeyboardKey.equal ||
         key == LogicalKeyboardKey.add ||
         key == LogicalKeyboardKey.numpadAdd) {

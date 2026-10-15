@@ -528,6 +528,9 @@ fn route_ordered(
     let Some(protocol) = &mut handle.protocol else {
         return Err(DesktopFailure::MixedMode);
     };
+    // 准入成功即消费 seq：之后事件本身的拒绝只能回报 InvalidEvent/PolicyUnavailable
+    // （已消费语义），否则 Dart 不推进 seq，后续事件全被判为 Duplicate。
+    // 唯一例外是 actor 已退出（发送失败）：会话不存在，回报 IdentityMismatch 让 Dart 终止。
     let lease = protocol.admit(&r)?;
     let command = match r.event {
         DesktopEvent::Disconnect => {
@@ -540,9 +543,10 @@ fn route_ordered(
         }
         DesktopEvent::Text { text } => SessionCommand::Input(TerminalInput::CommittedText(text)),
         DesktopEvent::Paste { text } => SessionCommand::Paste(text),
-        DesktopEvent::Resize { geometry } => {
-            SessionCommand::Resize(desktop_prepare::geometry(geometry)?)
-        }
+        // 与原生端口相同，非法几何按无效事件拒绝。
+        DesktopEvent::Resize { geometry } => SessionCommand::Resize(
+            desktop_prepare::geometry(geometry).map_err(|_| DesktopFailure::InvalidEvent)?,
+        ),
         DesktopEvent::Viewport {
             follow_bottom,
             top_stable_row,
@@ -597,6 +601,24 @@ fn route_ordered(
             rectangular,
         }),
         DesktopEvent::Copy => SessionCommand::Copy,
+        // 软件按键没有物理键身份：不经物理锁存、profile 绑定与壳默认动作，与原生路径
+        // GuiIntent 一样直接交引擎编码（编码仍随 profile 的终端键盘模式）。修饰按按钮给出的
+        // 原样编码；Alt 是界面显式请求的 Meta，不存在 AltGr/Option 组字歧义，因此不受
+        // left/right_alt_as_meta 约束，总是编码为 ESC 前缀（同 GuiIntent）。
+        DesktopEvent::SoftKey {
+            key,
+            shift,
+            control,
+            alt,
+        } => SessionCommand::Input(TerminalInput::Key {
+            code: parse_key_code(&key).ok_or(DesktopFailure::InvalidEvent)?,
+            modifiers: KeyModifiers {
+                shift,
+                control,
+                alt,
+                super_key: false,
+            },
+        }),
         DesktopEvent::Key {
             key,
             phase,
@@ -1238,19 +1260,8 @@ async fn run_connected_loop(
                         }
                     }
                     SessionCommand::Input(input) => {
-                        // 键编码（ETX/Kitty/CSI-u）在引擎里，这里只负责把编码结果写进
-                        // transport。打字回到屏幕（Dart 同时滚到底）。
-                        native_input::scroll_keypress(screen);
-                        match screen.engine.encode_input(input) {
-                            Ok(bytes) if !bytes.is_empty() => {
-                                if let Err(error) = transport.write(&bytes).await {
-                                    return (SessionEnd::failed(lost(error.failure()), format!("input write: {error:?}")), false);
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(error) => {
-                                return (SessionEnd::failed(FailureKind::Other, format!("encode_input: {error:?}")), false);
-                            }
+                        if let Err(end) = native_input::apply_input(session_id, screen, transport, input).await {
+                            return (end, false);
                         }
                     }
                     SessionCommand::Key(intent) => {
@@ -1270,12 +1281,8 @@ async fn run_connected_loop(
                         }
                     }
                     SessionCommand::Paste(text) => {
-                        native_input::scroll_keypress(screen);
-                        let bytes = paste_bytes(&text, screen.engine.display_modes().bracketed_paste);
-                        if !bytes.is_empty()
-                            && let Err(error) = transport.write(&bytes).await
-                        {
-                            return (SessionEnd::failed(lost(error.failure()), format!("paste write: {error:?}")), false);
+                        if let Err(end) = native_input::apply_paste(session_id, screen, transport, &text).await {
+                            return (end, false);
                         }
                     }
                     SessionCommand::Disconnect => return (SessionEnd::closed("disconnect"), true),

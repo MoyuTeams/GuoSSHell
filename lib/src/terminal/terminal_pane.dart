@@ -201,6 +201,9 @@ class _TerminalPaneState extends State<TerminalPane> {
   bool _normalDetached = false;
   String? _normalFontProjection;
   DesktopPresentedFrame? _appliedNormalFrame;
+
+  /// V2 帧解码失败的提示；下一帧成功应用前保持可见。
+  String _frameError = '';
   bool _syncingNormalScroll = false;
 
   /// 本轮按键/文本刚交给 V2：渲染库随后把视图跳到底部，这一跳不是用户滚动，
@@ -413,6 +416,7 @@ class _TerminalPaneState extends State<TerminalPane> {
     var frameChanged = false;
     if (presented == null && _appliedNormalFrame != null) {
       _appliedNormalFrame = null;
+      _frameError = '';
       _terminal.resetDisplay();
       _controller._lastFrameSeq = 0;
       _controller._report(title: '');
@@ -438,12 +442,17 @@ class _TerminalPaneState extends State<TerminalPane> {
             ),
           );
         _appliedNormalFrame = presented;
+        _frameError = '';
         frameChanged = true;
         _controller._lastFrameSeq = msg.seq;
         _controller._report(title: msg.title);
         _keepScrollPosition();
-      } catch (_) {
-        _detail = '原帧解码失败';
+      } catch (error) {
+        // 损坏帧同样结算：记为已处理以免重复解码，并确认该序号让 Rust 放行下一帧。
+        debugPrint('[frame] decode failed: $error');
+        _appliedNormalFrame = presented;
+        _frameError = '画面帧 ${msg.seq} 解码失败，等待下一帧';
+        normal.acknowledgePainted(presented);
       }
     }
     final nativeSelection = normal.frame?.projection.selection;
@@ -653,23 +662,15 @@ class _TerminalPaneState extends State<TerminalPane> {
     return true;
   }
 
-  DesktopEventKey _orderedKey(KeyInputEvent event) {
+  /// 硬件按键记下物理键以便补发 Up；键位条等软件按键走 SoftKey。
+  DesktopEvent _orderedKey(KeyInputEvent event) {
     final source = event.source;
     if (source != null) {
       _pressedKeys[source.physicalKey.usbHidUsage] = event.key;
     }
-    return desktopKeyEvent(
-      key: event.key,
-      phase: source is KeyRepeatEvent
-          ? DesktopKeyPhase.repeat
-          : DesktopKeyPhase.down,
-      source: source,
-      shift: event.shift,
-      control: event.control,
-      alt: event.alt,
-      leftAlt: event.leftAlt,
-      rightAlt: event.rightAlt,
-      superKey: source != null && HardwareKeyboard.instance.isMetaPressed,
+    return desktopOrderedKey(
+      event,
+      metaPressed: HardwareKeyboard.instance.isMetaPressed,
     );
   }
 
@@ -1444,6 +1445,12 @@ class _TerminalPaneState extends State<TerminalPane> {
           TextButton(onPressed: _reconnect, child: const Text('重新连接')),
           TextButton(onPressed: widget.onClose, child: const Text('关闭')),
         ],
+      ),
+      _ when _frameError.isNotEmpty => _Banner(
+        icon: Icons.broken_image_outlined,
+        text: '终端画面更新失败',
+        detail: _frameError,
+        error: true,
       ),
       _ => null,
     };

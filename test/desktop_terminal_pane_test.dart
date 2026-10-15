@@ -507,6 +507,39 @@ void main() {
     await h.close(tester);
   });
 
+  testWidgets('V2 损坏帧仍确认该序号并保留错误提示，下一正常帧恢复', (tester) async {
+    final h = _PaneHarness();
+    await h.mount(tester);
+    List<int> acked() => [
+      for (final request in h.where<DesktopEventFrameAck>())
+        (request.event as DesktopEventFrameAck).frameSeq,
+    ];
+    h.frame(seq: 1);
+    await tester.pumpAndSettle();
+    expect(acked(), [1]);
+    expect(h.controller.lastFrameSeq, 1);
+
+    h.frame(binary: Uint8List.fromList([1, 0]), seq: 2);
+    await tester.pumpAndSettle();
+    expect(acked(), [1, 2]);
+    expect(h.controller.lastFrameSeq, 1);
+    expect(find.text('终端画面更新失败'), findsOneWidget);
+    expect(find.text('画面帧 2 解码失败，等待下一帧'), findsOneWidget);
+    // 状态重发不会覆盖解码错误。
+    h.status(SessionState.connected);
+    await tester.pumpAndSettle();
+    expect(find.text('终端画面更新失败'), findsOneWidget);
+    expect(acked(), [1, 2]);
+
+    h.frame(seq: 3);
+    await tester.pumpAndSettle();
+    expect(acked(), [1, 2, 3]);
+    expect(h.controller.lastFrameSeq, 3);
+    expect(find.text('终端画面更新失败'), findsNothing);
+    await h.close(tester);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('macOS ⌘C 交 Rust 仲裁后复制，Up 同名补发', (tester) async {
     final h = _PaneHarness();
     await h.mount(tester, platform: TargetPlatform.macOS);

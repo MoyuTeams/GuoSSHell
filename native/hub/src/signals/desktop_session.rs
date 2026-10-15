@@ -217,6 +217,14 @@ pub enum DesktopEvent {
     Copy,
     Reconnect,
     Disconnect,
+    /// 软件按键（键位条、软键盘合成的键）：没有物理键身份，不进入物理锁存、绑定匹配或
+    /// 壳默认动作，直接按键名与按钮给出的修饰编码。键名表与 Key 相同。
+    SoftKey {
+        key: String,
+        shift: bool,
+        control: bool,
+        alt: bool,
+    },
 }
 
 /// 所有有序输入及控制在此单一接收口，seq 从 1 开始严格连续。
@@ -235,7 +243,8 @@ pub struct DesktopEventResult {
     pub identity: String,
     pub seq: u64,
     /// None 只表示入队，不是远端收到了字节。Busy/InputTooLarge 不推进 seq。
-    /// 通过来源/顺序/预算校验后，InvalidEvent/PolicyUnavailable 消费该 seq 但不外发。
+    /// 通过来源/顺序/预算校验后，事件本身的拒绝一律回报 InvalidEvent/PolicyUnavailable：
+    /// 消费该 seq 但不外发。
     pub failure: DesktopFailure,
     pub action: Option<DesktopAction>,
 }
