@@ -455,7 +455,9 @@ class _WindowsShellState extends State<WindowsShell> {
         child: ClipRRect(
           borderRadius: BorderRadius.circular(DesktopMetrics.radius),
           child: ColoredBox(
-            color: f.FluentTheme.of(dialogContext).scaffoldBackgroundColor,
+            // 不透明弹层底色，与 ContentDialog 一致；scaffoldBackgroundColor
+            // 默认半透明，会透出窗口画布与后方页面。
+            color: f.FluentTheme.of(dialogContext).menuColor,
             child: Column(
               children: [
                 Padding(

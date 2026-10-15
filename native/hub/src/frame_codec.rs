@@ -31,7 +31,8 @@ const SIMPLE_CELL: u64 = (1 << 4) | 1;
 /// 码点数含组合字符与零宽连接符），按它从 text 里切出每一格。
 /// 超过 15 个码点的格子把 descriptor 的高半字节置 0，再用后续 u32 给出完整码点数。
 /// `fg` / `bg`：`0` = Default；`1` + `u8` = Ansi(index)；`2` + r,g,b = Rgb。
-/// `attrs` 位：0 bold · 1 italic · 2 underline · 3 strike · 4 reverse · 5 selected · 6 布局。
+/// `attrs` 位：0 bold · 1 italic · 2 underline · 3 strike · 4 reverse · 5 selected · 6 布局 ·
+/// 7 dim（SGR 2）。
 pub fn pack_runs(frame: &RenderFrame) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 * 1024);
     let rows = &frame.rows[..];
@@ -155,6 +156,7 @@ fn write_attrs(attributes: CellAttributes, selected: bool, layout: bool, out: &m
     bits |= u8::from(attributes.strike) << 3;
     bits |= u8::from(attributes.reverse) << 4;
     bits |= u8::from(selected) << 5;
+    bits |= u8::from(attributes.dim) << 7;
     if layout {
         bits |= ATTR_LAYOUT;
     }
@@ -186,6 +188,7 @@ mod tests {
         start: u16,
         len: u16,
         fg: Vec<u8>,
+        attrs: u8,
         text: String,
         layout: Option<Vec<u64>>,
     }
@@ -242,6 +245,7 @@ mod tests {
                     start,
                     len,
                     fg,
+                    attrs,
                     text,
                     layout,
                 });
@@ -281,6 +285,17 @@ mod tests {
         assert_eq!((red.start, red.len, red.text.as_str()), (0, 3, "red"));
         assert_eq!(red.fg, vec![1, 1], "SGR 31 is Ansi(1)");
         assert!(red.layout.is_none(), "plain ASCII needs no layout");
+    }
+
+    /// SGR 2 只置第 7 位；与 bold 叠加时旧位含义不变。
+    #[test]
+    fn dim_cells_set_attr_bit_7() {
+        let rows = screen("\x1b[2mDIM\x1b[1mB\x1b[0m NORMAL");
+        let row = &rows[0];
+        assert_eq!((row[0].text.as_str(), row[0].attrs), ("DIM", 1 << 7));
+        assert_eq!((row[1].text.as_str(), row[1].attrs), ("B", (1 << 7) | 1));
+        assert!(row[2].text.starts_with(" NORMAL"));
+        assert_eq!(row[2].attrs, 0);
     }
 
     /// 位置与长度按列：宽字符后面的着色段落在引擎给的列上，整行中文不缺字。

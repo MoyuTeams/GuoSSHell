@@ -1627,6 +1627,7 @@ class TerminalViewport extends StatelessWidget {
       onSecondaryTapUp: onSecondaryTap == null
           ? null
           : (_, _) => onSecondaryTap!(),
+      // 保持非 multiline：multiline 会让平台在 performAction 之外再插入 "\n"，回车双发。
       keyboardType: TextInputType.emailAddress,
       keyboardAppearance: Brightness.dark,
     );

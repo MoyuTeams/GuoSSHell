@@ -161,6 +161,34 @@ void main() {
     });
     await checkInput('中文输入', () => native.commit('中文输入'));
 
+    // 每种回车来源只到达一个 CR：等待片刻后对端日志不再增长（不重复、不丢失）。
+    Future<void> checkEnter(String source, VoidCallback send) async {
+      await checkInput('\r', send);
+      final settled = await received();
+      await tick(500);
+      expect(await received(), settled, reason: '$source 不得重复发送回车');
+    }
+
+    // 小键盘回车：VK_RETURN 带扩展键标志（lParam bit 24），框架经物理键身份处理。
+    await checkEnter('小键盘回车', () => native.key(0x0d, extended: true));
+    // 框架未处理回车时，平台文本输入回调 performAction(newline)，经 fork 的
+    // keyInput(enter) 无硬件来源发出。
+    final textInput = tester.state(
+      find
+          .descendant(
+            of: find.byType(TerminalView).first,
+            matching: find.byWidgetPredicate(
+              (widget) => widget.runtimeType.toString() == 'CustomTextEdit',
+            ),
+          )
+          .first,
+    ) as TextInputClient;
+    await checkEnter(
+      'performAction(newline)',
+      () => textInput.performAction(TextInputAction.newline),
+    );
+    await checkEnter('主回车', () => native.key(0x0d));
+
     // 设置页由终端经 V2 有序输入交 Rust 判定 Ctrl+, 打开；关闭后由工作区恢复焦点。
     Future<void> until(String what, bool Function() ready) async {
       final limit = DateTime.now().add(const Duration(seconds: 5));

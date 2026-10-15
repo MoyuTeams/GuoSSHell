@@ -18,6 +18,9 @@ const desktopAccent = Color(0xff76c9ff);
 const desktopBackground = Color(0xff191d25);
 const desktopMuted = Color(0xffa7b1c2);
 
+/// 默认配色下的弹层底色（fluent_ui 深色 menuColor）。
+const desktopMenu = Color(0xff2c2c2c);
+
 /// dev 工作区的透明表面与分隔色，不改变既有 Windows 材质方向。
 abstract final class DesktopWorkspaceColors {
   static final surface = const Color(0xff10141b).withValues(alpha: 0.3);
@@ -59,7 +62,14 @@ f.FluentThemeData desktopFluentTheme({
     reduceMotion: reduceMotion,
     fontFamily: fontFamily ?? DesktopType.family,
   );
+  // 弹层（菜单、下拉、选择工具栏）底色：不透明，跟随应用配色。fluent_ui 在其上
+  // 叠加 menuColor × 0.65，二者取同色使弹层呈现单一实色。
+  final menu = highContrast
+      ? DesktopColors.highContrastCanvas
+      : palette?.surface ?? desktopMenu;
   return f.FluentThemeData(
+    menuColor: menu,
+    acrylicBackgroundColor: menu,
     brightness: palette?.brightness ?? Brightness.dark,
     accentColor: highContrast
         ? accessibility.accentColor

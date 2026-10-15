@@ -117,7 +117,13 @@ class _LicensesState extends State<DesktopResourceLicenses> {
   }
 
   @override
-  Widget build(BuildContext context) => ScaffoldPage(
+  Widget build(BuildContext context) => ColoredBox(
+    // 全屏路由叠在设置对话框上，需要不透明底色，否则下层页面会透出。
+    color: FluentTheme.of(context).menuColor,
+    child: _page(context),
+  );
+
+  Widget _page(BuildContext context) => ScaffoldPage(
     header: PageHeader(
       title: const Text('开源许可证'),
       commandBar: Button(

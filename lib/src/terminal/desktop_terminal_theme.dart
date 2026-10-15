@@ -85,7 +85,8 @@ const _profileThemes = <String, TerminalTheme>{
     magenta: Color(0xFFD33682),
     cyan: Color(0xFF2AA198),
     white: Color(0xFFEEE8D5),
-    brightBlack: Color(0xFF586E75),
+    // base1：比正文（base01）浅，灰显的自动建议（zsh fg=8 等）与正文可区分。
+    brightBlack: Color(0xFF93A1A1),
     brightRed: Color(0xFFCB4B16),
     brightGreen: Color(0xFF93A1A1),
     brightYellow: Color(0xFF839496),

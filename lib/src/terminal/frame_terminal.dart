@@ -411,6 +411,7 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
     if (run.underline) flags |= CellFlags.underline;
     if (run.strike) flags |= CellFlags.strikethrough;
     if (run.reverse) flags |= CellFlags.inverse;
+    if (run.dim) flags |= CellFlags.faint;
     return flags;
   }
 
@@ -748,6 +749,8 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
 
   static const Map<TerminalKey, String> _namedKeyNames = {
     TerminalKey.enter: 'enter',
+    // 小键盘回车与主回车同为 CR，经此带物理键身份发出。
+    TerminalKey.numpadEnter: 'enter',
     TerminalKey.escape: 'escape',
     TerminalKey.tab: 'tab',
     TerminalKey.backspace: 'backspace',

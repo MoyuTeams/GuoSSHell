@@ -154,6 +154,17 @@ void main() {
     });
   }
 
+  test('brightBlack 与正文可区分（灰显的自动建议依赖它）', () {
+    for (final scheme in _schemes) {
+      final theme = themeForProfile(scheme);
+      expect(
+        _contrast(theme.foreground, theme.brightBlack),
+        greaterThanOrEqualTo(2),
+        reason: scheme,
+      );
+    }
+  });
+
   test('同一真实帧的 Default 与 ANSI16 跟随 profile，RGB 与扩展 ANSI 不变', () {
     final terminal = FrameTerminal()..applyFrame(_colorFrame());
     addTearDown(terminal.dispose);

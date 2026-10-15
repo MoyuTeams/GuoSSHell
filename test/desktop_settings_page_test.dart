@@ -9,6 +9,7 @@ import 'package:guosh_shell/src/desktop/desktop_theme.dart';
 import 'package:guosh_shell/src/desktop/settings/desktop_settings_controller.dart';
 import 'package:guosh_shell/src/desktop/settings/desktop_settings_page.dart';
 import 'package:guosh_shell/src/desktop/settings/keybar/desktop_keybar.dart';
+import 'package:guosh_shell/src/desktop/settings/resources/desktop_about_resources.dart';
 import 'package:guosh_shell/src/desktop/settings/resources/desktop_resources_contracts.dart';
 import 'package:guosh_shell/src/desktop/windows_chrome.dart';
 import 'package:guosh_shell/src/settings/interface_font.dart';
@@ -83,6 +84,7 @@ class _Page {
   Future<void> open(
     WidgetTester tester, {
     DesktopSettingsSection section = DesktopSettingsSection.app,
+    FluentThemeData? theme,
   }) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(1280, 900);
@@ -90,7 +92,7 @@ class _Page {
     addTearDown(() => close(tester));
     await tester.pumpWidget(
       FluentApp(
-        theme: desktopTheme(highContrast: false, reduceMotion: true),
+        theme: theme ?? desktopTheme(highContrast: false, reduceMotion: true),
         home: Builder(
           builder: (context) => Button(
             key: const ValueKey('open-settings'),
@@ -190,6 +192,38 @@ void main() {
     expect(_key('default_terminal_profile'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+
+  // 窗口画布半透明，设置对话框与其上的许可证页必须自带不透明底。
+  for (final scheme in ['default', 'dracula', 'solarized_light', 'high']) {
+    testWidgets('设置对话框与许可证页背景不透明：$scheme', (tester) async {
+      final page = _Page();
+      await page.open(
+        tester,
+        theme: desktopFluentTheme(
+          colorScheme: scheme,
+          highContrast: scheme == 'high',
+          reduceMotion: true,
+        ),
+      );
+      Color nearestColoredBox(Finder of) => tester
+          .widget<ColoredBox>(
+            find.ancestor(of: of, matching: find.byType(ColoredBox)).first,
+          )
+          .color;
+      final menu = FluentTheme.of(
+        tester.element(find.byType(DesktopSettingsPage)),
+      ).menuColor;
+      expect(nearestColoredBox(find.text('设置').first), menu);
+      expect(menu.a, 1.0);
+      await _nav(tester, DesktopSettingsSection.about);
+      await _tap(tester, 'open-resource-licenses');
+      expect(find.byType(DesktopResourceLicenses), findsOneWidget);
+      final licenses = nearestColoredBox(find.byType(ScaffoldPage));
+      expect(licenses, menu);
+      expect(licenses.a, 1.0);
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('非 Windows 外观页只有字体，不显示亚克力与透明度', (tester) async {
     final page = _Page(platform: TargetPlatform.linux);

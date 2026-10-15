@@ -1,10 +1,12 @@
 import 'package:fluent_ui/fluent_ui.dart' as f;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:guosh_shell/src/app.dart';
 import 'package:guosh_shell/src/bindings/bindings.dart';
+import 'package:guosh_shell/src/desktop/desktop_app_color_scheme.dart';
 import 'package:guosh_shell/src/desktop/desktop_shortcuts.dart';
 import 'package:guosh_shell/src/desktop/windows_chrome.dart';
 import 'package:guosh_shell/src/desktop/windows_shell.dart';
@@ -96,6 +98,181 @@ void main() {
     );
     debugDefaultTargetPlatformOverride = null;
   });
+
+  testWidgets('Windows 入口的菜单与下拉弹层在半透明窗口上保持不透明', (tester) async {
+    late BuildContext context;
+    await tester.pumpWidget(
+      Builder(
+        builder: (value) {
+          context = value;
+          return const SizedBox();
+        },
+      ),
+    );
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    final builder =
+        (const GuoSSHellApp().build(context) as MaterialApp).builder!;
+    // 模拟亚克力开启、默认透明度：窗口画布本身半透明。
+    final appearance = WindowsAppearance.instance;
+    appearance.materialAvailable = true;
+    addTearDown(() => appearance.materialAvailable = false);
+    final flyout = f.FlyoutController();
+    addTearDown(flyout.dispose);
+    final boundary = GlobalKey();
+    await tester.pumpWidget(
+      RepaintBoundary(
+        key: boundary,
+        child: MaterialApp(
+          localizationsDelegates: const [f.FluentLocalizations.delegate],
+          builder: builder,
+          home: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                f.FlyoutTarget(
+                  controller: flyout,
+                  child: f.Button(
+                    child: const Text('更多'),
+                    onPressed: () => flyout.showFlyout(
+                      builder: (_) => f.MenuFlyout(
+                        items: [
+                          f.MenuFlyoutItem(
+                            text: const Text('菜单项甲'),
+                            onPressed: () {},
+                          ),
+                          f.MenuFlyoutItem(
+                            text: const Text('菜单项乙'),
+                            onPressed: () {},
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 120),
+                f.ComboBox<String>(
+                  value: '选项甲',
+                  items: const [
+                    f.ComboBoxItem(value: '选项甲', child: Text('选项甲')),
+                    f.ComboBoxItem(value: '选项乙', child: Text('选项乙')),
+                  ],
+                  onChanged: (_) {},
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byType(f.DisableAcrylic), findsOneWidget);
+
+    Future<int> alphaAt(Offset point) async {
+      final render =
+          boundary.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+      final bytes = await tester.runAsync(() async {
+        final image = await render.toImage();
+        final data = await image.toByteData();
+        final width = image.width;
+        image.dispose();
+        return (data!, width);
+      });
+      final (data, width) = bytes!;
+      return data.getUint8(
+        (point.dy.round() * width + point.dx.round()) * 4 + 3,
+      );
+    }
+
+    // 对照：窗口画布确为半透明。
+    expect(await alphaAt(const Offset(4, 300)), lessThan(255));
+
+    Future<void> expectOpaque(String item) async {
+      final surface = find.ancestor(
+        of: find.text(item),
+        matching: find.byType(f.Acrylic),
+      );
+      // DisableAcrylic 生效时弹层不做背景模糊，以不透明色调绘制。
+      expect(
+        find.descendant(of: surface, matching: find.byType(BackdropFilter)),
+        findsNothing,
+        reason: '$item 所在弹层不应模糊并混合后方内容',
+      );
+      final rect = tester.getRect(surface.first);
+      final row = tester.getCenter(find.text(item));
+      expect(
+        await alphaAt(Offset(rect.left + 3, row.dy)),
+        255,
+        reason: '$item 所在弹层背景必须不透明',
+      );
+    }
+
+    await tester.tap(find.text('更多'));
+    await tester.pumpAndSettle();
+    await expectOpaque('菜单项乙');
+    await tester.tapAt(const Offset(4, 300));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('选项甲'));
+    await tester.pumpAndSettle();
+    await expectOpaque('选项乙');
+    expect(tester.takeException(), isNull);
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  test('弹层底色不透明并跟随应用配色', () {
+    for (final theme in [
+      desktopFluentTheme(),
+      desktopFluentTheme(colorScheme: 'dracula'),
+      desktopFluentTheme(colorScheme: 'solarized_light'),
+      desktopFluentTheme(highContrast: true),
+    ]) {
+      expect(theme.menuColor.a, 1);
+      expect(theme.acrylicBackgroundColor, theme.menuColor);
+    }
+    expect(desktopFluentTheme().menuColor, desktopMenu);
+    expect(
+      desktopFluentTheme(colorScheme: 'dracula').menuColor,
+      desktopAppPalette('dracula')!.surface,
+    );
+  });
+
+  // 其余桌面弹窗都经 ContentDialog：主体与按钮区底色在各配色下都必须不透明。
+  for (final scheme in ['default', 'dracula', 'solarized_light', 'high']) {
+    testWidgets('ContentDialog 背景不透明：$scheme', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          localizationsDelegates: const [f.FluentLocalizations.delegate],
+          builder: (_, navigator) => f.FluentTheme(
+            data: desktopFluentTheme(
+              colorScheme: scheme,
+              highContrast: scheme == 'high',
+            ),
+            child: navigator!,
+          ),
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => f.showDialog<void>(
+                context: context,
+                builder: (_) => f.ContentDialog(
+                  title: const Text('标题'),
+                  content: const Text('正文'),
+                  actions: [f.Button(onPressed: () {}, child: const Text('好'))],
+                ),
+              ),
+              child: const Text('打开'),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('打开'));
+      await tester.pumpAndSettle();
+      final style = f.ContentDialogTheme.of(
+        tester.element(find.byType(f.ContentDialog)),
+      );
+      expect((style.decoration! as BoxDecoration).color!.a, 1.0);
+      expect((style.actionsDecoration! as BoxDecoration).color!.a, 1.0);
+    });
+  }
 
   testWidgets('标签重排保留活动会话与嵌套分屏', (tester) async {
     final workspace = Workspace();

@@ -364,7 +364,9 @@ class DesktopSettingsPageState extends State<DesktopSettingsPage> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(DesktopMetrics.radius),
                   child: ColoredBox(
-                    color: FluentTheme.of(context).scaffoldBackgroundColor,
+                    // 与 ContentDialog 同为不透明弹层底色；scaffoldBackgroundColor
+                    // 默认半透明，会让透明窗口画布与后方页面透进来。
+                    color: FluentTheme.of(context).menuColor,
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [

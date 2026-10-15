@@ -74,11 +74,15 @@ class GuoSSHellApp extends StatelessWidget {
                     media.disableAnimations || media.accessibleNavigation,
                 colorScheme: scheme,
               ),
-              child: WindowsFrame(
-                background: media.highContrast
-                    ? desktopBackground
-                    : desktopCanvas(scheme),
-                child: child!,
+              // 窗口画布本身半透明，Acrylic 弹层的混合与模糊会透出后方内容；
+              // 关闭后弹层以主题中的不透明色调绘制。窗口材质由 WindowsFrame 独立控制。
+              child: fluent.DisableAcrylic(
+                child: WindowsFrame(
+                  background: media.highContrast
+                      ? desktopBackground
+                      : desktopCanvas(scheme),
+                  child: child!,
+                ),
               ),
             );
           },
@@ -118,11 +122,14 @@ class GuoSSHellApp extends StatelessWidget {
               ),
               child: Theme(
                 data: desktopMaterialTheme(fontFamily: fontFamily),
-                child: ColoredBox(
-                  color: media.highContrast
-                      ? DesktopColors.highContrastCanvas
-                      : desktopCanvas(scheme),
-                  child: child!,
+                // 弹层不做背景模糊，与 Windows 一致使用不透明色调。
+                child: fluent.DisableAcrylic(
+                  child: ColoredBox(
+                    color: media.highContrast
+                        ? DesktopColors.highContrastCanvas
+                        : desktopCanvas(scheme),
+                    child: child!,
+                  ),
                 ),
               ),
             );

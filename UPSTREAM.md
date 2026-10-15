@@ -16,23 +16,23 @@ GuoSSHell 使用 rsHell 的团队 fork，通过 git 依赖固定到精确提交�
 |---|---|
 | 上游仓库 | https://github.com/hugefiver/rsHell |
 | fork | https://github.com/MoyuTeams/rsHell ，分支 `feat/local-pty-writer` |
-| 固定提交 | `b4311370e633c08837d0a2d18fd77ec874305827` |
+| 固定提交 | `991ca32f7219c7506a1d8183c5e6dc69a1589b87` |
 | 上游基线 | `08d8df5ab975c75b5a9772a4e52fd79695ca9d11`（上游分支 `feat/desktop-config-transactions`） |
 | 认证与终端接口合并提交 | `d71e81c5b7e786d3981e12d6a24a296ff74d3dae`（上游 PR #1） |
 | 许可证 | MIT，Copyright (c) 2026 hugefiver（副本见 `rust/LICENSES/rsHell-MIT.txt`） |
 
 ```toml
-rshell-core = { git = "https://github.com/MoyuTeams/rsHell", rev = "b4311370e633c08837d0a2d18fd77ec874305827" }
-rshell-session = { git = "https://github.com/MoyuTeams/rsHell", rev = "b4311370e633c08837d0a2d18fd77ec874305827" }
-rshell-storage = { git = "https://github.com/MoyuTeams/rsHell", rev = "b4311370e633c08837d0a2d18fd77ec874305827" }
+rshell-core = { git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
+rshell-session = { git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
+rshell-storage = { git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
 ```
 
 桌面宿主直接使用 `portable-pty-psmux =0.9.6`（依赖别名 `portable-pty`）和
 `rshell-platform =0.1.0` 的原生 PTY、进程句柄及进程树接口，两者也精确固定到
-`b4311370e633c08837d0a2d18fd77ec874305827`。这些接缝用于应用侧分离阻塞
+`991ca32f7219c7506a1d8183c5e6dc69a1589b87`。这些接缝用于应用侧分离阻塞
 I/O 和取消所有权，不包含第三方源码副本或仓内 path 覆盖。
 
-fork 相对上游基线只改 `rshell-session` 的本地 PTY 输入：`LocalPtyTransport`
+fork 相对上游基线有两处改动。其一是 `rshell-session` 的本地 PTY 输入：`LocalPtyTransport`
 的写入交给专用写线程，经 4 MiB 有界队列按块入队；队列满时 `write` 异步等待且
 可取消，已入队的块按序写出，关闭时丢弃未写出的部分并保持原有关闭时限。Unix
 上 PTY master 为非阻塞描述符，读写线程等待可读/可写（Linux 用 poll，macOS 用
@@ -41,6 +41,12 @@ select），写线程另等一条随输入端关闭的唤醒管道，PTY 写满�
 actor 所在的运行时线程上同步写 PTY，子进程不读输入时大段粘贴会阻塞该线程，
 会话无法处理关闭等命令；写入发生在传输内部，应用只能拿到 `SessionTransport`
 接口，无法在外部改变其写入方式。
+
+其二是渲染帧携带 SGR 2（dim/faint）：`rshell-core` 的 `CellAttributes` 增加
+`dim` 字段（serde 缺省为 false，不含该字段的旧数据照常解码），`rshell-session`
+渲染快照从终端单元格的 DIM 标记映射，附带映射与兼容解码测试。属于理由①：
+上游渲染帧不含该属性，shell 智能补全的灰显提示（PSReadLine 内联预测、
+fish/zsh 自动建议）在应用侧无从区分，无法在外部补出。
 
 固定提交同时包含短的顶部滚动区域中 `stable_row` 的修复，普通输出和同步输出
 共用稳定行号记账。上游后续提交不会自动进入构建；升级时需同时更新 manifest

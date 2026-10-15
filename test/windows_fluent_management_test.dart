@@ -61,14 +61,20 @@ class _Harness {
   final mountedPanes = <WorkspacePane>[];
   int disposals = 0;
 
-  Future<void> show(WidgetTester tester, {DesktopKeyActions? actions}) async {
+  Future<void> show(
+    WidgetTester tester, {
+    DesktopKeyActions? actions,
+    String scheme = 'default',
+  }) async {
     addTearDown(gateway.close);
     await tester.pumpWidget(
       MaterialApp(
         theme: ThemeData.dark(),
         localizationsDelegates: const [f.FluentLocalizations.delegate],
-        builder: (_, child) =>
-            f.FluentTheme(data: desktopFluentTheme(), child: child!),
+        builder: (_, child) => f.FluentTheme(
+          data: desktopFluentTheme(colorScheme: scheme),
+          child: child!,
+        ),
         home: WindowsShell(
           initial: const SessionTarget.saved(
             connectionId: 'existing',
@@ -185,6 +191,29 @@ void main() {
       await tester.pumpWidget(const SizedBox());
       await tester.pump();
       expect(harness.disposals, 1);
+    });
+  }
+
+  // 管理面板叠在半透明窗口画布上，自带底色必须不透明（各应用配色）。
+  for (final scheme in ['default', 'dracula', 'solarized_light']) {
+    testWidgets('Windows 管理面板背景不透明：$scheme', (tester) async {
+      final harness = _Harness();
+      await harness.show(tester, scheme: scheme);
+      Color panel(Finder page) => tester
+          .widget<ColoredBox>(
+            find.ancestor(of: page, matching: find.byType(ColoredBox)).first,
+          )
+          .color;
+      final menu = f.FluentTheme.of(tester.element(find.byType(WindowsShell)))
+          .menuColor;
+      await _icon(tester, '私钥管理');
+      expect(panel(find.byType(DesktopKeysPage)), menu);
+      expect(menu.a, 1.0);
+      await _click(tester, '返回工作区');
+      await _icon(tester, '添加连接');
+      expect(panel(find.byType(DesktopConnectionEditor)), menu);
+      await _click(tester, '取消');
+      expect(tester.takeException(), isNull);
     });
   }
 
