@@ -162,13 +162,21 @@ class WindowsAppearance extends ChangeNotifier {
     opacity: 0.78,
   );
 
-  /// 协议无 request ID：超时后保持隔离，直到迟到的状态回报结算旧写入。
+  /// 查询固定使用的 request_id；保存从 1 起全应用递增，查询回包不会被当成保存结果。
+  static const queryRequestId = 0;
+  static int _lastRequestId = queryRequestId;
+
+  /// 超时后保持隔离，直到同一 request_id 的迟到回报结算该写入。
   int verification = 0;
   bool _sending = false;
   bool _timedOut = false;
+  int? _pendingRequestId;
   bool get writeReady => !_sending && !_timedOut;
   StreamSubscription? _subscription;
   Future<void> _effectQueue = Future.value();
+
+  static int _nextRequestId() =>
+      _lastRequestId = _lastRequestId % 0xffffffff + 1;
 
   void connect() {
     _subscription ??= _states.listen((state) {
@@ -178,8 +186,9 @@ class WindowsAppearance extends ChangeNotifier {
         acrylic: state.acrylic,
         opacity: state.opacity,
       );
-      if (_timedOut && !_sending) {
+      if (_timedOut && state.requestId == _pendingRequestId) {
         _timedOut = false;
+        _pendingRequestId = null;
         ++verification;
       }
       notifyListeners();
@@ -196,17 +205,25 @@ class WindowsAppearance extends ChangeNotifier {
     if (changedEffect) unawaited(applyMaterial());
   }
 
-  /// 先订阅再发送；error 非空为已关联失败，超时为结果待核实。
+  /// 先订阅再发送，只接受同一 request_id 的回包；error 非空为已关联失败，
+  /// 超时为结果待核实。
   Future<DesktopResourceWriteResult<DesktopAppearanceValue>> persist(
     DesktopAppearanceValue value,
   ) async {
     if (!writeReady) throw StateError('上一外观写入尚未结算');
     _sending = true;
+    final requestId = _pendingRequestId = _nextRequestId();
     notifyListeners();
-    final reply = _states.first.timeout(const Duration(seconds: 10));
+    final reply = _states
+        .firstWhere((state) => state.requestId == requestId)
+        .timeout(const Duration(seconds: 10));
     try {
       _send(
-        SaveWindowsAppearance(acrylic: value.acrylic, opacity: value.opacity),
+        SaveWindowsAppearance(
+          requestId: requestId,
+          acrylic: value.acrylic,
+          opacity: value.opacity,
+        ),
       );
     } catch (_) {
       // 发送异常不能证明 Rust 未收到，按待核实处理。
@@ -218,6 +235,7 @@ class WindowsAppearance extends ChangeNotifier {
     }
     try {
       final state = await reply;
+      _pendingRequestId = null;
       saved = DesktopAppearanceValue(
         acrylic: state.acrylic,
         opacity: state.opacity,

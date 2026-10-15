@@ -104,7 +104,9 @@ void main() {
     }
     await tester.tap(find.byKey(const ValueKey('settings-nav-appearance')));
     await tester.pumpAndSettle();
-    final stateFuture = WindowsAppearanceState.rustSignalStream.first;
+    final stateFuture = WindowsAppearanceState.rustSignalStream.firstWhere(
+      (pack) => pack.message.requestId != WindowsAppearance.queryRequestId,
+    );
     final slider = tester.widget<f.Slider>(
       find.byKey(const ValueKey('resource-transparency-slider')),
     );

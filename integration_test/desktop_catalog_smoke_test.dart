@@ -45,7 +45,7 @@ class _OwnedStartup implements StartupPort {
 
   @override
   void querySettings() {
-    WindowsAppearanceQuery().sendSignalToRust();
+    WindowsAppearanceQuery(requestId: 0).sendSignalToRust();
     SettingsQuery().sendSignalToRust();
   }
 

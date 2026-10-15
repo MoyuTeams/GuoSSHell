@@ -3,7 +3,7 @@
 > GuoSSHell 使用 rsHell 的 **Rust 业务内核**和 Flutter 前端，提供跨平台纯 SSH 客户端。
 > 这份文件是实现期的唯一参考。所有结论都标注了证据来源；标「实测」的都是本机跑出来的，可复现。
 
-- 当前上游：`hugefiver/rsHell`（MIT），**作为固定提交的 git 依赖**。
+- 当前上游：团队 fork `MoyuTeams/rsHell`（基于 `hugefiver/rsHell`，MIT），**作为固定提交的 git 依赖**。
   固定提交、接口扩展和依赖边界统一见根 `UPSTREAM.md`；上游源码不进本仓库。
   **改上游的原则**：按 AGENTS.md「上游依赖」一节执行——优先复用官方接口，能在应用侧
   实现就不改上游；必须改时放在团队 fork，并记入根 `UPSTREAM.md`。升级时同步更新 `rev`
@@ -822,9 +822,9 @@ LoginGraceTime 把关，与 OpenSSH 客户端一致；交给传输层的连接�
 | M0 主机密钥策略：**TOFU 自动接受并落盘** | M0 前提是「不接 UI」，走完整确认会自相矛盾。**明确的技术债，M3 还清** |
 | release profile **不要设 `panic = "abort"`** | 上游 actor 靠 `catch_unwind` 把 panic 转成 `SessionEvent::Crashed`（有 `actor_panic_gtk_survival_macos` 测试守着），abort 会毁掉这条韧性设计 |
 | iPad 优先，iPhone 作为子项 | iPad 有大屏 + 硬件键盘 + 指针支持，能把最难的 IME/软键盘问题推到 M1-b |
-| **仓库形态：独立仓库 + 官方上游 git 依赖** | 本仓库只装应用自己的代码。上游固定到官方仓库的具体 `rev`，根 `Cargo.lock` 进版本控制保证复现；升级需通过内核与应用回归，见 `UPSTREAM.md` |
+| **仓库形态：独立仓库 + 上游 git 依赖** | 本仓库只装应用自己的代码。上游固定到团队 fork `MoyuTeams/rsHell` 的具体 `rev`，根 `Cargo.lock` 进版本控制保证复现；升级需通过内核与应用回归，见 `UPSTREAM.md` |
 | **keyring 的 iOS feature 从我们这边打开** | 不用改上游 `Cargo.toml`——Cargo 的 feature 是按包统一的。见 §3.2 |
-| **使用上游仓内的 `portable-pty-psmux`** | Cargo 从同一官方提交解析 path 依赖，无需本仓库另设 root patch；Windows 专用代码不参与 iOS / macOS 编译 |
+| **使用上游仓内的 `portable-pty-psmux`** | Cargo 从同一 rsHell 固定提交解析 path 依赖，无需本仓库另设 root patch；Windows 专用代码不参与 iOS / macOS 编译 |
 | **iOS 上不删上游的本地传输，靠 `-Wl,-dead_strip` 裁符号** | 保留了 M5 里 macOS/Android 白拿本地面板的可能；将来真要摘掉就得 fork 上游（见 §9.2） |
 | **链接可行性用命令行验，不用 Xcode** | `scripts/link-check.sh`：两个切片各链进一个 iOS 可执行文件 + 符号审计 |
 | **连接方式：手工填写，不做自动发现** | 范围收窄，M0-c 只做「手填内网地址能连 + 权限处理 + 清晰失败提示」。mDNS/Bonjour 插件候选留在 §6.1 备查，不作为本期依赖 |

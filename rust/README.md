@@ -14,7 +14,7 @@
 | `examples/m0_loopback.rs` | **同进程起一个 russh 服务端**，把整条路径跑通。不需要任何外部服务器或凭证 |
 | `examples/m0.rs` | 打真实服务器：`cargo run --example m0 -- <host> <port> <user> <password> [known_hosts]` |
 | `examples/bench_frame.rs` | 帧传输性能基准，产出 `PLAN.md` §4 的全部数字 |
-| `../Cargo.lock` | workspace 共用且**进版本控制**的锁文件，固定官方 git 依赖及其传递依赖 |
+| `../Cargo.lock` | workspace 共用且**进版本控制**的锁文件，固定上游 git 依赖及其传递依赖 |
 | `LICENSES/` | 上游 rsHell / portable-pty-psmux 的 MIT 许可副本 |
 
 ## 快速开始
@@ -48,7 +48,7 @@ PTY/shell 请求序列 + 写路径 : YES
 - `alacritty_terminal 0.26.0` 全链为 `aarch64-apple-ios` 编译通过，**零改动**。
 - 上游四个 crate 为 iOS 编译**不需要任何源码改动**：keyring 的 `protected` feature
   从我们自己的 `Cargo.toml` 打开（Cargo 的 feature unification），
-  `portable-pty-psmux` 由同一官方提交的仓内 path 依赖提供，Windows 专用代码不参与
+  `portable-pty-psmux` 由同一 rsHell 固定提交的仓内 path 依赖提供，Windows 专用代码不参与
   iOS / macOS 编译。详见根目录 `UPSTREAM.md`。
 - 两个切片（device / simulator）都能链进一个 iOS 可执行文件，**只需要额外 `-liconv`**。
 - **PTY 家族的符号要靠 `-Wl,-dead_strip` 裁掉。** 不加时最终可执行文件会导入

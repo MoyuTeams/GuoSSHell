@@ -231,15 +231,15 @@ pub async fn run(context: Arc<AppContext>) {
                 continue;
             }
             pack = appearance_query_rx.recv() => {
-                if pack.is_none() { break; }
-                publish_appearance(&context, String::new());
+                let Some(pack) = pack else { break };
+                publish_appearance(&context, pack.message.request_id, String::new());
                 continue;
             }
             pack = appearance_save_rx.recv() => {
                 let Some(pack) = pack else { break };
                 let request = pack.message;
                 let result = save_appearance(&context.preferences, request.acrylic, request.opacity);
-                publish_appearance(&context, result.err().unwrap_or_default());
+                publish_appearance(&context, request.request_id, result.err().unwrap_or_default());
                 continue;
             }
             pack = desktop_rx.recv() => {
@@ -316,9 +316,10 @@ fn save_appearance(
     })
 }
 
-fn publish_appearance(context: &AppContext, error: String) {
+fn publish_appearance(context: &AppContext, request_id: u32, error: String) {
     let preferences = context.preferences.get();
     WindowsAppearanceState {
+        request_id,
         acrylic: preferences.windows_acrylic.unwrap_or(true),
         opacity: appearance_opacity(preferences.windows_opacity.unwrap_or(0.78)).unwrap_or(0.78),
         error,

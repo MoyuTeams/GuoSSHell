@@ -27,17 +27,23 @@ pub struct FontFileState {
 }
 
 /// Windows 外观独立于终端配置，避免拖动透明度时覆盖其他设置。
+/// request_id 由 Dart 分配并在 WindowsAppearanceState 中原样回传；查询使用 0。
 #[derive(Deserialize, DartSignal)]
-pub struct WindowsAppearanceQuery {}
+pub struct WindowsAppearanceQuery {
+    pub request_id: u32,
+}
 
 #[derive(Deserialize, DartSignal)]
 pub struct SaveWindowsAppearance {
+    pub request_id: u32,
     pub acrylic: bool,
     pub opacity: f64,
 }
 
 #[derive(Serialize, RustSignal)]
 pub struct WindowsAppearanceState {
+    /// 对应请求的 request_id；保存结果只按它关联。
+    pub request_id: u32,
     pub acrylic: bool,
     pub opacity: f64,
     /// 保存失败时返回原值与错误，界面撤销预览。

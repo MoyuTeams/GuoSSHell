@@ -196,7 +196,10 @@ class _RustStartupPort implements StartupPort {
 
   @override
   void querySettings() {
-    if (isWindowsDesktop) WindowsAppearanceQuery().sendSignalToRust();
+    if (isWindowsDesktop) {
+      WindowsAppearanceQuery(requestId: WindowsAppearance.queryRequestId)
+          .sendSignalToRust();
+    }
     SettingsQuery().sendSignalToRust();
     // 应用配色经设置 gateway 读取；之后任何设置结果都会刷新它。移动端不读取。
     if (appTargetFor(defaultTargetPlatform) == AppTarget.desktop) {

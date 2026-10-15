@@ -148,8 +148,16 @@ Future<void> _tap(WidgetTester tester, String key) async {
 Future<void> _nav(WidgetTester tester, DesktopSettingsSection section) =>
     _tap(tester, 'settings-nav-${section.name}');
 
-WindowsAppearanceState _appearanceState(double opacity, {String error = ''}) =>
-    WindowsAppearanceState(acrylic: true, opacity: opacity, error: error);
+WindowsAppearanceState _appearanceState(
+  double opacity, {
+  required int requestId,
+  String error = '',
+}) => WindowsAppearanceState(
+  requestId: requestId,
+  acrylic: true,
+  opacity: opacity,
+  error: error,
+);
 
 void main() {
   testWidgets('左侧导航切换五页，各页内容只在所选页可见', (tester) async {
@@ -266,10 +274,13 @@ void main() {
     addTearDown(() => page.close(tester));
     const draft = DesktopAppearanceValue(acrylic: true, opacity: 0.65);
 
+    int lastId() => page.appearanceSaves.last.requestId;
+
     final ok = appearance.persist(draft);
     expect(appearance.writeReady, isFalse);
     expect(page.appearanceSaves.single.opacity, 0.65);
-    page.appearanceStates.add(_appearanceState(0.65));
+    expect(lastId(), isNot(WindowsAppearance.queryRequestId));
+    page.appearanceStates.add(_appearanceState(0.65, requestId: lastId()));
     final confirmed = await ok;
     expect(confirmed.status, DesktopResourceWriteStatus.confirmed);
     expect(confirmed.saved!.opacity, 0.65);
@@ -279,7 +290,9 @@ void main() {
     final rejected = appearance.persist(
       const DesktopAppearanceValue(acrylic: true, opacity: 0.5),
     );
-    page.appearanceStates.add(_appearanceState(0.65, error: 'fixture'));
+    page.appearanceStates.add(
+      _appearanceState(0.65, requestId: lastId(), error: 'fixture'),
+    );
     expect((await rejected).status, DesktopResourceWriteStatus.failed);
     expect(appearance.saved.opacity, 0.65);
     expect(appearance.writeReady, isTrue);
@@ -290,7 +303,70 @@ void main() {
     expect(appearance.writeReady, isFalse);
     expect(appearance.verification, 0);
     expect(() => appearance.persist(draft), throwsStateError);
-    page.appearanceStates.add(_appearanceState(0.65));
+    page.appearanceStates.add(_appearanceState(0.65, requestId: lastId()));
+    expect(appearance.writeReady, isTrue);
+    expect(appearance.verification, 1);
+  });
+
+  testWidgets('外观 persist：启动查询回包先到不当作保存结果，只按 request_id 结算', (tester) async {
+    final page = _Page();
+    final appearance = page.appearance..connect();
+    addTearDown(() => page.close(tester));
+    const draft = DesktopAppearanceValue(acrylic: true, opacity: 0.65);
+
+    var settled = false;
+    final save = appearance.persist(draft).whenComplete(() => settled = true);
+    final id = page.appearanceSaves.single.requestId;
+    // 启动查询的旧状态晚于保存请求到达：仍更新显示值，但不结算本次写入。
+    page.appearanceStates.add(
+      _appearanceState(0.78, requestId: WindowsAppearance.queryRequestId),
+    );
+    page.appearanceStates.add(_appearanceState(0.5, requestId: id + 1));
+    await tester.pump();
+    expect(settled, isFalse);
+    expect(appearance.writeReady, isFalse);
+    page.appearanceStates.add(_appearanceState(0.65, requestId: id));
+    final result = await save;
+    expect(result.status, DesktopResourceWriteStatus.confirmed);
+    expect(result.saved!.opacity, 0.65);
+    expect(appearance.writeReady, isTrue);
+
+    // 匹配回包携带错误：结算为失败，不被之前的成功查询掩盖。
+    final failed = appearance.persist(draft);
+    final failedId = page.appearanceSaves.last.requestId;
+    expect(failedId, greaterThan(id));
+    page.appearanceStates.add(
+      _appearanceState(0.78, requestId: WindowsAppearance.queryRequestId),
+    );
+    page.appearanceStates.add(
+      _appearanceState(0.78, requestId: failedId, error: 'fixture'),
+    );
+    expect((await failed).status, DesktopResourceWriteStatus.failed);
+    expect(appearance.writeReady, isTrue);
+  });
+
+  testWidgets('外观 persist 超时后只有匹配 request_id 的迟到回包解除隔离', (tester) async {
+    final page = _Page();
+    final appearance = page.appearance..connect();
+    addTearDown(() => page.close(tester));
+
+    final pending = appearance.persist(
+      const DesktopAppearanceValue(acrylic: false, opacity: 0.5),
+    );
+    final id = page.appearanceSaves.single.requestId;
+    await tester.pump(const Duration(seconds: 11));
+    expect((await pending).status, DesktopResourceWriteStatus.uncertain);
+    expect(appearance.writeReady, isFalse);
+
+    page.appearanceStates.add(
+      _appearanceState(0.78, requestId: WindowsAppearance.queryRequestId),
+    );
+    expect(appearance.saved.opacity, 0.78);
+    expect(appearance.writeReady, isFalse);
+    expect(appearance.verification, 0);
+
+    page.appearanceStates.add(_appearanceState(0.5, requestId: id));
+    expect(appearance.saved.opacity, 0.5);
     expect(appearance.writeReady, isTrue);
     expect(appearance.verification, 1);
   });

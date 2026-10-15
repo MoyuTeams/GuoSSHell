@@ -8,7 +8,7 @@ Linux 的产品范围包括远端 SSH、桌面本地 shell 与 System OpenSSH（
 （连接编辑器与快速连接中选择「连接方式」）均已可用。macOS/Linux 的 GUI 尚未实跑，范围见
 [桌面扩展](docs/desktop-expansion.md)。
 业务与终端语义跑在 **Rust**
-（上游 [rsHell](https://github.com/hugefiver/rsHell) 的内核，直接作为固定提交的 git 依赖），
+（[rsHell](https://github.com/hugefiver/rsHell) 的内核，经团队 fork 以固定提交的 git 依赖使用），
 只有渲染与交互用 **Flutter** 重写。Dart 不写业务逻辑。
 
 > **实现期的唯一参考是 [`PLAN.md`](PLAN.md)。** 动代码之前先读它。
@@ -36,7 +36,7 @@ GuoSSHell/
 ├── native/hub/          rinf 的 Rust 侧：信号层、会话、连接与认证、钥匙串、卡、安全密钥
 │   └── src/             lib.rs · signals/ · session.rs · connect.rs · keys.rs · card/ · security_key/ …
 ├── rust/                rshell-m0：上游内核的 pin 点（再导出 rshell-core/session）+ M0 探针与示例
-│   ├── Cargo.toml       上游走 git 依赖，rev 只在这里 pin 这一处
+│   ├── Cargo.toml       上游内核的 git 依赖与固定 rev（native/hub 的平台接缝固定同一提交）
 │   └── examples/        m0.rs · m0_loopback.rs · bench_frame.rs · demo_server.rs
 ├── Cargo.toml           根 workspace（members = native/*, rust）+ release profile
 ├── UPSTREAM.md          上游依赖的来源、固定版本与改动记录（规则见 AGENTS.md）
@@ -142,8 +142,9 @@ GuoSSHell 以 [MIT 许可](LICENSE) 发布。
 桌面 UI 使用 [`fluent_ui` 4.16.1](https://pub.dev/packages/fluent_ui/versions/4.16.1)
 （BSD-3-Clause）；Dart 依赖许可由 Flutter 许可注册表收集，发行界面需提供查看入口。
 
-直接依赖 `hugefiver/rsHell`，以 git 依赖固定到精确提交，MIT。
-固定提交、所需接口扩展与平台依赖边界统一见 [`UPSTREAM.md`](UPSTREAM.md)。
+Rust 内核使用团队 fork `MoyuTeams/rsHell`（基于 `hugefiver/rsHell`，MIT），
+以 git 依赖固定到精确提交。固定提交、fork 改动、所需接口扩展与平台依赖边界统一见
+[`UPSTREAM.md`](UPSTREAM.md)。
 
 终端渲染使用团队 fork `MoyuTeams/terminal_view`（基于 `Termphin/terminal_view`，MIT），
 以 git 依赖固定到精确提交，改动与理由同样记录在 `UPSTREAM.md`。
