@@ -8,6 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:guosh_shell/src/bindings/bindings.dart';
 import 'package:guosh_shell/src/terminal/desktop_font.dart';
 import 'package:guosh_shell/src/terminal/desktop_ordered_session.dart';
+import 'package:guosh_shell/src/terminal/desktop_session_controller.dart'
+    show DesktopPanePhase;
 import 'package:guosh_shell/src/terminal/frame_terminal.dart';
 import 'package:guosh_shell/src/terminal/session_target.dart';
 import 'package:guosh_shell/src/terminal/terminal_key_bar.dart';
@@ -360,8 +362,13 @@ void main() {
         _ => DesktopFailure.none,
       },
     );
-    final text = 'x${'中🙂' * (200 * 1024)}';
-    expect(text.length, greaterThan(600 * 1024));
+    // 预算内但远大于单个分片。
+    final text = 'x${'中🙂' * (100 * 1024)}';
+    expect(text.length, greaterThan(DesktopOrderedSession.pasteChunkUnits));
+    expect(
+      text.length,
+      lessThanOrEqualTo(DesktopOrderedSession.maxQueuedTextUnits),
+    );
     f.session
       ..send(DesktopEventPaste(text: text))
       ..send(_key('enter'));
@@ -410,6 +417,170 @@ void main() {
     expect(f.events, hasLength(DesktopOrderedSession.maxQueuedEvents + 2));
     expect(f.events.last, const DesktopEventFrameAck(frameSeq: 1));
     expect(f.events.whereType<DesktopEventText>(), isEmpty);
+    await f.dispose();
+  });
+
+  test('受理后单条粘贴超过总量预算即丢弃并提示，后续输入不受影响', () async {
+    final f = _Fixture();
+    await f.start();
+    final notices = <String>[];
+    f.session.onNotice = notices.add;
+    f.session.send(
+      DesktopEventPaste(
+        text: 'x' * (DesktopOrderedSession.maxQueuedTextUnits + 1),
+      ),
+    );
+    expect(notices, hasLength(1));
+    expect(f.events.whereType<DesktopEventPaste>(), isEmpty);
+    expect(f.session.error, isEmpty);
+    f.session.send(const DesktopEventText(text: '继续'));
+    await Future<void>.delayed(Duration.zero);
+    expect(f.events, [const DesktopEventText(text: '继续')]);
+    expect(f.session.error, isEmpty);
+    await f.dispose();
+  });
+
+  test('受理后在途挂住时累计文本量受预算约束', () async {
+    final f = _Fixture();
+    await f.start();
+    final notices = <String>[];
+    f.session.onNotice = notices.add;
+    f.hold();
+    f.session.send(const DesktopEventText(text: 'a'));
+    for (var i = 0; notices.isEmpty && i < 64; i++) {
+      f.session.send(
+        DesktopEventPaste(text: 'x' * DesktopOrderedSession.pasteChunkUnits),
+      );
+    }
+    expect(notices, isNotEmpty);
+    expect(f.session.error, isEmpty);
+    while (f.held.isNotEmpty) {
+      f.reply(f.held.removeAt(0));
+    }
+    final units = f.events.fold<int>(
+      0,
+      (total, event) =>
+          total +
+          switch (event) {
+            DesktopEventText(:final text) ||
+            DesktopEventPaste(:final text) => text.length,
+            _ => 0,
+          },
+    );
+    expect(f.events.whereType<DesktopEventPaste>(), isNotEmpty);
+    expect(units, lessThanOrEqualTo(DesktopOrderedSession.maxQueuedTextUnits));
+    await f.dispose();
+  });
+
+  test('受理后在途挂住时 pasteClipboard 同样受条数预算约束', () async {
+    final f = _Fixture();
+    await f.start();
+    final notices = <String>[];
+    f.session.onNotice = notices.add;
+    f.hold();
+    f.session.send(const DesktopEventText(text: 'a'));
+    f.session.readClipboard = () async => 'a';
+    for (var i = 0; i < DesktopOrderedSession.maxQueuedEvents + 8; i++) {
+      await f.session.pasteClipboard();
+    }
+    expect(notices, isNotEmpty);
+    expect(f.session.error, isEmpty);
+    while (f.held.isNotEmpty) {
+      f.reply(f.held.removeAt(0));
+    }
+    expect(
+      f.events.whereType<DesktopEventPaste>().length,
+      lessThanOrEqualTo(DesktopOrderedSession.maxQueuedEvents),
+    );
+    await f.dispose();
+  });
+
+  testWidgets('回执丢失后重试关闭：Disconnect 被判 Duplicate 时重同步一次，仅凭 ended 确认成功', (
+    tester,
+  ) async {
+    final f = _Fixture();
+    await f.start(tick: tester.pump);
+    f.gateway.lifecycle(NativeLifecycleState.authenticated);
+    f.hold();
+    var accepted = 0;
+    void replyDisconnect(DesktopFailure failure) {
+      final request = f.held.removeLast();
+      expect(request.event, const DesktopEventDisconnect());
+      if (failure == DesktopFailure.none) accepted++;
+      f.reply(request, failure: failure);
+    }
+
+    // seq 1 在途且永不回执（Rust 实际已受理）。
+    f.session.send(const DesktopEventText(text: '在途'));
+    final first = f.session.close();
+    await tester.pump(const Duration(seconds: 10));
+    expect(await first, isFalse);
+
+    var done = false;
+    final second = f.session.close().then((value) => done = value);
+    expect(f.events.last, const DesktopEventDisconnect());
+    expect(f.seqs.last, 1);
+    replyDisconnect(DesktopFailure.duplicate);
+    expect(f.events.last, const DesktopEventDisconnect());
+    expect(f.seqs.last, 2);
+    replyDisconnect(DesktopFailure.none);
+    await tester.pump();
+    expect(done, isFalse);
+    f.gateway.lifecycle(NativeLifecycleState.ended, revision: 2);
+    await second;
+    expect(done, isTrue);
+    expect(accepted, 1);
+    expect(f.seqs, [1, 1, 2]);
+    await f.dispose();
+  });
+
+  testWidgets('连续两次 Duplicate 不再递增，关闭返回 false 而非 true', (tester) async {
+    final f = _Fixture();
+    await f.start(tick: tester.pump);
+    f.gateway.lifecycle(NativeLifecycleState.authenticated);
+    f.hold();
+    f.session.send(const DesktopEventText(text: '在途'));
+    final first = f.session.close();
+    await tester.pump(const Duration(seconds: 10));
+    expect(await first, isFalse);
+
+    final second = f.session.close();
+    f.reply(f.held.removeLast(), failure: DesktopFailure.duplicate);
+    expect(f.seqs.last, 2);
+    f.reply(f.held.removeLast(), failure: DesktopFailure.duplicate);
+    expect(await second, isFalse);
+    expect(f.seqs, isNot(contains(3)));
+    await tester.pump(const Duration(seconds: 10));
+    expect(f.seqs, isNot(contains(3)));
+    await f.dispose();
+  });
+
+  testWidgets('关闭期间 OutOfOrder 返回 false，不当作已结束', (tester) async {
+    final f = _Fixture();
+    await f.start(tick: tester.pump);
+    f.gateway.lifecycle(NativeLifecycleState.authenticated);
+    f.hold();
+    final closed = f.session.close();
+    expect(f.events.last, const DesktopEventDisconnect());
+    f.reply(f.held.removeLast(), failure: DesktopFailure.outOfOrder);
+    expect(await closed, isFalse);
+    expect(f.session.phase, isNot(DesktopPanePhase.ended));
+    await f.dispose();
+  });
+
+  test('运行中 Duplicate 重同步后继续发送', () async {
+    final f = _Fixture();
+    await f.start();
+    f.hold();
+    f.session.send(const DesktopEventText(text: 'a'));
+    f.reply(f.held.removeAt(0), failure: DesktopFailure.duplicate);
+    expect(f.events.last, const DesktopEventText(text: 'a'));
+    expect(f.seqs, [1, 2]);
+    f.reply(f.held.removeAt(0));
+    f.session.send(const DesktopEventText(text: 'b'));
+    expect(f.events.last, const DesktopEventText(text: 'b'));
+    expect(f.seqs, [1, 2, 3]);
+    expect(f.session.error, isEmpty);
     await f.dispose();
   });
 

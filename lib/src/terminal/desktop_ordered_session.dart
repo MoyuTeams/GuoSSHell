@@ -28,11 +28,18 @@ import 'session_target.dart';
 /// 同一时刻只有一个事件在途，收到 DesktopEventResult 再发下一个：
 /// - None / InvalidEvent / PolicyUnavailable：seq 已消费，继续下一个；
 /// - Busy：seq 未推进，原事件用同一 seq 稍后重试（仅鼠标移动可丢弃）；
-/// - InputTooLarge：文本/粘贴对半拆分后用同一 seq 重发。
-/// Start 被接受前的输入在本地按序排队（type-ahead），最多 1024 条、512 Ki UTF-16 单元，
-/// 超限丢弃整段并阻断输入直到重连。受理后超大粘贴按 [pasteChunkUnits] 分片全部入队；
-/// 待发条数超过上限时只丢弃最新一条并经 [onNotice] 提示，不阻断。
-/// 关闭可用 Disconnect 替换明确收到 Busy 的输入，不等待数据预算。
+/// - InputTooLarge：文本/粘贴对半拆分后用同一 seq 重发；
+/// - Duplicate：该 seq 已被 Rust 受理而回执丢失，推进 seq 后重发在途事件，每个在途
+///   事件只重同步一次；
+/// - 其他拒绝（来源、版本、代际或顺序失配）：放弃在途与待发输入，关闭期间以失败结束
+///   （可重试），绝不当作关闭成功。
+/// Start 被接受前的输入在本地按序排队（type-ahead）。受理前后所有入口统一受
+/// [maxQueuedEvents] 条／[maxQueuedTextUnits] UTF-16 单元预算（在途事件计入总量）：
+/// 受理前超限丢弃整段并阻断输入直到重连；受理后只丢弃本次输入并经 [onNotice] 提示，
+/// 不阻断。控制事件不受预算约束。受理后超过 [pasteChunkUnits] 的粘贴分片入队，预算按
+/// 分片总量计。
+/// 关闭可用 Disconnect 替换明确收到 Busy 的输入，不等待数据预算；关闭只凭 lifecycle
+/// ended 或 status closed 确认成功。
 class DesktopOrderedSession extends ChangeNotifier {
   DesktopOrderedSession({
     required this.source,
@@ -81,6 +88,9 @@ class DesktopOrderedSession extends ChangeNotifier {
   final _projections = <int, DesktopNativeProjection>{};
   final _queue = ListQueue<DesktopEvent>();
   DesktopEvent? _inflight;
+
+  /// 当前在途事件是否已因 Duplicate 重同步过 seq。
+  bool _resynced = false;
   int _seq = 0;
   Timer? _retry;
   Timer? _resultTimer;
@@ -399,18 +409,11 @@ class DesktopOrderedSession extends ChangeNotifier {
         _queue.last.runtimeType == event.runtimeType) {
       _queue.removeLast();
     }
-    final parts = _chunks(event);
-    if (_accepted &&
-        !_control(event) &&
-        _queue.length + parts.length > maxQueuedEvents) {
-      onNotice?.call('待发送输入过多，已丢弃本次输入');
-      return;
-    }
-    if (!_enqueue(parts)) return;
+    if (!_enqueue(_chunks(event))) return;
     _pump();
   }
 
-  /// 断开、重连与协议心跳/几何（帧确认、尺寸、视口）不是用户输入，不受输入阻断与条数上限影响。
+  /// 断开、重连与协议心跳/几何（帧确认、尺寸、视口）不是用户输入，不受输入阻断与排队预算影响。
   static bool _control(DesktopEvent event) =>
       event is DesktopEventDisconnect ||
       event is DesktopEventReconnect ||
@@ -436,19 +439,29 @@ class DesktopOrderedSession extends ChangeNotifier {
     _ => 0,
   };
 
-  /// Start 受理前有总量上限，超限丢弃整段并阻断；受理后总是入队。
+  /// 所有入队的统一预算：非控制事件按待发条数与（含在途的）UTF-16 总量检查。
+  /// 受理前超限丢弃整段并阻断；受理后只丢弃本次 [events] 并提示，返回 false。
   bool _enqueue(List<DesktopEvent> events, {int? at}) {
-    if (!_accepted && events.any((event) => event is! DesktopEventDisconnect)) {
-      final units =
+    if (events.any((event) => !_control(event))) {
+      final tooMany = _queue.length + events.length > maxQueuedEvents;
+      final tooLarge =
+          !tooMany &&
           events.fold<int>(0, (total, item) => total + _textUnits(item)) +
-          _textUnits(_inflight) +
-          _queue.fold<int>(0, (total, item) => total + _textUnits(item));
-      if (_queue.length + events.length > maxQueuedEvents ||
-          units > maxQueuedTextUnits) {
-        // 丢弃整段未发送输入，避免仅丢文本后仍执行排队的 Enter。
-        _queue.clear();
-        _inputBlocked = true;
-        _fail('待发送输入超过上限，请重新连接');
+                  _textUnits(_inflight) +
+                  _queue.fold<int>(
+                    0,
+                    (total, item) => total + _textUnits(item),
+                  ) >
+              maxQueuedTextUnits;
+      if (tooMany || tooLarge) {
+        if (!_accepted) {
+          // 丢弃整段未发送输入，避免仅丢文本后仍执行排队的 Enter。
+          _queue.clear();
+          _inputBlocked = true;
+          _fail('待发送输入超过上限，请重新连接');
+        } else {
+          onNotice?.call(tooMany ? '待发送输入过多，已丢弃本次输入' : '待发送输入过大，已丢弃本次输入');
+        }
         return false;
       }
     }
@@ -479,6 +492,7 @@ class DesktopOrderedSession extends ChangeNotifier {
       return;
     }
     _inflight = _queue.removeFirst();
+    _resynced = false;
     _transmit();
   }
 
@@ -530,6 +544,7 @@ class DesktopOrderedSession extends ChangeNotifier {
         if (_closed && event is! DesktopEventDisconnect) {
           _queue.clear();
           _inflight = const DesktopEventDisconnect();
+          _resynced = false;
           _transmit();
           return;
         } else if (event is DesktopEventMouse && event.kind == 'move') {
@@ -552,17 +567,37 @@ class DesktopOrderedSession extends ChangeNotifier {
         }
         _inflight = null;
         _fail('单个输入过大，无法发送');
-      default:
-        // 来源或顺序失配：会话已结束或协议错位，seq 未被消费。
-        _inflight = null;
-        _queue.clear();
-        if (_closed) {
-          _finishClose(true);
-        } else if (lifecycle?.state != NativeLifecycleState.ended) {
-          _fail('有序输入被拒绝：${message.failure.name}');
+      case DesktopFailure.duplicate:
+        // Dart 只发送 _seq + 1，Rust 的 last_seq 只在准入成功时推进，故 last_seq ∈
+        // {_seq, _seq + 1}。Duplicate 唯一的解释是 _seq + 1 已被受理而回执丢失（典型：
+        // 回执超时后在途被清空，重发时复用了旧 seq）。推进 seq 后用新 seq 重发在途事件；
+        // 同时查询 lifecycle，若 owner 已结束则由 ended 结束关闭。
+        // 每个在途事件只重同步一次；再次 Duplicate 说明上述不变量已破坏，按拒绝处理。
+        if (!_resynced) {
+          _resynced = true;
+          ++_seq;
+          _queryLifecycle();
+          _transmit();
+          return;
         }
+        _rejected(message.failure);
+      default:
+        _rejected(message.failure);
     }
     _pump();
+  }
+
+  /// 来源、版本、代际或顺序失配：放弃在途与待发输入。拒绝不能证明会话已结束，
+  /// 关闭期间以失败结束（可重试），成功只凭 lifecycle ended 或 status closed。
+  void _rejected(DesktopFailure failure) {
+    _inflight = null;
+    _queue.clear();
+    if (_closed) {
+      _queryLifecycle();
+      _finishClose(false);
+    } else if (lifecycle?.state != NativeLifecycleState.ended) {
+      _fail('有序输入被拒绝：${failure.name}');
+    }
   }
 
   static (DesktopEvent, DesktopEvent)? _split(DesktopEvent event) {
@@ -665,6 +700,7 @@ class DesktopOrderedSession extends ChangeNotifier {
           index >= 0 &&
           text != null &&
           text.isNotEmpty) {
+        // 超出预算时 _enqueue 已提示并丢弃本次粘贴。
         _enqueue(_chunks(DesktopEventPaste(text: text)), at: index);
       }
     } catch (_) {
