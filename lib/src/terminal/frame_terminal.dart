@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show KeyEvent;
 // 我们的 fork 没把这个类放进公开导出面，但锚点机制依赖它（行身份），
 // 属于有意的实现级依赖，fork 收紧导出面前先直接引。
 // ignore: implementation_imports
@@ -18,7 +19,22 @@ class KeyInputEvent extends TerminalInputEvent {
   final bool shift;
   final bool control;
   final bool alt;
-  const KeyInputEvent(this.key, {this.shift = false, this.control = false, this.alt = false});
+
+  /// 触发本次按键的硬件事件（物理键、是否连发）；软件合成时为 null。
+  final KeyEvent? source;
+
+  /// 硬件事件到达时左/右 Alt 是否按住（由渲染库在当时采样）。
+  final bool leftAlt;
+  final bool rightAlt;
+  const KeyInputEvent(
+    this.key, {
+    this.shift = false,
+    this.control = false,
+    this.alt = false,
+    this.source,
+    this.leftAlt = false,
+    this.rightAlt = false,
+  });
 }
 
 class TextInputEvent extends TerminalInputEvent {
@@ -179,6 +195,21 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
   TerminalGeometry? get measuredGeometry => _measured;
 
   // ── 帧摄入 ──
+
+  /// 来源或 attempt 重置时丢弃旧行身份与展示缓存，不改实测几何。
+  void resetDisplay() {
+    _pool.clear();
+    _buffer.replaceWith([BufferLine(_cols)]);
+    _placeholder = null;
+    _firstStable = _screenTopStable = _windowTopStable = 0;
+    _windowLength = _originShift = 0;
+    _height = 1;
+    _cursorX = _cursorY = 0;
+    _cursorVisible = false;
+    _title = '';
+    _mouseReporting = _alternateScreen = false;
+    notifyListeners();
+  }
 
   void applyFrame(TerminalFrame frame) {
     if (frame.cols != _cols) _placeholder = null;
@@ -380,6 +411,7 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
     if (run.underline) flags |= CellFlags.underline;
     if (run.strike) flags |= CellFlags.strikethrough;
     if (run.reverse) flags |= CellFlags.inverse;
+    if (run.dim) flags |= CellFlags.faint;
     return flags;
   }
 
@@ -560,6 +592,9 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
     bool shift = false,
     bool alt = false,
     bool ctrl = false,
+    KeyEvent? source,
+    bool leftAlt = false,
+    bool rightAlt = false,
   }) {
     var name = keyName(key);
     if (name == null) return false;
@@ -580,6 +615,9 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
         shift: shift,
         control: ctrl || _consumeModifier(_modCtrl),
         alt: alt || _consumeModifier(_modAlt),
+        source: source,
+        leftAlt: leftAlt,
+        rightAlt: rightAlt,
       ),
     );
   }
@@ -711,6 +749,8 @@ class FrameTerminal with ChangeNotifier implements TerminalSurface, TerminalBuff
 
   static const Map<TerminalKey, String> _namedKeyNames = {
     TerminalKey.enter: 'enter',
+    // 小键盘回车与主回车同为 CR，经此带物理键身份发出。
+    TerminalKey.numpadEnter: 'enter',
     TerminalKey.escape: 'escape',
     TerminalKey.tab: 'tab',
     TerminalKey.backspace: 'backspace',

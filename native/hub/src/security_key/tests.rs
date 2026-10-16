@@ -31,6 +31,59 @@ fn registered(key: &VirtualSecurityKey) -> (Registration, PublicKey) {
     (registration, public_key)
 }
 
+#[tokio::test]
+async fn security_key_hint_and_clear_keep_the_owner_identity_outside_its_task() {
+    for desktop in [false, true] {
+        let key = virtual_key();
+        let (registration, _) = registered(&key);
+        let (requests, _questions) = mpsc::unbounded_channel();
+        let (events, mut observed) = mpsc::unbounded_channel();
+        let construct = crate::status_sink::OBSERVER.scope(events, async {
+            SecurityKeySigner::new(
+                Arc::new(key),
+                1,
+                "测试目标".into(),
+                OPENSSH_APPLICATION.into(),
+                registration.credential_id,
+                requests,
+            )
+        });
+        let signer = if desktop {
+            crate::desktop_runtime::SOURCE
+                .scope(
+                    crate::desktop_runtime::Source {
+                        source: crate::signals::desktop_session::DesktopSource {
+                            session_id: 1,
+                            generation: 8,
+                        },
+                        identity: "安全密钥准备身份".into(),
+                    },
+                    construct,
+                )
+                .await
+        } else {
+            construct.await
+        };
+        tokio::spawn(async move { signer.sign(DATA, None).await })
+            .await
+            .expect("签名任务")
+            .expect("安全密钥签名");
+        for hint in ["SecurityKey", "None"] {
+            let (wrapped, event) = observed.recv().await.expect("生产提示出口");
+            assert_eq!(wrapped, desktop);
+            if desktop {
+                assert_eq!(event["source"]["generation"], 8);
+                assert_eq!(event["identity"], "安全密钥准备身份");
+                assert_eq!(event["status"]["hint"], hint);
+            } else {
+                assert!(event.get("source").is_none());
+                assert_eq!(event["hint"], hint);
+            }
+        }
+        assert!(observed.try_recv().is_err());
+    }
+}
+
 /// SSH 数据的读取游标。
 struct Reader<'a>(&'a [u8]);
 

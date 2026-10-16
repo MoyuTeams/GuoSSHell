@@ -2,8 +2,9 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart' show ScrollDirection;
+import 'package:flutter/rendering.dart' show ScrollDirection, RenderProxyBox;
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:rinf/rinf.dart';
@@ -15,7 +16,10 @@ import 'package:terminal_view/terminal_view.dart'
         PointerInputs,
         TerminalController,
         TerminalStyle,
+        TerminalTheme,
         TerminalView,
+        TerminalViewState,
+        SelectionMode,
         TerminalThemes,
         TerminalMouseButton;
 // 字符度量是 fork 的内部工具，但选区菜单的锚点定位要用它
@@ -24,15 +28,26 @@ import 'package:terminal_view/terminal_view.dart'
 import 'package:terminal_view/src/ui/char_metrics.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import 'package:guosh_shell/src/bindings/bindings.dart';
+import 'package:guosh_shell/src/bindings/bindings.dart' hide listEquals;
 
+import '../desktop/interaction/desktop_prompt_dialogs.dart';
+import '../desktop/desktop_theme.dart' show DesktopSpacing;
+import '../desktop/workspace/desktop_workspace_scope.dart';
+import '../platform_target.dart';
 import '../settings/terminal_font.dart';
+import '../settings/interface_font.dart';
+import 'terminal_clipboard_actions.dart';
+import 'terminal_input_mode.dart';
 import 'terminal_zoom.dart';
 import 'frame.dart';
 import 'frame_terminal.dart';
 import 'perf_monitor.dart';
 import 'prompt_dialogs.dart';
 import 'session_target.dart';
+import 'desktop_font.dart';
+import 'desktop_ordered_session.dart';
+import 'desktop_session_controller.dart';
+import 'desktop_session_gateway.dart';
 
 /// 本进程内会话编号（rinf 信号按类型全局广播，靠它分流）。
 int _nextSessionId = 1;
@@ -81,13 +96,36 @@ class TerminalPaneController extends ChangeNotifier {
   SessionState? get state => _state;
   bool get connected => _state == SessionState.connected;
 
+  // 原生输入宿主保留代码但不接线：桌面 V2 窗格也由 Flutter 焦点与 TextInput 输入，
+  // 壳按 Flutter 焦点判断来源，因此以下原生口径恒为「未持有」。
+  bool get ownsNativeInput => false;
+  DesktopSessionController? get normalSession => null;
+  bool get nativeActive => false;
+  bool get nativeEditableSafe => true;
+
+  Future<bool> requestTerminalFocus() async {
+    focusNode.requestFocus();
+    await SchedulerBinding.instance.endOfFrame;
+    return focusNode.hasFocus;
+  }
+
+  Future<bool> quietNativeInput() async => true;
+
+  /// 测试用：替换 [closeSession] 的结果（模拟关闭失败或挂住的会话）。
+  @visibleForTesting
+  Future<bool> Function()? debugCloseSession;
+
+  /// 桌面 V2 会话按序断开并等 Rust 确认结束；旧路径窗格随 widget 卸载断开。
+  Future<bool> closeSession() async =>
+      await (debugCloseSession?.call() ?? _pane?._normal?.close()) ?? true;
+
   /// 当前会话编号（信号按它分流；重连换新编号）。窗格还没布局时为 0。
   int get sessionId => _pane?._sessionId ?? 0;
 
   /// 最近画上的一帧的序号（画面一致性自检按它与 Rust 发出的帧对齐）。
   int get lastFrameSeq => _lastFrameSeq;
   int _lastFrameSeq = 0;
-  bool get canCopy => selection.selection != null;
+  bool get canCopy => selection.selection?.normalized.isCollapsed == false;
 
   /// 复制选区（取文在引擎里）。
   void copy() => _pane?._copySelection();
@@ -127,9 +165,14 @@ class TerminalPaneController extends ChangeNotifier {
 /// 布局完成时发起（几何随连接请求一起带上），窗格从界面上移除即断开。
 class TerminalPane extends StatefulWidget {
   final TerminalPaneController controller;
+  @visibleForTesting
+  final DesktopSessionGateway? desktopGateway;
 
   /// 一个标签里有多个窗格时，活动窗格描一圈边。
   final bool highlighted;
+
+  /// Windows 材质背景可透过画布；其他平台默认保持原来的不透明终端。
+  final double backgroundOpacity;
 
   /// 在窗格里按下（点、拖、选）：它成为活动窗格。
   final VoidCallback onActivate;
@@ -143,7 +186,9 @@ class TerminalPane extends StatefulWidget {
   const TerminalPane({
     super.key,
     required this.controller,
+    this.desktopGateway,
     this.highlighted = false,
+    this.backgroundOpacity = 1,
     required this.onActivate,
     required this.onClose,
     this.onKeyEvent,
@@ -154,6 +199,28 @@ class TerminalPane extends StatefulWidget {
 }
 
 class _TerminalPaneState extends State<TerminalPane> {
+  /// 桌面 V2 会话（Prepare/Start + 有序通道）；移动端为 null，走旧路径。
+  DesktopOrderedSession? _normal;
+  DesktopWorkspaceScope? _scope;
+  bool _branchReady = false;
+  bool _normalDetached = false;
+  String? _normalFontProjection;
+  DesktopPresentedFrame? _appliedNormalFrame;
+
+  /// V2 帧解码失败的提示；下一帧成功应用前保持可见。
+  String _frameError = '';
+
+  /// V2 会话的瞬时提示（如本次粘贴被丢弃），数秒后自动消失。
+  String _notice = '';
+  Timer? _noticeTimer;
+  bool _syncingNormalScroll = false;
+
+  /// 本轮按键/文本刚交给 V2：渲染库随后把视图跳到底部，这一跳不是用户滚动，
+  /// 是否跟随由 Rust 按 profile 的滚动策略决定。
+  bool _inputJump = false;
+
+  /// 已发出 Down 的物理键 → 键名；KeyUp 据此补发同名 Up。
+  final Map<int, String> _pressedKeys = {};
   TerminalPaneController get _controller => widget.controller;
   FrameTerminal get _terminal => widget.controller.terminal;
   TerminalController get _terminalController => widget.controller.selection;
@@ -171,18 +238,55 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   /// Flutter 自带的选区菜单（iOS 上是系统风格气垫）。
   final ContextMenuController _selectionMenu = ContextMenuController();
+  final _inputMode = TerminalInputMode.shared;
+  late final _pointerClipboard = TerminalClipboardActions(
+    selection: () {
+      final selected = _terminalController.selection?.normalized;
+      return selected == null || selected.isCollapsed
+          ? null
+          : (selected.begin, selected.end);
+    },
+    requestCopy: () {
+      final normal = _normal;
+      if (normal != null) {
+        normal.send(const DesktopEventCopy());
+        return;
+      }
+      CopyRequest(sessionId: _sessionId).sendSignalToRust();
+    },
+    writeClipboard: (text) => Clipboard.setData(ClipboardData(text: text)),
+    clearSelection: () {
+      if (!mounted) return;
+      _selectionEcho = null;
+      _terminalController.setExternalSelection(null, null);
+      _sendSelectionRequest(clear: true);
+    },
+    paste: _pasteClipboard,
+    onError: (error) => debugPrint('终端剪贴板操作失败：$error'),
+  );
 
   /// 样式与选区菜单锚点共用缩放后的度量，实际尺寸照常传给远端 PTY。
   late final _settings = SettingsState.latestRustSignal!.message;
-  late final TerminalStyle _baseStyle = terminalStyle(_settings);
-  late final TerminalZoom _zoom = TerminalZoom(
+  TerminalStyle get _baseStyle => terminalStyle(_settings);
+  late TerminalZoom _zoom = TerminalZoom(
     defaultSize: _settings.fontSize,
     minSize: _settings.minFontSize,
     maxSize: _settings.maxFontSize,
   );
-  TerminalStyle get _style => _baseStyle.copyWith(fontSize: _zoom.size);
+  TerminalStyle get _style {
+    final material = _normal?.font.current;
+    return material == null
+        ? _baseStyle.copyWith(fontSize: _zoom.size)
+        : material.layout(zoomFontSize: _zoom.size).style;
+  }
 
   void _onZoomChanged() {
+    _selectionMenu.remove();
+    if (mounted) setState(() {});
+  }
+
+  void _onTerminalFontChanged() {
+    if (_normal != null) return;
     _selectionMenu.remove();
     if (mounted) setState(() {});
   }
@@ -216,14 +320,6 @@ class _TerminalPaneState extends State<TerminalPane> {
   @override
   void initState() {
     super.initState();
-    _statusSub = SessionStatus.rustSignalStream.listen(_onStatus);
-    _frameSub = FrameUpdate.rustSignalStream.listen(_onFrame);
-    _selectionSub = SelectionState.rustSignalStream.listen(_onSelectionState);
-    _clipboardSub = ClipboardText.rustSignalStream.listen(_onClipboardText);
-    _promptSub = InteractionPrompt.rustSignalStream.listen(_onPrompt);
-    if (!kReleaseMode) {
-      _perfSub = PerfStats.rustSignalStream.listen(_onPerfStats);
-    }
     _terminal
       ..onInput = _onTerminalInput
       ..onResize = _onTerminalResize;
@@ -233,14 +329,395 @@ class _TerminalPaneState extends State<TerminalPane> {
     _scroll.addListener(_onScroll);
     _controller._pane = this;
     _zoom.addListener(_onZoomChanged);
+    _inputMode.addListener(_onInputModeChanged);
+    InterfaceTypography.terminal.addListener(_onTerminalFontChanged);
+    // 三个桌面平台都走 V2；移动端保持旧路径。
+    if (appTargetFor(defaultTargetPlatform) == AppTarget.desktop && !kIsWeb) {
+      _startOrdered();
+    } else {
+      _startLegacy();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _scope = DesktopWorkspaceScope.maybeOf(context);
+    if (_normal != null) _scope?.ownsTerminalInput(_controller, true);
+  }
+
+  void _startOrdered() {
+    _sessionId = _nextSessionId++;
+    final normal = DesktopOrderedSession(
+      source: DesktopSource(
+        sessionId: _sessionId,
+        generation: Uint64(BigInt.one),
+      ),
+      target: _controller.target,
+      gateway: widget.desktopGateway ?? const RustDesktopSessionGateway(),
+      font: DesktopFontController(cache: DesktopFontCache()),
+    );
+    _normal = normal;
+    _terminal.resetDisplay();
+    _branchReady = true;
+    _state = SessionState.connecting;
+    normal.performAction = _performAction;
+    normal.readClipboard = () async =>
+        (await Clipboard.getData('text/plain'))?.text;
+    normal.onClipboard = (text) =>
+        unawaited(_pointerClipboard.receiveCopy(text));
+    normal.onNotice = (text) {
+      if (!mounted) return;
+      _noticeTimer?.cancel();
+      _noticeTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted) setState(() => _notice = '');
+      });
+      setState(() => _notice = text);
+    };
+    normal.showPrompt = (message) async {
+      if (!mounted) return;
+      final attempt = normal.lifecycle?.attempt;
+      final answer = await showDesktopPromptDialog(
+        context,
+        message.prompt,
+        normal.dismissed,
+      );
+      if (!mounted || normal.lifecycle?.attempt != attempt) return;
+      normal.answer(
+        message,
+        accept: answer.accept,
+        answers: answer.answers,
+        remember: answer.remember,
+      );
+    };
+    normal
+      ..addListener(_normalChanged)
+      ..begin();
+  }
+
+  void _startLegacy() {
+    // 旧路径（移动端）没有本地 shell 与系统 ssh；不向 Rust 发空主机的连接请求。
+    if (_controller.target.runsLocalProcess) {
+      _state = SessionState.failed;
+      _detail = _controller.target.isLocal ? '本地终端仅在桌面端可用' : '系统 ssh 仅在桌面端可用';
+      return;
+    }
+    _branchReady = true;
+    _statusSub = SessionStatus.rustSignalStream.listen(_onStatus);
+    _frameSub = FrameUpdate.rustSignalStream.listen(_onFrame);
+    _selectionSub = SelectionState.rustSignalStream.listen(_onSelectionState);
+    _clipboardSub = ClipboardText.rustSignalStream.listen(_onClipboardText);
+    _promptSub = InteractionPrompt.rustSignalStream.listen(_onPrompt);
+    if (!kReleaseMode) {
+      _perfSub = PerfStats.rustSignalStream.listen(_onPerfStats);
+    }
     _startSession();
+  }
+
+  void _normalChanged() {
+    final normal = _normal!;
+    if (!mounted || _normalDetached) return;
+    if (_normalFontProjection != normal.font.current?.projection) {
+      _normalFontProjection = normal.font.current?.projection;
+      final material = normal.font.current;
+      if (material != null) {
+        _zoom.removeListener(_onZoomChanged);
+        _zoom.dispose();
+        _zoom = TerminalZoom(
+          defaultSize: material.fontSize,
+          minSize: math.min(_settings.minFontSize, material.fontSize),
+          maxSize: math.max(_settings.maxFontSize, material.fontSize),
+        )..addListener(_onZoomChanged);
+      }
+    }
+    final state = normal.status?.status;
+    final presented = normal.frame;
+    var frameChanged = false;
+    if (presented == null && _appliedNormalFrame != null) {
+      _appliedNormalFrame = null;
+      _frameError = '';
+      _terminal.resetDisplay();
+      _controller._lastFrameSeq = 0;
+      _controller._report(title: '');
+    }
+    if (presented != null && presented != _appliedNormalFrame) {
+      final msg = presented.message.frame;
+      try {
+        _followBottom = presented.projection.followBottom;
+        // 投影的鼠标上报已按 profile 门控；帧自带的只反映远端模式。
+        _terminal
+          ..mouseReporting = presented.projection.mouseReporting
+          ..alternateScreen = msg.alternateScreen
+          ..applyFrame(
+            decodeFrame(
+              presented.binary,
+              cols: msg.cols,
+              rows: msg.rows,
+              cursorCol: msg.cursorCol,
+              cursorRow: msg.cursorRow,
+              firstStableRow: msg.firstStableRow,
+              screenTopStableRow: msg.screenTopStableRow,
+              title: msg.title,
+            ),
+          );
+        _appliedNormalFrame = presented;
+        _frameError = '';
+        frameChanged = true;
+        _controller._lastFrameSeq = msg.seq;
+        _controller._report(title: msg.title);
+        _keepScrollPosition();
+      } catch (error) {
+        // 损坏帧同样结算：记为已处理以免重复解码，并确认该序号让 Rust 放行下一帧。
+        debugPrint('[frame] decode failed: $error');
+        _appliedNormalFrame = presented;
+        _frameError = '画面帧 ${msg.seq} 解码失败，等待下一帧';
+        normal.acknowledgePainted(presented);
+      }
+    }
+    final nativeSelection = normal.frame?.projection.selection;
+    _terminalController.setSelectionMode(
+      nativeSelection?.rectangular == true
+          ? SelectionMode.block
+          : SelectionMode.line,
+    );
+    _selectionEcho = nativeSelection == null
+        ? null
+        : SelectionState(
+            sessionId: _sessionId,
+            hasSelection: true,
+            anchorRow: nativeSelection.startRow,
+            anchorCol: nativeSelection.startCol,
+            focusRow: nativeSelection.endRow,
+            focusCol: nativeSelection.endCol,
+          );
+    _projectSelection();
+    _controller._report(
+      state:
+          state?.state ??
+          (normal.error.isNotEmpty
+              ? SessionState.failed
+              : SessionState.connecting),
+    );
+    setState(() {
+      _state =
+          state?.state ??
+          (normal.error.isNotEmpty
+              ? SessionState.failed
+              : SessionState.connecting);
+      _failure = state?.failure ?? FailureKind.other;
+      _detail = normal.error.isNotEmpty ? normal.error : state?.detail ?? '';
+      _hint = state?.hint ?? ConnectHint.none;
+    });
+    // 本地 shell 或系统 ssh 以退出码 0 结束：与常见终端一致直接关窗格；非 0 保留并提供
+    // 重新启动。离开 closed（重新启动）后允许下一次退出再关闭。
+    if (_state != SessionState.closed && _state != SessionState.cancelled) {
+      _exitClosing = false;
+    }
+    if ((_state == SessionState.cancelled ||
+            (_controller.target.runsLocalProcess &&
+                _state == SessionState.closed &&
+                localShellExitCode(_detail) == 0)) &&
+        !_exitClosing &&
+        !normal.closing &&
+        normal.error.isEmpty) {
+      _exitClosing = true;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.onClose();
+      });
+    }
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (frameChanged && presented != null) _syncNormalScroll(presented);
+      _measureNormal();
+    });
+  }
+
+  /// 本次 closed 已请求关窗格，避免状态重发时重复关闭。
+  bool _exitClosing = false;
+
+  double? _normalScrollOffset(DesktopPresentedFrame original) {
+    if (!_scroll.hasClients || !_scroll.position.hasContentDimensions) {
+      return null;
+    }
+    return original.projection.followBottom
+        ? _scroll.position.maxScrollExtent
+        : ((original.projection.viewportTop - _terminal.firstStableRow) *
+                  _lineHeight)
+              .clamp(0.0, _scroll.position.maxScrollExtent);
+  }
+
+  void _syncNormalScroll(DesktopPresentedFrame original) {
+    if (!mounted || original != _appliedNormalFrame) return;
+    final offset = _normalScrollOffset(original);
+    if (offset == null || (_scroll.offset - offset).abs() < 0.5) return;
+    _syncingNormalScroll = true;
+    try {
+      _scroll.jumpTo(offset);
+    } finally {
+      _syncingNormalScroll = false;
+    }
+  }
+
+  void _measureNormal() {
+    if (!mounted || _normal == null) return;
+    final geometry = _terminal.measuredGeometry;
+    if (geometry == null) return;
+    _normal!.measure(
+      DesktopGeometry(
+        cols: geometry.cols,
+        rows: geometry.rows,
+        pixelWidth: geometry.pixelWidth,
+        pixelHeight: geometry.pixelHeight,
+        dpi: _dpi,
+      ),
+    );
+  }
+
+  /// 帧实际绘制后才确认，Rust 据此放行下一帧。
+  void _normalPainted(DesktopPresentedFrame? original) {
+    if (original == null) return;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _normal == null || original != _appliedNormalFrame) {
+        return;
+      }
+      _normal!.acknowledgePainted(original);
+    });
+  }
+
+  /// Rust 仲裁后交回的壳动作：复制/粘贴/全选由窗格经有序通道完成，其余交工作区。
+  Future<void> _performAction(DesktopAction action) async {
+    if (!mounted) return;
+    switch (action) {
+      case DesktopAction.copy:
+        _copySelection();
+      case DesktopAction.paste:
+        await _pasteClipboard();
+      case DesktopAction.selectAll:
+        _selectAll();
+      default:
+        await _scope?.execute(action, origin: _controller);
+    }
+  }
+
+  /// V2 窗格的 KeyUp：只为已发过 Down 的物理键补发同名 Up（Kitty release 需要）。
+  KeyEventResult _onOrderedKeyEvent(FocusNode node, KeyEvent event) {
+    final normal = _normal;
+    final keyboard = HardwareKeyboard.instance;
+    // macOS ⌘C/⌘V/⌘A：可打印键不带 Ctrl/Alt 时渲染库不会转成按键，这里直接交 Rust 仲裁。
+    if (normal != null &&
+        event is KeyDownEvent &&
+        keyboard.isMetaPressed &&
+        !keyboard.isControlPressed &&
+        !keyboard.isAltPressed &&
+        (_state == SessionState.connected ||
+            _state == SessionState.connecting)) {
+      final action = desktopDefaultAction(
+        event.logicalKey,
+        control: false,
+        shift: keyboard.isShiftPressed,
+        alt: false,
+        meta: true,
+      );
+      if (action != null) {
+        final key = 'character:${event.logicalKey.keyLabel.toLowerCase()}';
+        _pressedKeys[event.physicalKey.usbHidUsage] = key;
+        normal.send(
+          desktopKeyEvent(
+            key: key,
+            phase: DesktopKeyPhase.down,
+            source: event,
+            shift: keyboard.isShiftPressed,
+            control: false,
+            alt: false,
+            leftAlt: false,
+            rightAlt: false,
+            superKey: true,
+          ),
+        );
+        return KeyEventResult.handled;
+      }
+    }
+    if (normal != null && event is KeyUpEvent) {
+      final key = _pressedKeys.remove(event.physicalKey.usbHidUsage);
+      if (key != null &&
+          (_state == SessionState.connected ||
+              _state == SessionState.connecting)) {
+        final pressed = keyboard.physicalKeysPressed;
+        normal.send(
+          desktopKeyEvent(
+            key: key,
+            phase: DesktopKeyPhase.up,
+            source: event,
+            shift: keyboard.isShiftPressed,
+            control: keyboard.isControlPressed,
+            alt: keyboard.isAltPressed,
+            leftAlt: pressed.contains(PhysicalKeyboardKey.altLeft),
+            rightAlt: pressed.contains(PhysicalKeyboardKey.altRight),
+            superKey: keyboard.isMetaPressed,
+          ),
+        );
+      }
+    }
+    return widget.onKeyEvent?.call(node, event) ?? KeyEventResult.ignored;
+  }
+
+  /// V2：输入交有序通道，终端 profile（绑定、Alt、编码、鼠标、滚动）在 Rust 生效。
+  bool _sendOrdered(TerminalInputEvent event) {
+    final normal = _normal!;
+    if (event is! MouseInputEvent && !_inputJump) {
+      _inputJump = true;
+      scheduleMicrotask(() => _inputJump = false);
+    }
+    normal.send(switch (event) {
+      KeyInputEvent() => _orderedKey(event),
+      TextInputEvent(:final text) => DesktopEventText(text: text),
+      PasteInputEvent(:final text) => DesktopEventPaste(text: text),
+      MouseInputEvent() => DesktopEventMouse(
+        kind: _mouseKind(event),
+        button: _mouseButton(event.button),
+        col: event.position.x,
+        row: event.position.y,
+        shift: event.shift,
+        control: event.ctrl,
+        alt: event.alt,
+      ),
+    });
+    return true;
+  }
+
+  /// 硬件按键记下物理键以便补发 Up；键位条等软件按键走 SoftKey。
+  DesktopEvent _orderedKey(KeyInputEvent event) {
+    final source = event.source;
+    if (source != null) {
+      _pressedKeys[source.physicalKey.usbHidUsage] = event.key;
+    }
+    return desktopOrderedKey(
+      event,
+      metaPressed: HardwareKeyboard.instance.isMetaPressed,
+    );
   }
 
   @override
   void dispose() {
+    final normal = _normal;
+    if (normal != null) {
+      _normalDetached = true;
+      _scope?.ownsTerminalInput(_controller, false);
+      normal.removeListener(_normalChanged);
+      normal.performAction = null;
+      normal.readClipboard = null;
+      normal.showPrompt = null;
+      normal.onClipboard = null;
+      normal.onNotice = null;
+      unawaited(normal.detach());
+    }
+    _noticeTimer?.cancel();
     // 窗格从界面上移除（关窗格、关标签、离开工作区）即结束会话：连接中的一并取消，断开后
     // 还在等重连的也结束；只有连接前被取消的会话 Rust 那边已经收掉了。
-    if (_sessionId != 0 && _state != SessionState.cancelled) {
+    // 先告知桌面弹窗拒绝，再注销提示监听。弹窗路由可能位于仍存在的工作区 Navigator 上。
+    if (appTargetFor(defaultTargetPlatform) == AppTarget.desktop) {
+      _promptsDismissed.value = true;
+    }
+    if (normal == null && _sessionId != 0 && _state != SessionState.cancelled) {
       DisconnectRequest(sessionId: _sessionId).sendSignalToRust();
     }
     if (_controller._pane == this) _controller._pane = null;
@@ -251,12 +728,15 @@ class _TerminalPaneState extends State<TerminalPane> {
     _perfSub?.cancel();
     _promptSub?.cancel();
     _promptsDismissed.dispose();
+    _pointerClipboard.dispose();
+    _inputMode.removeListener(_onInputModeChanged);
     _terminalController
       ..removeListener(_onSelectionChanged)
       ..onSelectionIntent = null;
     _selectionMenu.remove();
     _resizeTimer?.cancel();
     _zoom.dispose();
+    InterfaceTypography.terminal.removeListener(_onTerminalFontChanged);
     _scroll.dispose();
     super.dispose();
   }
@@ -295,8 +775,11 @@ class _TerminalPaneState extends State<TerminalPane> {
   Future<void> _onPrompt(RustSignalPack<InteractionPrompt> pack) async {
     final prompt = pack.message;
     if (!mounted || prompt.sessionId != _sessionId) return;
-    final answer = await showPromptDialog(context, prompt, _promptsDismissed);
-    if (prompt.sessionId != _sessionId) return;
+    final answer =
+        await (appTargetFor(defaultTargetPlatform) == AppTarget.desktop
+            ? showDesktopPromptDialog(context, prompt, _promptsDismissed)
+            : showPromptDialog(context, prompt, _promptsDismissed));
+    if (!mounted || prompt.sessionId != _sessionId) return;
     InteractionReply(
       sessionId: prompt.sessionId,
       promptId: prompt.promptId,
@@ -413,6 +896,35 @@ class _TerminalPaneState extends State<TerminalPane> {
   /// 内容变矮后的回弹、尺寸变化的校正这些没人要的位移只会回到底部（回弹动画还瞄着旧的
   /// 底部时输出继续增长，按位置判断就会误以为用户滚上去了，从此不再跟着屏幕）。
   void _onScroll() {
+    if (_normal != null) {
+      if (_syncingNormalScroll || _state != SessionState.connected) return;
+      if (!_scroll.hasClients || !_scroll.position.hasContentDimensions) return;
+      if (_inputJump) {
+        // 渲染库在按键后自行跳底；不当作用户滚动，下一帧回到 Rust 给的视口。
+        final applied = _appliedNormalFrame;
+        if (applied != null) {
+          SchedulerBinding.instance
+            ..addPostFrameCallback((_) => _syncNormalScroll(applied))
+            ..ensureVisualUpdate();
+        }
+        return;
+      }
+      final line = _lineHeight;
+      final follow =
+          _scroll.offset >= _scroll.position.maxScrollExtent - line / 2;
+      _normal!.send(
+        DesktopEventViewport(
+          followBottom: follow,
+          topStableRow: follow
+              ? 0
+              : _terminal.firstStableRow + (_scroll.offset / line).floor(),
+          rows: follow
+              ? 0
+              : (_scroll.position.viewportDimension / line).ceil() + 1,
+        ),
+      );
+      return;
+    }
     if (!mounted || !_scroll.hasClients || _state != SessionState.connected) {
       return;
     }
@@ -482,6 +994,16 @@ class _TerminalPaneState extends State<TerminalPane> {
     if (!_followBottom) {
       _followBottom = true;
       _window = null;
+      if (_normal != null) {
+        _normal!.send(
+          const DesktopEventViewport(
+            followBottom: true,
+            topStableRow: 0,
+            rows: 0,
+          ),
+        );
+        return;
+      }
       ViewportRequest(
         sessionId: _sessionId,
         followBottom: true,
@@ -494,12 +1016,12 @@ class _TerminalPaneState extends State<TerminalPane> {
   /// 引擎取文回来 → 进剪贴板 + 清选区（对齐 Termux）。
   void _onClipboardText(RustSignalPack<ClipboardText> pack) {
     if (!mounted || pack.message.sessionId != _sessionId) return;
-    Clipboard.setData(ClipboardData(text: pack.message.text));
-    _sendSelectionRequest(clear: true);
+    unawaited(_pointerClipboard.receiveCopy(pack.message.text));
   }
 
   /// fork 上报的选区意图 → 换算成引擎绝对行 → 发 SelectionRequest。
   void _onSelectionIntent(CellOffset? begin, CellOffset? end) {
+    if (!_branchReady) return;
     if (_state != SessionState.connected) return;
     if (begin == null || end == null) {
       _sendSelectionRequest(clear: true);
@@ -508,6 +1030,19 @@ class _TerminalPaneState extends State<TerminalPane> {
     final anchorRow = _terminal.stableRowAt(begin.y);
     final focusRow = _terminal.stableRowAt(end.y);
     if (anchorRow == null || focusRow == null) return;
+    if (_normal != null) {
+      _normal!.send(
+        DesktopEventSelection(
+          clear: false,
+          anchorRow: anchorRow,
+          anchorCol: begin.x,
+          focusRow: focusRow,
+          focusCol: end.x,
+          rectangular: false,
+        ),
+      );
+      return;
+    }
     SelectionRequest(
       sessionId: _sessionId,
       clear: false,
@@ -520,6 +1055,19 @@ class _TerminalPaneState extends State<TerminalPane> {
   }
 
   void _sendSelectionRequest({required bool clear}) {
+    if (_normal != null) {
+      _normal!.send(
+        DesktopEventSelection(
+          clear: clear,
+          anchorRow: 0,
+          anchorCol: 0,
+          focusRow: 0,
+          focusCol: 0,
+          rectangular: false,
+        ),
+      );
+      return;
+    }
     SelectionRequest(
       sessionId: _sessionId,
       clear: clear,
@@ -534,9 +1082,11 @@ class _TerminalPaneState extends State<TerminalPane> {
   /// fork 的输入口 → rinf → Rust（键编码权威在 encode_input）。
   /// 连接中的输入也照发：Rust 连上后按顺序补上（type-ahead）。
   bool _onTerminalInput(TerminalInputEvent event) {
+    if (!_branchReady) return false;
     if (_state != SessionState.connected && _state != SessionState.connecting) {
       return false;
     }
+    if (_normal != null) return _sendOrdered(event);
     if (event is! MouseInputEvent) _scrollToBottom();
     switch (event) {
       case KeyInputEvent(:final key, :final shift, :final control, :final alt):
@@ -587,16 +1137,7 @@ class _TerminalPaneState extends State<TerminalPane> {
                   MouseAction.release => 'release',
                   MouseAction.move => 'move',
                 },
-          button: switch (button) {
-            TerminalMouseButton.left => 'left',
-            TerminalMouseButton.middle => 'middle',
-            TerminalMouseButton.right => 'right',
-            TerminalMouseButton.wheelUp => 'wheel_up',
-            TerminalMouseButton.wheelDown => 'wheel_down',
-            TerminalMouseButton.wheelLeft ||
-            TerminalMouseButton.wheelRight ||
-            null => '',
-          },
+          button: _mouseButton(button),
           col: position.x,
           row: position.y,
           shift: shift,
@@ -607,10 +1148,34 @@ class _TerminalPaneState extends State<TerminalPane> {
     return true;
   }
 
+  static String _mouseKind(MouseInputEvent event) =>
+      event.button != null && event.button!.isWheel
+      ? 'scroll'
+      : switch (event.action) {
+          MouseAction.press => 'press',
+          MouseAction.release => 'release',
+          MouseAction.move => 'move',
+        };
+
+  static String _mouseButton(TerminalMouseButton? button) => switch (button) {
+    TerminalMouseButton.left => 'left',
+    TerminalMouseButton.middle => 'middle',
+    TerminalMouseButton.right => 'right',
+    TerminalMouseButton.wheelUp => 'wheel_up',
+    TerminalMouseButton.wheelDown => 'wheel_down',
+    TerminalMouseButton.wheelLeft ||
+    TerminalMouseButton.wheelRight ||
+    null => '',
+  };
+
   /// fork 的 render 在布局期报几何（只在变化时）→ Rust（度量的权威在 Flutter）。
   /// 有待发的连接请求时带着真实几何发 ConnectRequest——否则远端 PTY 只能按
   /// 缺省 2×2 建立，exec 输出会在换行历史里塞满垃圾。
   void _onTerminalResize(TerminalGeometry geometry) {
+    if (_normal != null) {
+      SchedulerBinding.instance.addPostFrameCallback((_) => _measureNormal());
+      return;
+    }
     if (_connectPending) {
       _flushPendingConnect();
       return;
@@ -672,11 +1237,18 @@ class _TerminalPaneState extends State<TerminalPane> {
   TerminalGeometry? _sentGeometry;
   Timer? _resizeTimer;
 
-  /// 选区变化 → 系统风格的选区菜单（Flutter 自带，iOS 上渲染成气垫）。
-  /// 选区清空时收起。
+  void _onInputModeChanged() {
+    if (!_inputMode.touch) _selectionMenu.remove();
+  }
+
+  /// 只有触屏选区显示浮动菜单；鼠标选区仅高亮，由右键直接复制或粘贴。
   void _onSelectionChanged() {
     if (!mounted) return;
-    if (_terminalController.selection == null) {
+    if (!_inputMode.touch) {
+      _selectionMenu.remove();
+      return;
+    }
+    if (_terminalController.selection?.normalized.isCollapsed != false) {
       _selectionMenu.remove();
       return;
     }
@@ -729,10 +1301,11 @@ class _TerminalPaneState extends State<TerminalPane> {
     );
   }
 
-  /// 复制选区：取文在引擎里（Dart 不碰 BufferLine），发请求等 ClipboardText。
+  /// 复制选区：取文在引擎里（Dart 不碰 BufferLine），发请求等 ClipboardText
+  /// （V2 为有序 Copy → DesktopClipboard）。
   void _copySelection() {
     if (_state != SessionState.connected) return;
-    CopyRequest(sessionId: _sessionId).sendSignalToRust();
+    _pointerClipboard.copy();
   }
 
   /// 全选：滚回与屏幕的全部内容（引擎的选区终点列是排除式的，所以终点取列数）。
@@ -741,6 +1314,19 @@ class _TerminalPaneState extends State<TerminalPane> {
     final first = _terminal.stableRowAt(0);
     final last = _terminal.stableRowAt(_terminal.height - 1);
     if (first == null || last == null) return;
+    if (_normal != null) {
+      _normal!.send(
+        DesktopEventSelection(
+          clear: false,
+          anchorRow: first,
+          anchorCol: 0,
+          focusRow: last,
+          focusCol: _terminal.viewWidth,
+          rectangular: false,
+        ),
+      );
+      return;
+    }
     SelectionRequest(
       sessionId: _sessionId,
       clear: false,
@@ -752,15 +1338,24 @@ class _TerminalPaneState extends State<TerminalPane> {
     ).sendSignalToRust();
   }
 
-  /// 系统剪贴板 → 远端（bracketed paste 等由 Rust 按远端模式处理）。
+  /// 系统剪贴板 → 远端（bracketed paste 等由 Rust 按远端模式处理；V2 经有序 Paste）。
   Future<void> _pasteClipboard() async {
+    final normal = _normal;
+    if (normal != null) {
+      await normal.pasteClipboard();
+      return;
+    }
     final text = (await Clipboard.getData('text/plain'))?.text;
-    if (text == null || text.isEmpty) return;
+    if (!mounted || text == null || text.isEmpty) return;
     _terminal.paste(text);
   }
 
   /// 断开之后再连：同一会话，画面与滚回保留，新的输出接在后面。
   void _reconnect() {
+    if (_normal != null) {
+      unawaited(_normal!.reconnect());
+      return;
+    }
     _promptsDismissed.value = false;
     _controller._report(state: SessionState.connecting);
     setState(() {
@@ -775,6 +1370,7 @@ class _TerminalPaneState extends State<TerminalPane> {
 
   /// 发起会话：分配编号，等终端量好几何后发 ConnectRequest。
   void _startSession() {
+    _pointerClipboard.cancelCopy();
     _sessionId = _nextSessionId++;
     _promptsDismissed.value = false;
     _selectionEcho = null;
@@ -806,7 +1402,17 @@ class _TerminalPaneState extends State<TerminalPane> {
   @override
   Widget build(BuildContext context) {
     final title = _controller.target.title;
-    final banner = switch (_state) {
+    final bannerState = _normal?.error.isNotEmpty == true
+        ? SessionState.failed
+        : _state;
+    final local = _controller.target.isLocal;
+    final process = _controller.target.runsLocalProcess;
+    final exitCode = process ? localShellExitCode(_detail) : null;
+    final banner = switch (bannerState) {
+      SessionState.connecting when local => _Banner(
+        icon: Icons.sync,
+        text: '正在启动 $title…',
+      ),
       SessionState.connecting => switch (_hint) {
         ConnectHint.touchCard => _Banner(
           icon: Icons.touch_app_outlined,
@@ -836,12 +1442,26 @@ class _TerminalPaneState extends State<TerminalPane> {
               onPressed: () => _openSettings(_localNetworkSettingsUrl),
               child: const Text('打开设置'),
             ),
-          TextButton(onPressed: _reconnect, child: const Text('重试')),
+          if ((_normal == null && _sessionId != 0) || _normal?.started == true)
+            TextButton(onPressed: _reconnect, child: const Text('重试')),
           TextButton(onPressed: widget.onClose, child: const Text('关闭')),
         ],
         hint: _localNetworkSettingsUrl.isEmpty
             ? null
             : '服务器在局域网内时，需要允许 GuoSSHell 访问本地网络。',
+      ),
+      SessionState.closed when process => _Banner(
+        icon: Icons.link_off,
+        text: exitCode == null ? '进程已退出' : '进程已退出（代码 $exitCode）',
+        detail: exitCode == null ? _detail : '',
+        actions: [
+          // 系统 ssh 重新运行即重新连接。
+          TextButton(
+            onPressed: _reconnect,
+            child: Text(local ? '重新启动' : '重新连接'),
+          ),
+          TextButton(onPressed: widget.onClose, child: const Text('关闭')),
+        ],
       ),
       SessionState.closed => _Banner(
         icon: Icons.link_off,
@@ -852,11 +1472,21 @@ class _TerminalPaneState extends State<TerminalPane> {
           TextButton(onPressed: widget.onClose, child: const Text('关闭')),
         ],
       ),
+      _ when _notice.isNotEmpty => _Banner(
+        icon: Icons.info_outline,
+        text: _notice,
+      ),
+      _ when _frameError.isNotEmpty => _Banner(
+        icon: Icons.broken_image_outlined,
+        text: '终端画面更新失败',
+        detail: _frameError,
+        error: true,
+      ),
       _ => null,
     };
 
     // 按下即成为活动窗格（不参与手势竞争，选区、滚动照常）。
-    return Listener(
+    final pane = Listener(
       onPointerDown: (_) => widget.onActivate(),
       child: DecoratedBox(
         position: DecorationPosition.foreground,
@@ -869,7 +1499,9 @@ class _TerminalPaneState extends State<TerminalPane> {
               : null,
         ),
         child: ColoredBox(
-          color: Colors.black,
+          color: widget.backgroundOpacity == 1
+              ? _normal?.theme?.background ?? Colors.black
+              : Colors.transparent,
           child: Stack(
             children: [
               Positioned.fill(
@@ -886,14 +1518,29 @@ class _TerminalPaneState extends State<TerminalPane> {
                   child: TerminalZoomSurface(
                     zoom: _zoom,
                     onStart: widget.onActivate,
-                    child: _TerminalSurface(
+                    child: TerminalViewport(
                       key: _terminalSurfaceKey,
                       terminal: _terminal,
                       controller: _terminalController,
                       scrollController: _scroll,
                       focusNode: _terminalFocus,
                       style: _style,
-                      onKeyEvent: widget.onKeyEvent,
+                      theme: _normal?.theme ?? TerminalThemes.defaultTheme,
+                      // V2 的复制/粘贴/全选等组合键先交 Rust 按 profile 仲裁。
+                      localShortcuts: _normal == null,
+                      painted: _normal == null
+                          ? null
+                          : () => _normalPainted(_appliedNormalFrame),
+                      onKeyEvent: _normal == null
+                          ? widget.onKeyEvent
+                          : _onOrderedKeyEvent,
+                      inputMode: _inputMode,
+                      onSecondaryTap: () {
+                        if (_state != SessionState.connected) return;
+                        _terminalFocus.requestFocus();
+                        unawaited(_pointerClipboard.rightClick());
+                      },
+                      backgroundOpacity: widget.backgroundOpacity,
                     ),
                   ),
                 ),
@@ -906,52 +1553,148 @@ class _TerminalPaneState extends State<TerminalPane> {
         ),
       ),
     );
+    return pane;
   }
 }
 
 /// fork 的 TerminalView 需要有界高度（内部是 Scrollable）。
 /// 会话期常驻（连接前也要完成首次布局，几何才能随 ConnectRequest 发出）。
-class _TerminalSurface extends StatelessWidget {
+class TerminalViewport extends StatelessWidget {
+  final GlobalKey<TerminalViewState>? viewKey;
+  final bool nativeInput;
+  final bool nativeFocused;
+
+  /// 为 false 时不装本地复制/粘贴/全选快捷键（桌面 V2 交 Rust 仲裁）。
+  final bool localShortcuts;
+  final VoidCallback? painted;
   final FrameTerminal terminal;
   final TerminalController controller;
   final ScrollController scrollController;
   final FocusNode focusNode;
   final TerminalStyle style;
+  final TerminalTheme theme;
+  final double backgroundOpacity;
+  final TerminalInputMode inputMode;
+  final VoidCallback? onSecondaryTap;
   final KeyEventResult Function(FocusNode node, KeyEvent event)? onKeyEvent;
 
-  const _TerminalSurface({
+  const TerminalViewport({
     super.key,
     required this.terminal,
     required this.controller,
     required this.scrollController,
     required this.focusNode,
     required this.style,
+    this.theme = TerminalThemes.defaultTheme,
+    required this.backgroundOpacity,
+    required this.inputMode,
+    this.onSecondaryTap,
     this.onKeyEvent,
+    this.viewKey,
+    this.nativeInput = false,
+    this.nativeFocused = false,
+    this.localShortcuts = true,
+    this.painted,
   });
 
   @override
   Widget build(BuildContext context) {
     // 滚动条跟着 fork 的 Scrollable（滚回）；远端接管滚动时 fork 不滚，也就不显示。
-    return Scrollbar(controller: scrollController, child: _terminalView());
+    return ListenableBuilder(
+      listenable: inputMode,
+      builder: (context, _) => Listener(
+        onPointerDown: (event) => inputMode.pointer(event.kind),
+        onPointerHover: (event) {
+          if (!event.synthesized && event.kind == PointerDeviceKind.mouse) {
+            inputMode.pointer(event.kind);
+          }
+        },
+        onPointerSignal: (event) => inputMode.pointer(event.kind),
+        onPointerPanZoomStart: (event) => inputMode.pointer(event.kind),
+        child: Scrollbar(
+          controller: scrollController,
+          thickness: nativeInput ? DesktopSpacing.sm : null,
+          interactive: nativeInput ? true : null,
+          child: nativeInput
+              ? Padding(
+                  padding: const EdgeInsets.only(right: DesktopSpacing.sm),
+                  child: _terminalView(),
+                )
+              : _terminalView(),
+        ),
+      ),
+    );
   }
 
   Widget _terminalView() {
-    return TerminalView(
+    final view = TerminalView(
+      key: viewKey,
       terminal,
       controller: controller,
       scrollController: scrollController,
       focusNode: focusNode,
-      onKeyEvent: onKeyEvent,
+      onKeyEvent: (node, event) {
+        if (!event.synthesized &&
+            (event is KeyDownEvent || event is KeyRepeatEvent)) {
+          inputMode.keyboard();
+        }
+        return onKeyEvent?.call(node, event) ?? KeyEventResult.ignored;
+      },
       autoResize: true,
-      shortcuts: _terminalShortcuts,
+      shortcuts: nativeInput || !localShortcuts ? const {} : _terminalShortcuts,
+      readOnly: nativeInput,
+      alwaysShowCursor: nativeInput && nativeFocused,
+      hardwareKeyboardOnly: nativeInput,
+      simulateScroll: !nativeInput,
       // iOS 软键盘的退格不产生硬件按键事件，必须靠编辑增量探测
       // （fork 的 onDelete → keyInput(backspace)）。
-      deleteDetection: true,
+      deleteDetection: !nativeInput,
       textStyle: style,
-      theme: TerminalThemes.defaultTheme,
+      theme: theme,
+      backgroundOpacity: backgroundOpacity,
+      showSelectionHandles: !nativeInput && inputMode.touch,
+      // 渲染库仅在事件没有交给远端鼠标模式时调用此回调；Shift 可保留本地操作。
+      onSecondaryTapUp: onSecondaryTap == null
+          ? null
+          : (_, _) => onSecondaryTap!(),
+      // 保持非 multiline：multiline 会让平台在 performAction 之外再插入 "\n"，回车双发。
       keyboardType: TextInputType.emailAddress,
       keyboardAppearance: Brightness.dark,
     );
+    // 原生输入（含分支未定期间）只从祖先屏蔽焦点，不改写共享 focusNode 自身的
+    // canRequestFocus；否则转入 legacy 后该节点仍不可聚焦，拿不到 TextInput 连接。
+    final surface = nativeInput
+        ? ExcludeFocus(child: IgnorePointer(child: view))
+        : view;
+    return painted == null
+        ? surface
+        : _PresentedPaint(onPaint: painted!, child: surface);
+  }
+}
+
+class _PresentedPaint extends SingleChildRenderObjectWidget {
+  const _PresentedPaint({required this.onPaint, required super.child});
+  final VoidCallback onPaint;
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _PresentedPaintBox(onPaint);
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _PresentedPaintBox renderObject,
+  ) {
+    renderObject.onPaint = onPaint;
+    renderObject.markNeedsPaint();
+  }
+}
+
+class _PresentedPaintBox extends RenderProxyBox {
+  _PresentedPaintBox(this.onPaint);
+  VoidCallback onPaint;
+  @override
+  void paint(PaintingContext context, Offset offset) {
+    super.paint(context, offset);
+    onPaint();
   }
 }
 

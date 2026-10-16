@@ -23,8 +23,11 @@ void main() {
   final report = <String, Object>{'device': m6Device};
 
   setUpAll(startRust);
+  tearDownAll(stopRust);
   // 截图也存在 reportData 里（screenshots）：合并，不覆盖。
-  tearDownAll(() => binding.reportData = {...?binding.reportData, 'tui': report});
+  tearDownAll(
+    () => binding.reportData = {...?binding.reportData, 'tui': report},
+  );
 
   for (final entry in _tuis.entries) {
     final name = entry.key;
@@ -41,9 +44,21 @@ void main() {
 
       // B1 进入：备用屏、铺满、签名字样。
       await app.type('m6-tui $name\r');
-      await app.waitFor(() => app.pane.terminal.isUsingAltBuffer, '$name 进入备用屏', timeout: const Duration(seconds: 15));
-      await app.waitFor(() => tui.signature.any(app.screenText().contains), '$name 画出界面', timeout: const Duration(seconds: 15));
-      expect(app.screenText(), isNot(contains('M6-BEFORE')), reason: '备用屏与主屏隔离');
+      await app.waitFor(
+        () => app.pane.terminal.isUsingAltBuffer,
+        '$name 进入备用屏',
+        timeout: const Duration(seconds: 15),
+      );
+      await app.waitFor(
+        () => tui.signature.any(app.screenText().contains),
+        '$name 画出界面',
+        timeout: const Duration(seconds: 15),
+      );
+      expect(
+        app.screenText(),
+        isNot(contains('M6-BEFORE')),
+        reason: '备用屏与主屏隔离',
+      );
 
       // B2 运行：6 秒的度量（高刷新下的帧率与显示延迟）。
       await app.flushPerf();
@@ -57,9 +72,14 @@ void main() {
       final size = tester.view.physicalSize / tester.view.devicePixelRatio;
       final colsBefore = app.pane.terminal.viewWidth;
       await resizeView(tester, Size(size.height, size.width));
-      await app.waitFor(() => app.pane.terminal.viewWidth != colsBefore, '$name 收到新尺寸', timeout: const Duration(seconds: 10));
+      await app.waitFor(
+        () => app.pane.terminal.viewWidth != colsBefore,
+        '$name 收到新尺寸',
+        timeout: const Duration(seconds: 10),
+      );
       await tester.pump(const Duration(seconds: 2));
-      result['resized_to'] = '${app.pane.terminal.viewWidth}x${app.pane.terminal.viewHeight}';
+      result['resized_to'] =
+          '${app.pane.terminal.viewWidth}x${app.pane.terminal.viewHeight}';
       // 这里改的是视图的物理尺寸（框架层的替身），系统截图不反映它；真实旋转的截图在 XCUITest 里。
       final resized = await app.screenMismatches();
       result['resized_mismatches'] = resized.length;
@@ -77,19 +97,28 @@ void main() {
       await app.waitIdle();
       final terminal = app.pane.terminal;
       final line = app.logicalLines().firstWhere((l) => l.contains('M6-MODES'));
-      final modes = jsonDecode(line.substring(line.indexOf('{'))) as Map<String, dynamic>;
+      final modes =
+          jsonDecode(line.substring(line.indexOf('{'))) as Map<String, dynamic>;
       result['modes_after'] = modes;
       result['scrollback_growth'] = terminal.height - heightBeforeQuit;
       result['scrollback_growth_total'] = terminal.height - heightBefore;
       await app.screenshot('tui-$name-exited');
       expect(terminal.isUsingAltBuffer, isFalse);
-      expect(app.screenText(), contains('M6-BEFORE $name'), reason: '进入前的画面要回来');
+      expect(
+        app.screenText(),
+        contains('M6-BEFORE $name'),
+        reason: '进入前的画面要回来',
+      );
       expect(modes['1049'], 2, reason: '退出后不在备用屏');
       for (final mouse in ['1000', '1002', '1003', '1006']) {
         expect(modes[mouse], 2, reason: '鼠标上报 $mouse 应已关闭');
       }
       expect(modes['25'], 1, reason: '光标可见');
-      expect(terminal.height - heightBeforeQuit, lessThan(12), reason: 'TUI 的画面不该进滚回');
+      expect(
+        terminal.height - heightBeforeQuit,
+        lessThan(12),
+        reason: 'TUI 的画面不该进滚回',
+      );
       final problems = await app.screenMismatches();
       expect(problems, isEmpty, reason: problems.join('\n'));
       expect(resized, isEmpty, reason: '改尺寸后：${resized.join('\n')}');
@@ -101,8 +130,14 @@ void main() {
     final app = M6App(tester, binding);
     await app.open();
     await app.waitScreen('probe@');
-    await app.type('clear; timeout --foreground -s KILL 3 btop; echo M6-KILLED-\$?\r');
-    await app.waitFor(() => app.pane.terminal.isUsingAltBuffer, 'btop 进入备用屏', timeout: const Duration(seconds: 10));
+    await app.type(
+      'clear; timeout --foreground -s KILL 3 btop; echo M6-KILLED-\$?\r',
+    );
+    await app.waitFor(
+      () => app.pane.terminal.isUsingAltBuffer,
+      'btop 进入备用屏',
+      timeout: const Duration(seconds: 10),
+    );
     // btop 每帧都包在同步输出里：被杀在一帧中途也要显示后面的输出。
     await app.waitScreen('M6-KILLED-137', timeout: const Duration(seconds: 10));
     await app.screenshot('tui-btop-killed');

@@ -67,7 +67,12 @@ def package_deb(bundle, output, version, arch):
     (root / "usr/bin/guosshell").symlink_to("../lib/guosshell/guosh_shell")
     desktop = root / "usr/share/applications/guosshell.desktop"
     desktop.parent.mkdir(parents=True)
-    desktop.write_text("[Desktop Entry]\nType=Application\nName=GuoSSHell\nExec=guosshell\nTerminal=false\nCategories=Network;RemoteAccess;\n")
+    # StartupWMClass 即 linux/CMakeLists.txt 的 APPLICATION_ID，桌面环境据此把运行中的窗口对应到本条目与图标。
+    desktop.write_text(
+        "[Desktop Entry]\nType=Application\nName=GuoSSHell\nExec=guosshell\nIcon=guosshell\n"
+        "StartupWMClass=com.guosshell.guosh_shell\nTerminal=false\nCategories=Network;RemoteAccess;\n"
+    )
+    shutil.copytree(ROOT / "linux/icons", root / "usr/share/icons/hicolor")
     control = root / "DEBIAN/control"
     control.parent.mkdir()
     control.write_text(

@@ -197,6 +197,50 @@ void main() {
     }
   });
 
+  test('attrs 第 7 位（dim）解码后对应单元格带 faint，其余不带', () {
+    final bytes = BytesBuilder();
+    void u16(int value) => bytes.add(
+      (ByteData(2)..setUint16(0, value, Endian.little)).buffer.asUint8List(),
+    );
+    void textRun(int start, String text, int attrs) {
+      u16(start);
+      u16(text.length);
+      bytes.add([0, 0, attrs]);
+      bytes.add(
+        (ByteData(
+          4,
+        )..setUint32(0, text.length, Endian.little)).buffer.asUint8List(),
+      );
+      bytes.add(utf8.encode(text));
+    }
+
+    u16(1); // 一行。
+    u16(2); // 两个 run。
+    bytes.add(List.filled(9, 0)); // stable_row 与 wrapped。
+    textRun(0, 'DIM', Attr.dim | Attr.bold);
+    textRun(3, 'N', 0);
+    final decoded = decodeFrame(
+      bytes.takeBytes(),
+      cols: 4,
+      rows: 1,
+      cursorCol: -1,
+      cursorRow: -1,
+      firstStableRow: 0,
+      screenTopStableRow: 0,
+    );
+    final runs = decoded.lines.single.runs;
+    expect(runs[0].dim, isTrue);
+    expect(runs[0].bold, isTrue, reason: '旧位含义不变');
+    expect(runs[1].dim, isFalse);
+
+    final line = (FrameTerminal()..applyFrame(decoded)).lineAt(0);
+    for (var col = 0; col < 3; col++) {
+      expect(line.getAttributes(col) & CellFlags.faint, CellFlags.faint);
+      expect(line.getAttributes(col) & CellFlags.bold, CellFlags.bold);
+    }
+    expect(line.getAttributes(3) & CellFlags.faint, 0);
+  });
+
   test('布局变了的行不复用对象（只比 text 会漏掉宽度变化）', () {
     final terminal = FrameTerminal();
     FrameRow wide(List<int> layout, int len) => FrameRow(

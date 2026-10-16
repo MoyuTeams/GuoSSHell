@@ -3,6 +3,7 @@
 name = "hub"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 publish = false
 
 [lib]
@@ -11,6 +12,76 @@ publish = false
 # `cdylib` is for Linux, Android, Windows, and web.
 # `staticlib` is for iOS and macOS.
 crate-type = ["lib", "cdylib", "staticlib"]
+
+[features]
+native-input-spike = []
+# 实验候选测试（selected_p1 资源证书/allocator 审计，及依赖它的 local_shell owner、
+# system_ssh scope/helper）。不进入默认 `cargo test --workspace`，由 CI 独立步骤运行。
+experimental-candidates = []
+
+[[test]]
+name = "selected_p1_allocator_audit"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_control_runtime"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_decode_shape"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_domain_decode"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_font_provider"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_font_source"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_foundation"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_helper_artifact"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_helper_runtime"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_native_network"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_reply_port"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "selected_p1_session_owner"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "desktop_local_shell"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "desktop_local_shell_production"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "desktop_system_ssh_helper"
+required-features = ["experimental-candidates"]
+
+[[test]]
+name = "desktop_system_ssh_scope"
+required-features = ["experimental-candidates"]
 
 [lints.clippy]
 unwrap_used = "deny"
@@ -44,13 +115,21 @@ p256 = { version = "0.14", features = ["ecdsa"] }
 # clientDataJSON 里的 challenge 是 base64url。
 ciborium = "0.2"
 base64ct = { version = "1", features = ["alloc"] }
+# 校验用户选择的 TTF，并用内容摘要标识字体缓存。
+ttf-parser = "=0.25.1"
+sha2 = "0.11"
 
 # 业务内核唯一入口：`rshell-m0`（根 workspace 成员，path 依赖）。
-# 它再导出 rshell-core / rshell-session，并把上游 git 依赖的 rev pin 在
-# rust/Cargo.toml **这一处**（workspace 合并后不再有第二处要同步升级）。
+# 它再导出 rshell-core / rshell-session；核心配置依赖固定在 rust/Cargo.toml。
+# 桌面 PTY／平台接缝的直接依赖须与它使用同一上游提交。
 # iOS 的 keyring `protected` feature 也由它那边的 target 依赖经
 # feature unification 打开，这里不需要重复声明。
 rshell-m0 = { path = "../../rust" }
+
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+allo-isolate = "=0.1.27"
+portable-pty = { package = "portable-pty-psmux", version = "=0.9.6", git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
+rshell-platform = { version = "=0.1.0", git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
 
 # 私钥存在 Apple 的 protected data 钥匙串（本机与 iCloud 两个存储，keys.rs）；
 # 版本与 keyring 4.1.5 用的一致（rust/Cargo.toml）。
@@ -89,6 +168,8 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Secur
 # 暂停的时钟（连接时限的测试）。
 tokio = { version = "1.45.0", features = ["test-util"] }
 keyring-core = { version = "1.0.0", features = ["sample"] }
+# 受控 SSH 对端与正常 Native 使用同一公开提交，不引入另一套协议实现。
+russh = { version = "=0.62.5", git = "https://github.com/MoyuTeams/russh", rev = "392265d2b622fdce3fd57f836db134773c475950", default-features = false, features = ["ring", "rsa", "flate2"] }
 
 # Uncomment below to target the web.
 # tokio_with_wasm = { version = "0.8.5", features = ["rt", "macros", "time"] }

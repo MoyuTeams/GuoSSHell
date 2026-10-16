@@ -244,6 +244,15 @@ pub struct Preferences {
     /// 标记默认排布的版本；保存过的新配置不再按旧默认值迁移。
     #[serde(default)]
     pub key_bar_layout_version: u8,
+    /// Windows 的窗口材质；旧偏好文件缺少字段时使用桌面默认值。
+    #[serde(default)]
+    pub windows_acrylic: Option<bool>,
+    #[serde(default)]
+    pub windows_opacity: Option<f64>,
+    #[serde(default)]
+    pub interface_font_file: Option<crate::fonts::ImportedFont>,
+    #[serde(default)]
+    pub terminal_font_file: Option<crate::fonts::ImportedFont>,
 }
 
 /// 复制完成后，目标偏好与清理标记在同一次偏好写入中提交。

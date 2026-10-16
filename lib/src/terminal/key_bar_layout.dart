@@ -98,11 +98,51 @@ KeyBarButton? keyBarButton(String id) {
   return null;
 }
 
-Future<void> saveKeyBarLayout(List<List<String>> rows) async {
-  final result = KeyBarLayoutResult.rustSignalStream.first.timeout(
-    const Duration(seconds: 10),
-  );
-  SaveKeyBarLayout(rows: rows).sendSignalToRust();
-  final response = (await result).message;
-  if (!response.ok) throw StateError(response.detail);
+/// 旧协议没有请求编号；超时只结束等待，不释放未结算的写入槽。
+class KeyBarLayoutWriter {
+  KeyBarLayoutWriter({
+    required this.results,
+    required this.send,
+    this.timeout = const Duration(seconds: 10),
+  });
+
+  final Stream<KeyBarLayoutResult> results;
+  final void Function(List<List<String>>) send;
+  final Duration timeout;
+  Future<void>? _pending;
+
+  Future<void> save(List<List<String>> rows) {
+    if (_pending != null) {
+      return Future.error(StateError('上次保存尚未确认，请稍后再试'));
+    }
+    final completed = results.first.then<void>((response) {
+      if (!response.ok) throw StateError(response.detail);
+    });
+    _pending = completed;
+    // 只释放本次占用的写入槽：send 失败后槽可能已被下一次保存占用。
+    void release() {
+      if (identical(_pending, completed)) _pending = null;
+    }
+
+    completed.then(
+      (_) => release(),
+      onError: (Object error, StackTrace stack) => release(),
+    );
+    try {
+      send(rows);
+    } catch (error, stack) {
+      // 请求未发出，不会有确认到达；立即释放写入槽并把错误交给调用者。
+      release();
+      return Future.error(error, stack);
+    }
+    return completed.timeout(timeout);
+  }
 }
+
+final _keyBarWriter = KeyBarLayoutWriter(
+  results: KeyBarLayoutResult.rustSignalStream.map((pack) => pack.message),
+  send: (rows) => SaveKeyBarLayout(rows: rows).sendSignalToRust(),
+);
+
+Future<void> saveKeyBarLayout(List<List<String>> rows) =>
+    _keyBarWriter.save(rows);

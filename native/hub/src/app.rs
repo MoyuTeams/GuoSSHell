@@ -44,8 +44,13 @@ pub struct AppContext {
 impl AppContext {
     fn open(support_dir: &Path) -> Result<Self, String> {
         rshell_m0::register_credential_store()?;
+        let catalog_path = support_dir.join(CATALOG_FILE);
+        // 仅在数据库文件原先不存在时接管迁移种入的默认配置；已有文件不推测初始化状态。
+        let fresh_catalog = !catalog_path
+            .try_exists()
+            .map_err(|error| format!("inspect catalog: {error}"))?;
         let repository = Arc::new(
-            SqliteRepository::open(support_dir.join(CATALOG_FILE))
+            SqliteRepository::open(catalog_path)
                 .map_err(|error| format!("open catalog: {error:?}"))?,
         );
         repository
@@ -57,7 +62,7 @@ impl AppContext {
         if let Err(error) = credentials.reconcile() {
             debug_print!("[app] credential reconcile: {error:?}");
         }
-        settings::adopt_app_defaults(&repository)?;
+        settings::adopt_app_defaults(&repository, fresh_catalog)?;
         let context = Self {
             repository,
             credentials,
@@ -109,13 +114,25 @@ fn debug_auto_connect() -> AppReady {
     }
 }
 
-pub async fn run() {
+pub async fn run(
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), crate::shutdown::ShutdownError> {
     let start = AppStart::get_dart_signal_receiver();
-    let Some(pack) = start.recv().await else {
-        return;
+    let pack = tokio::select! {
+        biased;
+        () = crate::shutdown::requested(&mut shutdown) => return Ok(()),
+        pack = start.recv() => pack,
+    };
+    let Some(pack) = pack else {
+        return Ok(());
     };
     let support_dir = PathBuf::from(pack.message.support_dir);
-    let context = match spawn_blocking(move || AppContext::open(&support_dir)).await {
+    let opened = tokio::select! {
+        biased;
+        () = crate::shutdown::requested(&mut shutdown) => return Err(crate::shutdown::ShutdownError::StartupWorkMayRemain),
+        result = spawn_blocking(move || AppContext::open(&support_dir)) => result,
+    };
+    let context = match opened {
         Ok(Ok(context)) => Arc::new(context),
         Ok(Err(detail)) => {
             AppReady {
@@ -124,7 +141,7 @@ pub async fn run() {
                 ..AppReady::default()
             }
             .send_signal_to_dart();
-            return;
+            return Ok(());
         }
         Err(error) => {
             AppReady {
@@ -133,7 +150,7 @@ pub async fn run() {
                 ..AppReady::default()
             }
             .send_signal_to_dart();
-            return;
+            return Err(crate::shutdown::ShutdownError::TaskFailures(1));
         }
     };
     AppReady {
@@ -142,8 +159,26 @@ pub async fn run() {
     }
     .send_signal_to_dart();
 
-    tokio::spawn(catalog::run(context.clone()));
-    tokio::spawn(settings::run(context.clone()));
-    tokio::spawn(keys::run(context.clone()));
-    session::supervisor(context).await;
+    let mut services = tokio::task::JoinSet::new();
+    services.spawn(catalog::run(context.clone()));
+    services.spawn(settings::run(context.clone()));
+    services.spawn(keys::run(context.clone()));
+    let result = session::supervisor(context, shutdown).await;
+    services.abort_all();
+    let drained = tokio::time::timeout(crate::shutdown::SERVICE_LIMIT, async {
+        let mut failed = false;
+        while let Some(task) = services.join_next().await {
+            if let Err(error) = task
+                && !error.is_cancelled()
+            {
+                failed = true;
+            }
+        }
+        failed
+    })
+    .await;
+    if result.is_ok() && !matches!(drained, Ok(false)) {
+        return Err(crate::shutdown::ShutdownError::TaskFailures(1));
+    }
+    result
 }

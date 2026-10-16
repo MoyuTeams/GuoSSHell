@@ -57,6 +57,12 @@ add_subdirectory("runner")
 # them to the application.
 include(flutter/generated_plugins.cmake)
 
+# 插件可再次应用默认设置；最终 runner 必须保留原生分配异常的清理与退额路径。
+get_target_property(RUNNER_DEFINITIONS ${BINARY_NAME} COMPILE_DEFINITIONS)
+list(REMOVE_ITEM RUNNER_DEFINITIONS "_HAS_EXCEPTIONS=0")
+set_property(TARGET ${BINARY_NAME} PROPERTY COMPILE_DEFINITIONS "${RUNNER_DEFINITIONS}")
+target_compile_definitions(${BINARY_NAME} PRIVATE "_HAS_EXCEPTIONS=1")
+
 
 # === Installation ===
 # Support files are copied into place next to the executable, so that it can

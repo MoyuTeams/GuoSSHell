@@ -8,9 +8,7 @@ import 'package:guosh_shell/src/settings/settings_page.dart';
 void main() {
   testWidgets('未收到旧回包前连续修改不同设置，仅发送各自改动', (tester) async {
     const initial = SettingsState(
-      fontFamily: 'MesloLGS NF',
       fontSize: 14,
-      fontFamilies: ['MesloLGS NF', 'Menlo'],
       minFontSize: 8,
       maxFontSize: 32,
       scrollbackLines: 5000,
@@ -28,19 +26,30 @@ void main() {
         home: SettingsPage(saveSettings: requests.add, querySettings: () {}),
       ),
     );
-    await tester.tap(find.text('Menlo'));
+    final pageScroll = find
+        .descendant(
+          of: find.byType(ListView),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    await tester.scrollUntilVisible(
+      find.byType(Slider),
+      160,
+      scrollable: pageScroll,
+    );
     tester.widget<Slider>(find.byType(Slider)).onChangeEnd!(22);
-    await tester.ensureVisible(find.byType(SwitchListTile));
+    await tester.pump();
+    await tester.scrollUntilVisible(
+      find.byType(SwitchListTile),
+      160,
+      scrollable: pageScroll,
+    );
     await tester.tap(find.byType(SwitchListTile));
     await tester.pump();
-    expect(requests.length, 3);
-    expect(requests[0].fontFamily, 'Menlo');
-    expect(requests[0].fontSize, isNull);
-    expect(requests[1].fontSize, 22);
-    expect(requests[1].fontFamily, isNull);
-    expect(requests[2].showKeyBar, isFalse);
-    expect(requests[2].fontFamily, isNull);
-    expect(requests[2].fontSize, isNull);
+    expect(requests.length, 2);
+    expect(requests[0].fontSize, 22);
+    expect(requests[1].showKeyBar, isFalse);
+    expect(requests[1].fontSize, isNull);
     expect(
       requests.every((request) => request.scrollbackLines == null),
       isTrue,

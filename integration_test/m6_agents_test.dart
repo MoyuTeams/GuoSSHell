@@ -12,10 +12,14 @@ import 'package:terminal_view/terminal_view.dart' show TerminalKey;
 
 import 'm6_harness.dart';
 
-const _agents = String.fromEnvironment('M6_AGENTS', defaultValue: 'claude,codex,opencode');
+const _agents = String.fromEnvironment(
+  'M6_AGENTS',
+  defaultValue: 'claude,codex,opencode',
+);
 const _scenarios = String.fromEnvironment(
   'M6_SCENARIOS',
-  defaultValue: 'stream,burst,tools,subagents,cjk,long,inline-stream,inline-cjk',
+  defaultValue:
+      'stream,burst,tools,subagents,cjk,long,inline-stream,inline-cjk',
 );
 
 void main() {
@@ -24,8 +28,11 @@ void main() {
   final report = <String, Object>{'device': m6Device};
 
   setUpAll(startRust);
+  tearDownAll(stopRust);
   // 截图也存在 reportData 里（screenshots）：合并，不覆盖。
-  tearDownAll(() => binding.reportData = {...?binding.reportData, 'agents': report});
+  tearDownAll(
+    () => binding.reportData = {...?binding.reportData, 'agents': report},
+  );
 
   for (final agent in _agents.split(',').where((a) => a.isNotEmpty)) {
     for (final entry in _scenarios.split(',').where((e) => e.isNotEmpty)) {
@@ -43,12 +50,17 @@ void main() {
         await app.flushPerf();
         final mark = app.perfMark;
         final started = DateTime.now();
-        await app.type('m6-agent $agent $scenario${inline ? ' --inline' : ''}\r');
+        await app.type(
+          'm6-agent $agent $scenario${inline ? ' --inline' : ''}\r',
+        );
 
         if (scenario == 'stream' || scenario == 'burst') {
           // 流式开始后在 agent 的输入框里打字：从敲下最后一个字符到它出现在屏幕上。
           await app.waitForPlan(
-            (p) => p['kind'] == 'main' && p['dialect'] == agent && p['scenario'] == scenario,
+            (p) =>
+                p['kind'] == 'main' &&
+                p['dialect'] == agent &&
+                p['scenario'] == scenario,
             '$agent 开始流式输出',
             since: started,
           );
@@ -57,7 +69,10 @@ void main() {
         }
         if (scenario == 'subagents') {
           await app.waitForPlan(
-            (p) => p['kind'] == 'sub' && p['dialect'] == agent && p['scenario'] == 'subagents',
+            (p) =>
+                p['kind'] == 'sub' &&
+                p['dialect'] == agent &&
+                p['scenario'] == 'subagents',
             '$agent 派出 subagent',
             since: started,
           );
@@ -65,8 +80,13 @@ void main() {
           await _switchViews(app, agent);
         }
 
-        await app.waitScreen('M6-DONE', timeout: Duration(seconds: scenario == 'long' ? 240 : 120));
-        result['duration_ms'] = DateTime.now().difference(started).inMilliseconds;
+        await app.waitScreen(
+          'M6-DONE',
+          timeout: Duration(seconds: scenario == 'long' ? 240 : 120),
+        );
+        result['duration_ms'] = DateTime.now()
+            .difference(started)
+            .inMilliseconds;
         await app.waitIdle(quiet: const Duration(milliseconds: 1500));
         // 自检顺带交出最后一个统计窗口，之后再汇总。
         final problems = await app.screenMismatches();
@@ -81,8 +101,12 @@ void main() {
         await _exitAgent(app, agent);
         await app.type('clear; m6-probe\r');
         await app.waitScreen('M6-MODES', timeout: const Duration(seconds: 10));
-        final line = app.logicalLines().firstWhere((l) => l.contains('M6-MODES'));
-        final modes = jsonDecode(line.substring(line.indexOf('{'))) as Map<String, dynamic>;
+        final line = app.logicalLines().firstWhere(
+          (l) => l.contains('M6-MODES'),
+        );
+        final modes = jsonDecode(
+          line.substring(line.indexOf('{')),
+        ) as Map<String, dynamic>;
         result['modes_after'] = modes;
 
         expect(problems, isEmpty, reason: problems.join('\n'));
@@ -107,17 +131,36 @@ void main() {
     app.pane.focusNode.requestFocus();
     await tester.pump(const Duration(milliseconds: 200));
     // 物理键显式给出：profile 构建里按逻辑键反查物理键会失败（键名只在 debug 里有）。
-    await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft, physicalKey: PhysicalKeyboardKey.metaLeft);
-    await tester.sendKeyEvent(LogicalKeyboardKey.keyD, physicalKey: PhysicalKeyboardKey.keyD);
-    await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft, physicalKey: PhysicalKeyboardKey.metaLeft);
-    await app.waitFor(() => find.textContaining('再开一个').evaluate().isNotEmpty, '连接选择器');
+    await tester.sendKeyDownEvent(
+      LogicalKeyboardKey.metaLeft,
+      physicalKey: PhysicalKeyboardKey.metaLeft,
+    );
+    await tester.sendKeyEvent(
+      LogicalKeyboardKey.keyD,
+      physicalKey: PhysicalKeyboardKey.keyD,
+    );
+    await tester.sendKeyUpEvent(
+      LogicalKeyboardKey.metaLeft,
+      physicalKey: PhysicalKeyboardKey.metaLeft,
+    );
+    await app.waitFor(
+      () => find.textContaining('再开一个').evaluate().isNotEmpty,
+      '连接选择器',
+    );
     // 等选择器弹出的动画走完再点；没点中（选择器还在）就再点。
-    for (var attempt = 0; attempt < 3 && find.textContaining('再开一个').evaluate().isNotEmpty; attempt++) {
+    for (
+      var attempt = 0;
+      attempt < 3 && find.textContaining('再开一个').evaluate().isNotEmpty;
+      attempt++
+    ) {
       await tester.pump(const Duration(milliseconds: 600));
       await tester.tap(find.textContaining('再开一个'), warnIfMissed: false);
       await tester.pump(const Duration(milliseconds: 600));
     }
-    await app.waitFor(() => app.panes.length == 2 && app.panes.every((p) => p.connected), '第二个窗格连上');
+    await app.waitFor(
+      () => app.panes.length == 2 && app.panes.every((p) => p.connected),
+      '第二个窗格连上',
+    );
     final busy = app.panes[0];
     final quiet = app.panes[1];
     await app.waitScreen('probe@', pane: quiet);
@@ -128,14 +171,21 @@ void main() {
       var typed = '';
       for (var i = 0; i < 12; i++) {
         typed += String.fromCharCode(0x61 + i);
-        samples.add(await app.echoMs(typed.substring(typed.length - 1), expect: '$prefix$typed', pane: quiet));
+        samples.add(
+          await app.echoMs(
+            typed.substring(typed.length - 1),
+            expect: '$prefix$typed',
+            pane: quiet,
+          ),
+        );
         await tester.pump(const Duration(milliseconds: 300));
       }
       await app.type('\x15', pane: quiet); // Ctrl-U 清掉这一行
       return samples..sort();
     }
 
-    int p95(List<int> sorted) => sorted[(sorted.length * 95 ~/ 100).clamp(0, sorted.length - 1)];
+    int p95(List<int> sorted) =>
+        sorted[(sorted.length * 95 ~/ 100).clamp(0, sorted.length - 1)];
     await app.type('#', pane: quiet);
     final idle = await echoes('#');
     result['echo_idle_ms'] = idle;
@@ -150,7 +200,11 @@ void main() {
     final samples = await echoes('#');
     result['echo_ms'] = samples;
     result['echo_ms_p95'] = p95(samples);
-    await app.waitScreen('M6-FLOOD-DONE', pane: busy, timeout: const Duration(seconds: 60));
+    await app.waitScreen(
+      'M6-FLOOD-DONE',
+      pane: busy,
+      timeout: const Duration(seconds: 60),
+    );
     await app.flushPerf(pane: busy);
     result['busy_perf'] = summarizePerf(app.perfSince(mark, pane: busy));
     await app.screenshot('panes-flood');
@@ -162,9 +216,14 @@ void main() {
     await app.open();
     await app.waitScreen('probe@');
     // 杀的是 agent 本身（Codex 的原生进程）：只杀 npm 的启动器，原生进程会成孤儿接着跑。
-    await app.type("clear; (sleep 4; pkill -KILL -f 'codex-linux-.*\\[m6:burst\\]') & m6-agent codex burst; "
-        "echo M6-AGENT-KILLED-\$?\r");
-    await app.waitScreen('M6-AGENT-KILLED-', timeout: const Duration(seconds: 20));
+    await app.type(
+      "clear; (sleep 4; pkill -KILL -f 'codex-linux-.*\\[m6:burst\\]') & m6-agent codex burst; "
+      "echo M6-AGENT-KILLED-\$?\r",
+    );
+    await app.waitScreen(
+      'M6-AGENT-KILLED-',
+      timeout: const Duration(seconds: 20),
+    );
     report['killed_left_alt_screen'] = app.pane.terminal.isUsingAltBuffer;
     await app.screenshot('agent-codex-killed');
     await app.type('reset; echo M6-RESET-DONE\r');
@@ -209,7 +268,11 @@ Future<void> _switchViews(M6App app, String agent) async {
       await app.key(TerminalKey.arrowDown);
       await tester.pump(const Duration(seconds: 1));
       await shot('child');
-      for (final key in [TerminalKey.arrowRight, TerminalKey.arrowRight, TerminalKey.arrowLeft]) {
+      for (final key in [
+        TerminalKey.arrowRight,
+        TerminalKey.arrowRight,
+        TerminalKey.arrowLeft,
+      ]) {
         await app.key(key);
         await tester.pump(const Duration(milliseconds: 800));
       }
@@ -222,7 +285,9 @@ Future<void> _switchViews(M6App app, String agent) async {
 /// 退出 agent，等回到 shell 提示符。
 Future<void> _exitAgent(M6App app, String agent) async {
   final tester = app.tester;
-  bool atShell() => !app.pane.terminal.isUsingAltBuffer && app.screen().reversed.any((l) => l.startsWith('probe@'));
+  bool atShell() =>
+      !app.pane.terminal.isUsingAltBuffer &&
+      app.screen().reversed.any((l) => l.startsWith('probe@'));
   for (var attempt = 0; attempt < 6 && !atShell(); attempt++) {
     if (agent == 'opencode' && attempt.isOdd) {
       await app.key(TerminalKey.keyD, ctrl: true);
@@ -231,5 +296,9 @@ Future<void> _exitAgent(M6App app, String agent) async {
     }
     await tester.pump(const Duration(milliseconds: 700));
   }
-  await app.waitFor(atShell, '$agent 退回 shell', timeout: const Duration(seconds: 15));
+  await app.waitFor(
+    atShell,
+    '$agent 退回 shell',
+    timeout: const Duration(seconds: 15),
+  );
 }

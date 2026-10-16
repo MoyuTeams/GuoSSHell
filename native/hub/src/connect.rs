@@ -8,6 +8,7 @@
 //! 时间同样不算进连接时限。
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,11 +17,15 @@ use rinf::{RustSignal, debug_print};
 use rshell_m0::rshell_core::{
     AuthenticationKind, CatalogMutation, ConnectionId, ConnectionProfile, HostKeyDecision,
     HostKeyPrompt, InteractionId, InteractionRequest, InteractionResponse,
-    KeyboardInteractivePrompt, SecretUpdate, SessionFailure, TerminalSize, TransportKind,
+    KeyboardInteractivePrompt, ResolvedTerminalProfile, SecretUpdate, SessionFailure, TerminalSize,
+    TransportKind,
 };
+/// 本地 shell 的启动描述：桌面目标为上游类型。
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub use rshell_m0::rshell_session::LocalLaunch;
 use rshell_m0::rshell_session::{
     AuthPlan, ExternalSigner, InteractionBroker, KnownHostsVerifier, NativeSshTransport,
-    SessionTransport, TransportRequest, interaction_channel,
+    SessionTransport, TransportRequest, build_system_ssh_argv, interaction_channel,
 };
 use rshell_m0::russh::keys::{PrivateKey, PublicKey};
 use secrecy::{ExposeSecret, SecretString};
@@ -28,17 +33,22 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::oneshot;
 use tokio::task::spawn_blocking;
 use tokio::time::Instant;
+use zeroize::Zeroize;
 
 use crate::app::AppContext;
 use crate::card::{CardFailure, CardSigner};
 use crate::catalog;
 use crate::external_signer::{PinQuestion, SignerRequest};
 use crate::keys::{self, StoredKey};
+use crate::protected_reply::ProtectedReply;
 use crate::security_key::{SecurityKeySigner, SkFailure};
 use crate::session::SessionCommand;
-use crate::signals::interaction::{InteractionPrompt, InteractionReply, PromptField, PromptKind};
+use crate::signals::interaction::{InteractionPrompt, PromptField, PromptKind};
 use crate::signals::keys::KeyError;
-use crate::signals::{ConnectRequest, FailureKind};
+use crate::signals::{
+    ConnectRequest, DESKTOP_CONNECT_VERSION, DesktopConnectError, DesktopConnectRequest,
+    DesktopTargetKind, FailureKind,
+};
 
 /// 连接时等网络的总时长上限。等用户（主机密钥确认、问答、PIN、按卡）的时间不算在内——
 /// 那段由服务器把关（OpenSSH 的 LoginGraceTime），与 OpenSSH 客户端一致。
@@ -53,7 +63,7 @@ const KEEPALIVE_MAX: usize = 3;
 type PendingPins = HashMap<u32, oneshot::Sender<Option<(SecretString, bool)>>>;
 
 pub struct Connected {
-    pub transport: NativeSshTransport,
+    pub transport: Box<dyn SessionTransport>,
     pub profile: ConnectionProfile,
 }
 
@@ -101,9 +111,15 @@ impl Abort {
 /// 连接过程中会话收到的东西。
 pub struct Channels<'a> {
     pub commands: &'a mut UnboundedReceiver<SessionCommand>,
-    pub replies: &'a mut UnboundedReceiver<InteractionReply>,
+    pub replies: &'a mut UnboundedReceiver<ProtectedReply>,
     /// 连接期间收到的非 Disconnect 命令，连上后按顺序处理。
     pub backlog: &'a mut VecDeque<SessionCommand>,
+}
+
+/// 一次连接的远端 PTY 参数；桌面传有效 TERM，旧连接沿用传输层默认值。
+pub struct RemoteTerminal<'a> {
+    pub size: TerminalSize,
+    pub terminal_type: Option<&'a str>,
 }
 
 impl Channels<'_> {
@@ -120,41 +136,476 @@ impl Channels<'_> {
 }
 
 /// 连接目标的配置，以及它是否在目录里（只有目录里的连接能存密码）。
+#[derive(Clone)]
 pub struct Target {
     pub profile: ConnectionProfile,
     pub saved: bool,
+    pub kind: TargetKind,
+}
+
+/// 目标的传输种类。
+#[derive(Clone)]
+pub enum TargetKind {
+    Ssh,
+    /// 本地 shell：不认证，每次连接（含重连）都按同一启动描述新起进程。
+    /// `None` 在连接时取平台默认 shell，工作目录为用户主目录。
+    Local(Option<LocalLaunch>),
+    /// 系统 OpenSSH：在本地 PTY 中运行系统 `ssh`，配置、agent、known_hosts、主机密钥确认
+    /// 与密码提示都由 ssh 自己在终端里处理。每次连接（含重连）重新查找 ssh 并按连接配置组装参数。
+    /// 携带的路径只用于测试隔离：作为 `-F <path>` 放在参数最前（产品路径为 `None`）。
+    System(Option<PathBuf>),
+}
+
+impl Target {
+    pub fn ssh(profile: ConnectionProfile, saved: bool) -> Self {
+        Self {
+            profile,
+            saved,
+            kind: TargetKind::Ssh,
+        }
+    }
+
+    /// 系统 ssh；`config` 见 [`TargetKind::System`]。
+    pub fn system(profile: ConnectionProfile, saved: bool, config: Option<PathBuf>) -> Self {
+        Self {
+            profile,
+            saved,
+            kind: TargetKind::System(config),
+        }
+    }
+
+    pub fn is_system(&self) -> bool {
+        matches!(self.kind, TargetKind::System(_))
+    }
+
+    /// 本地 shell；`profile` 只是占位，主机、端口与用户名为空，不进入目录。
+    pub fn local(launch: Option<LocalLaunch>) -> Self {
+        let mut profile = ConnectionProfile::new(LOCAL_DESCRIPTION, "");
+        profile.port = 0;
+        Self {
+            profile,
+            saved: false,
+            kind: TargetKind::Local(launch),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self.kind, TargetKind::Local(_))
+    }
+}
+
+const LOCAL_DESCRIPTION: &str = "本地 shell";
+
+/// 移动目标不引用上游本地 PTY 类型：空枚举无法构造，本地目标只能取默认（随后被拒）。
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+#[derive(Clone)]
+pub enum LocalLaunch {}
+
+pub struct DesktopTarget {
+    pub request: ConnectRequest,
+    pub target: Target,
+    pub settings: ResolvedTerminalProfile,
+    pub quick_password: SecretString,
+    pub(crate) font: Option<RetainedFont>,
+}
+
+/// 字体与预约共同克隆；异步加载、运行、离线与关闭持同一资源责任。
+#[derive(Clone)]
+pub(crate) struct RetainedFont {
+    font: crate::profile_fonts::ResolvedProfileFont,
+    _lease: Option<crate::desktop_prepare::Lease>,
+}
+
+impl std::ops::Deref for RetainedFont {
+    type Target = crate::profile_fonts::ResolvedProfileFont;
+    fn deref(&self) -> &Self::Target {
+        &self.font
+    }
+}
+
+/// 准备持有只包含非秘密目标和配置；不保存带 password 字段的旧连接 DTO。
+pub(crate) struct PreparedTarget {
+    pub target: Target,
+    pub settings: ResolvedTerminalProfile,
+    pub font: RetainedFont,
+}
+
+/// 新协议只在桌面编译目标开放；即使移动端伪造信号，也无法进入目标解析或传输层。
+pub const fn desktop_supported() -> bool {
+    cfg!(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux"
+    ))
+}
+
+/// 校验桌面信号的判别目标及字段组合，不依赖存储或网络。
+fn validate_desktop(
+    request: &DesktopConnectRequest,
+) -> Result<(), (DesktopConnectError, &'static str)> {
+    validate_desktop_for::<{ desktop_supported() }>(request)
+}
+
+fn validate_desktop_for<const DESKTOP: bool>(
+    request: &DesktopConnectRequest,
+) -> Result<(), (DesktopConnectError, &'static str)> {
+    use DesktopConnectError as Error;
+    if request.version != DESKTOP_CONNECT_VERSION {
+        return Err((Error::UnsupportedVersion, "version"));
+    }
+    if !DESKTOP {
+        return Err((
+            Error::PlatformUnavailable,
+            "desktop transport is unavailable on this platform",
+        ));
+    }
+    if request.cols == 0 || request.rows == 0 {
+        return Err((Error::InvalidField, "cols/rows"));
+    }
+    if !request.profile_id.is_empty() && uuid::Uuid::parse_str(&request.profile_id).is_err() {
+        return Err((Error::InvalidProfileId, "profile_id"));
+    }
+    if !request.connection_id.is_empty() {
+        // 本地 shell 不在目录里，只能由空 connection_id 表示。
+        if request.target == DesktopTargetKind::LocalShell {
+            return Err((Error::InvalidField, "connection_id"));
+        }
+        if uuid::Uuid::parse_str(&request.connection_id).is_err() {
+            return Err((Error::InvalidConnectionId, "connection_id"));
+        }
+        if !request.host.is_empty()
+            || request.port != 0
+            || !request.username.is_empty()
+            || !request.password.is_empty()
+            || !request.command.is_empty()
+        {
+            return Err((Error::InvalidField, "connection_id/temporary_target"));
+        }
+    } else {
+        match request.target {
+            DesktopTargetKind::LocalShell => {
+                if !request.host.is_empty()
+                    || request.port != 0
+                    || !request.username.is_empty()
+                    || !request.password.is_empty()
+                    || !request.command.is_empty()
+                {
+                    return Err((Error::InvalidField, "local_target"));
+                }
+            }
+            DesktopTargetKind::NativeSsh | DesktopTargetKind::SystemOpenSsh => {
+                if catalog::validate_target(&request.host, request.port, &request.username).is_err()
+                {
+                    return Err((Error::InvalidField, "host/port/username"));
+                }
+                if request.target == DesktopTargetKind::SystemOpenSsh
+                    && !request.password.is_empty()
+                {
+                    return Err((Error::InvalidField, "password"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 解析目录与终端配置。解析不构造传输层或启动程序；本地 shell 与系统 ssh 在连接时才启动。
+pub async fn resolve_desktop(
+    context: &Arc<AppContext>,
+    request: DesktopConnectRequest,
+) -> Result<DesktopTarget, (DesktopConnectError, String)> {
+    resolve_desktop_inner(context, request, false, None).await
+}
+
+pub(crate) async fn resolve_prepared(
+    context: &Arc<AppContext>,
+    request: DesktopConnectRequest,
+    lease: crate::desktop_prepare::Lease,
+) -> (
+    Result<PreparedTarget, (DesktopConnectError, String)>,
+    crate::desktop_prepare::Lease,
+) {
+    let result = resolve_desktop_inner(context, request, true, Some(lease.clone()))
+        .await
+        .and_then(|resolved| {
+            Ok(PreparedTarget {
+                target: resolved.target,
+                settings: resolved.settings,
+                font: resolved
+                    .font
+                    .ok_or((DesktopConnectError::Storage, "font_snapshot".into()))?,
+            })
+        });
+    (result, lease)
+}
+
+/// 不可取消的 I/O 连同结果持有预约；外层 future 销毁也不能提前释放。
+pub(crate) async fn load_desktop_io<T: Send + 'static>(
+    lease: Option<crate::desktop_prepare::Lease>,
+    load: impl FnOnce() -> T + Send + 'static,
+) -> Result<(T, Option<crate::desktop_prepare::Lease>), tokio::task::JoinError> {
+    spawn_blocking(move || {
+        let result = load();
+        (result, lease)
+    })
+    .await
+}
+
+async fn resolve_desktop_inner(
+    context: &Arc<AppContext>,
+    mut request: DesktopConnectRequest,
+    capture_font: bool,
+    lease: Option<crate::desktop_prepare::Lease>,
+) -> Result<DesktopTarget, (DesktopConnectError, String)> {
+    if let Err((error, field)) = validate_desktop(&request) {
+        request.password.zeroize();
+        return Err((error, field.to_owned()));
+    }
+    // 校验后立刻接管秘密；后续目录读取、目标拒绝均不留下普通 String 副本。
+    let quick_password = SecretString::from(std::mem::take(&mut request.password));
+    let task_context = context.clone();
+    let profile_id = request.profile_id.clone();
+    let connection_id = request.connection_id.clone();
+    // 接回的租约与结果同寿命，解析结果期间也继续计账。
+    let (loaded, _io_lease) = load_desktop_io(lease, move || {
+        let saved = if connection_id.is_empty() {
+            None
+        } else {
+            let id = uuid::Uuid::parse_str(&connection_id)
+                .map(ConnectionId::from)
+                .map_err(|_| (DesktopConnectError::InvalidConnectionId, "connection_id"))?;
+            Some(
+                task_context
+                    .repository
+                    .load_catalog()
+                    .map_err(|_| (DesktopConnectError::Storage, "catalog"))?
+                    .connections
+                    .get(&id)
+                    .cloned()
+                    .ok_or((DesktopConnectError::ConnectionNotFound, "connection_id"))?,
+            )
+        };
+        let snapshot = task_context
+            .repository
+            .load_configuration()
+            .map_err(|_| (DesktopConnectError::Storage, "configuration"))?;
+        let wanted = if !profile_id.is_empty() {
+            profile_id
+        } else if let Some(id) = saved
+            .as_ref()
+            .and_then(|profile| profile.terminal_profile_id)
+        {
+            id.0.to_string()
+        } else {
+            snapshot.settings.default_terminal_profile.0.to_string()
+        };
+        let profile = snapshot
+            .profiles
+            .iter()
+            .find(|profile| profile.id.0.to_string() == wanted)
+            .ok_or((DesktopConnectError::ProfileNotFound, "profile_id"))?;
+        // 只持有所选有效配置；未知业务元数据仍完整留在 configuration 中。
+        let overrides = saved
+            .as_ref()
+            .map(|profile| profile.terminal_overrides.clone())
+            .unwrap_or_default();
+        let settings = profile
+            .settings
+            .resolve(&overrides)
+            .with_app_key_bindings(&snapshot.settings.key_bindings);
+        let font = if capture_font {
+            let root = task_context
+                .known_hosts
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(""));
+            crate::profile_fonts::resolve_profile_font(
+                &snapshot,
+                profile.id,
+                task_context.preferences.get().terminal_font_file,
+                root,
+            )
+        } else {
+            None
+        };
+        Ok::<_, (DesktopConnectError, &'static str)>((settings, saved, font))
+    })
+    .await
+    .map_err(|_| (DesktopConnectError::Storage, "storage task".to_owned()))?;
+    let (settings, saved, font) = loaded.map_err(|(error, field)| (error, field.to_owned()))?;
+
+    let expected = match request.target {
+        DesktopTargetKind::NativeSsh => Some(TransportKind::NativeSsh),
+        DesktopTargetKind::SystemOpenSsh => Some(TransportKind::SystemOpenSsh),
+        DesktopTargetKind::LocalShell => None,
+    };
+    if saved
+        .as_ref()
+        .is_some_and(|profile| Some(profile.transport) != expected)
+    {
+        return Err((
+            DesktopConnectError::InvalidField,
+            "target/connection_id".to_owned(),
+        ));
+    }
+    let native = ConnectRequest {
+        session_id: request.session_id,
+        connection_id: request.connection_id,
+        host: request.host,
+        port: request.port,
+        username: request.username,
+        password: String::new(),
+        command: request.command,
+        cols: request.cols,
+        rows: request.rows,
+        pixel_width: request.pixel_width,
+        pixel_height: request.pixel_height,
+        dpi: request.dpi,
+    };
+    let target = match (request.target, saved) {
+        (DesktopTargetKind::LocalShell, _) => Target::local(None),
+        (DesktopTargetKind::SystemOpenSsh, Some(profile)) => {
+            Target::system(profile, true, system_ssh_test_config())
+        }
+        (DesktopTargetKind::NativeSsh, Some(profile)) => Target::ssh(profile, true),
+        (kind, None) => {
+            let (transport, authentication) = if kind == DesktopTargetKind::SystemOpenSsh {
+                (TransportKind::SystemOpenSsh, AuthenticationKind::Agent)
+            } else {
+                (TransportKind::NativeSsh, AuthenticationKind::Password)
+            };
+            let profile = quick_profile(&native, transport, authentication).map_err(|_| {
+                (
+                    DesktopConnectError::InvalidField,
+                    "host/port/username".to_owned(),
+                )
+            })?;
+            if transport == TransportKind::SystemOpenSsh {
+                Target::system(profile, false, system_ssh_test_config())
+            } else {
+                Target::ssh(profile, false)
+            }
+        }
+    };
+    // 系统 ssh 的参数在准备时就校验（拒绝像选项的主机名等），找不到 ssh 也在此拒绝；
+    // 都不启动进程。
+    if target.is_system() {
+        if build_system_ssh_argv(&target.profile).is_err() {
+            return Err((
+                DesktopConnectError::InvalidField,
+                "system_ssh_argv".to_owned(),
+            ));
+        }
+        if !spawn_blocking(system_ssh_found).await.unwrap_or(false) {
+            return Err((
+                DesktopConnectError::TransportUnavailable,
+                "ssh not found".to_owned(),
+            ));
+        }
+    }
+    let resolved = DesktopTarget {
+        request: native,
+        target,
+        settings,
+        quick_password,
+        font: font.map(|font| RetainedFont {
+            font,
+            _lease: _io_lease,
+        }),
+    };
+    if capture_font {
+        let font = resolved
+            .font
+            .as_ref()
+            .ok_or((DesktopConnectError::Storage, "font_snapshot".to_owned()))?;
+        let projection =
+            crate::desktop_prepare::project(&resolved.settings, &font.projection.profile_id);
+        // 仅计所选冻结对象，不序列化整库；三份覆盖运行、attempt 及 Start/回复副本。
+        // 保留目录扩展的完整值，不因忽略未知字段低估实际持有的数据。
+        serde_json::to_writer(
+            MetadataBudget::default(),
+            &(
+                &projection,
+                &projection,
+                &projection,
+                &resolved.target.profile,
+                &resolved.target.profile,
+                &resolved.target.profile,
+                &font.projection,
+                &font.projection,
+                &font.projection,
+            ),
+        )
+        .map_err(|_| {
+            (
+                DesktopConnectError::InvalidField,
+                "snapshot_budget".to_owned(),
+            )
+        })?;
+    }
+    Ok(resolved)
+}
+
+/// 对实际输出计数，不为检查额度先分配一份 JSON 副本。
+#[derive(Default)]
+struct MetadataBudget(usize);
+
+impl std::io::Write for MetadataBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > crate::desktop_prepare::METADATA_LIMIT.saturating_sub(self.0) {
+            return Err(std::io::Error::other("snapshot_budget"));
+        }
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Target {
     /// 状态与提示里显示的目标。
     pub fn describe(&self) -> String {
-        format!(
-            "{}@{}:{}",
-            self.profile.username, self.profile.host, self.profile.port
-        )
+        match self.kind {
+            TargetKind::Local(_) => LOCAL_DESCRIPTION.to_owned(),
+            TargetKind::Ssh | TargetKind::System(_) => format!(
+                "{}@{}:{}",
+                self.profile.username, self.profile.host, self.profile.port
+            ),
+        }
     }
 }
 
+/// 快速连接的临时配置：由请求里的字段组成，不进入目录。
+fn quick_profile(
+    request: &ConnectRequest,
+    transport: TransportKind,
+    authentication: AuthenticationKind,
+) -> Result<ConnectionProfile, Abort> {
+    let (host, username) = catalog::validate_target(&request.host, request.port, &request.username)
+        .map_err(|error| Abort::failed(FailureKind::InvalidTarget, format!("{error:?}")))?;
+    let mut profile = ConnectionProfile::new(format!("{username}@{host}"), host);
+    profile.port = request.port;
+    profile.username = username.to_owned();
+    profile.transport = transport;
+    profile.authentication = authentication;
+    profile.remote_command =
+        Some(request.command.trim().to_owned()).filter(|command| !command.is_empty());
+    Ok(profile)
+}
+
 /// 找到连接配置：目录里的按 id 取；快速连接由请求里的字段临时组成（密码认证）。
+/// 旧路径（移动端）只支持 Native SSH。
 pub async fn resolve_target(
     context: &Arc<AppContext>,
     request: &ConnectRequest,
 ) -> Result<Target, Abort> {
     if request.connection_id.is_empty() {
-        let (host, username) =
-            catalog::validate_target(&request.host, request.port, &request.username)
-                .map_err(|error| Abort::failed(FailureKind::InvalidTarget, format!("{error:?}")))?;
-        let mut profile = ConnectionProfile::new(format!("{username}@{host}"), host);
-        profile.port = request.port;
-        profile.username = username.to_owned();
-        profile.transport = TransportKind::NativeSsh;
-        profile.authentication = AuthenticationKind::Password;
-        profile.remote_command =
-            Some(request.command.trim().to_owned()).filter(|command| !command.is_empty());
-        return Ok(Target {
-            profile,
-            saved: false,
-        });
+        let profile = quick_profile(
+            request,
+            TransportKind::NativeSsh,
+            AuthenticationKind::Password,
+        )?;
+        return Ok(Target::ssh(profile, false));
     }
 
     let id = uuid::Uuid::parse_str(&request.connection_id)
@@ -170,10 +621,13 @@ pub async fn resolve_target(
         .get(&id)
         .cloned()
         .ok_or_else(|| Abort::failed(FailureKind::NotFound, request.connection_id.clone()))?;
-    Ok(Target {
-        profile,
-        saved: true,
-    })
+    if profile.transport != TransportKind::NativeSsh {
+        return Err(Abort::failed(
+            FailureKind::InvalidTarget,
+            "目录目标不是 Native SSH".to_owned(),
+        ));
+    }
+    Ok(Target::ssh(profile, true))
 }
 
 /// 建立连接。`quick_password` 是快速连接随请求带来的密码（可能为空）。
@@ -182,78 +636,120 @@ pub async fn establish(
     session_id: u32,
     target: Target,
     quick_password: SecretString,
-    size: TerminalSize,
+    terminal: RemoteTerminal<'_>,
     mut channels: Channels<'_>,
     prompts: &mut PromptIds,
 ) -> Result<Connected, Abort> {
     let described = target.describe();
-    let Target { profile, saved } = target;
+    let Target {
+        mut profile,
+        saved,
+        kind,
+    } = target;
+    let transport_request = native_transport_request(terminal.size, terminal.terminal_type)?;
+    let launch = match kind {
+        TargetKind::Ssh => None,
+        TargetKind::Local(launch) => Some(launch),
+        // 系统 ssh 每次连接都重新组装：重连即重新运行 ssh。
+        TargetKind::System(config) => {
+            let task_profile = profile.clone();
+            let launch = spawn_blocking(move || system_ssh_launch(&task_profile, config))
+                .await
+                .map_err(|error| {
+                    Abort::failed(FailureKind::Other, format!("ssh task: {error}"))
+                })??;
+            Some(Some(launch))
+        }
+    };
+    if let Some(launch) = launch {
+        // 本地 shell 与系统 ssh 不经应用认证、不校验主机密钥（系统 ssh 在终端里自行处理）；
+        // TERM 由传输层按请求设入子进程环境。spawn 成功即视为已连接。
+        drop(quick_password);
+        let transport = connect_local(
+            launch,
+            session_id,
+            &profile,
+            &transport_request,
+            channels,
+            prompts,
+        )
+        .await?;
+        return Ok(Connected { transport, profile });
+    }
     // 外部签名器（OpenPGP 卡或安全密钥）与它要会话代办的事（问 PIN、等用户）。
     let mut external: Option<(Signer, UnboundedReceiver<SignerRequest>)> = None;
 
     // 密码：目录里存了就从钥匙串读（每次连接读，不缓存——PLAN §9.2.2）；
     // 没存、读不到、或快速连接没带，就问用户。
     let mut remember = None;
-    let auth = match profile.authentication {
-        AuthenticationKind::Password => {
-            let password = match saved_password(context, &profile).await {
-                Some(password) => password,
-                None if !quick_password.expose_secret().is_empty() => quick_password,
-                None => {
-                    let question = Question {
-                        kind: PromptKind::Password,
-                        name: String::new(),
-                        can_remember: saved,
-                        retry: false,
-                    };
-                    let (password, keep) = ask_secret(
-                        session_id,
-                        prompts.next()?,
-                        &profile,
-                        question,
-                        &mut channels,
-                    )
-                    .await?;
-                    if keep && saved {
-                        remember = Some(SecretString::from(password.expose_secret().to_owned()));
+    let auth = async {
+        match profile.authentication {
+            AuthenticationKind::Password => {
+                let password = match saved_password(context, &profile).await {
+                    Some(password) => password,
+                    None if !quick_password.expose_secret().is_empty() => quick_password,
+                    None => {
+                        let question = Question {
+                            kind: PromptKind::Password,
+                            name: String::new(),
+                            can_remember: saved,
+                            retry: false,
+                        };
+                        let (password, keep) = ask_secret(
+                            session_id,
+                            prompts.next()?,
+                            &profile,
+                            question,
+                            &mut channels,
+                        )
+                        .await?;
+                        if keep && saved {
+                            remember =
+                                Some(SecretString::from(password.expose_secret().to_owned()));
+                        }
+                        password
                     }
-                    password
-                }
-            };
-            AuthPlan::from_secret(&profile, Some(password))
-        }
-        AuthenticationKind::PublicKey => {
-            let (id, stored) = load_key(context, &profile).await?;
-            match external_signer(context, session_id, described, &id, &stored)? {
-                Some((signer, receiver, public_key)) => {
-                    let plan = AuthPlan::from_signer(&profile, public_key, signer.external());
-                    external = Some((signer, receiver));
-                    plan
-                }
-                None => {
-                    let key = unlock_key(
-                        context,
-                        session_id,
-                        prompts,
-                        &profile,
-                        id,
-                        stored,
-                        &mut channels,
-                    )
-                    .await?;
-                    AuthPlan::from_private_key(&profile, Arc::new(key))
+                };
+                AuthPlan::from_secret(&profile, Some(password))
+            }
+            AuthenticationKind::PublicKey => {
+                let (id, stored) = load_key(context, &profile).await?;
+                match external_signer(context, session_id, described, &id, &stored)? {
+                    Some((signer, receiver, public_key)) => {
+                        let plan = AuthPlan::from_signer(&profile, public_key, signer.external());
+                        external = Some((signer, receiver));
+                        plan
+                    }
+                    None => {
+                        let key = unlock_key(
+                            context,
+                            session_id,
+                            prompts,
+                            &profile,
+                            id,
+                            stored,
+                            &mut channels,
+                        )
+                        .await?;
+                        AuthPlan::from_private_key(&profile, Arc::new(key))
+                    }
                 }
             }
+            _ => AuthPlan::from_secret(&profile, None),
         }
-        _ => AuthPlan::from_secret(&profile, None),
-    }
-    .map_err(|error| Abort::failed(FailureKind::Other, format!("auth plan: {error:?}")))?;
+        .map_err(|error| Abort::failed(FailureKind::Other, format!("auth plan: {error:?}")))
+    };
+    let auth = tokio::select! {
+        biased;
+        () = crate::transport_lifecycle::closing() => return Err(Abort::Closed),
+        result = auth => result?,
+    };
 
     // 主机密钥：新主机与变更的密钥都问用户（变更时带 changed，Dart 给出醒目警告）。
     let verifier = KnownHostsVerifier::new(&context.known_hosts)
         .with_changed_key_prompt()
         .with_timeout(CONNECT_LIMIT);
-    let mut transport = NativeSshTransport::new(profile.clone(), auth, verifier)
+    let transport = NativeSshTransport::new(profile.clone(), auth, verifier)
         .and_then(|transport| transport.with_connect_timeout(CONNECT_LIMIT))
         .and_then(|transport| transport.with_keepalive(KEEPALIVE_INTERVAL, KEEPALIVE_MAX))
         .map_err(|error| {
@@ -263,11 +759,60 @@ pub async fn establish(
             )
         })?;
 
+    let mut transport: Box<dyn SessionTransport> = Box::new(transport);
+    let (signer, signer_requests) = external.unzip();
+    let result = handshake(
+        transport.as_mut(),
+        session_id,
+        &profile,
+        &transport_request,
+        channels,
+        prompts,
+        signer_requests,
+    )
+    .await;
+    if let Err(error) = result {
+        // shutdown 超时不能被认证表象覆盖。
+        if matches!(&error, Abort::Failed { detail, .. } if detail.starts_with("transport_shutdown_"))
+        {
+            return Err(error);
+        }
+        if let Some(abort) = signer.as_ref().and_then(Signer::abort) {
+            return Err(abort);
+        }
+        return Err(error);
+    }
+    if let Some(password) = remember {
+        tokio::select! {
+            biased;
+            () = crate::transport_lifecycle::closing() => {
+                if let Err(detail) = crate::transport_lifecycle::shutdown(transport.as_mut()).await {
+                    return Err(Abort::failed(detail.kind(), detail.detail().into()));
+                }
+                return Err(Abort::Closed);
+            }
+            stored = store_password(context, profile.clone(), password) => {
+                if let Some(stored) = stored {
+                    profile.credential_ref = stored.credential_ref;
+                }
+            }
+        }
+    }
+    Ok(Connected { transport, profile })
+}
+
+pub(crate) async fn handshake(
+    transport: &mut dyn SessionTransport,
+    session_id: u32,
+    profile: &ConnectionProfile,
+    transport_request: &TransportRequest,
+    mut channels: Channels<'_>,
+    prompts: &mut PromptIds,
+    mut signer_requests: Option<UnboundedReceiver<SignerRequest>>,
+) -> Result<(), Abort> {
     let (broker, mut requests) = interaction_channel();
-    let transport_request = TransportRequest::new(size);
-    let (signer, mut signer_requests) = external.unzip();
-    let result = {
-        let connect = transport.connect(&transport_request, broker.clone());
+    let result = async {
+        let connect = transport.connect(transport_request, broker.clone());
         tokio::pin!(connect);
         let mut pending = HashMap::new();
         let mut pending_pins = PendingPins::new();
@@ -276,20 +821,21 @@ pub async fn establish(
         loop {
             budget.pause(!pending.is_empty() || !pending_pins.is_empty() || signer_waiting);
             tokio::select! {
-                result = &mut connect => break result,
+                biased;
+                () = crate::transport_lifecycle::closing() => return Err(Abort::Closed),
+                result = &mut connect => break result.map_err(|error| Abort::failed(failure_kind(error.failure()), format!("connect: {error:?}"))),
                 () = budget.expired() => {
                     return Err(Abort::failed(FailureKind::Timeout, "connect: timed out".to_owned()));
                 }
                 request = requests.recv() => {
                     if let Some((id, request)) = request {
-                        forward_prompt(session_id, &profile, &broker, prompts, &mut pending, id, request)?;
+                        forward_prompt(session_id, profile, &broker, prompts, &mut pending, id, request)?;
                     }
                 }
                 request = next_signer_request(&mut signer_requests) => match request {
                     Some(SignerRequest::Pin { question, reply }) => {
                         let prompt_id = prompts.next()?;
-                        card_pin_prompt(session_id, prompt_id, &profile, question)
-                            .send_signal_to_dart();
+                        send_prompt(card_pin_prompt(session_id, prompt_id, profile, question));
                         pending_pins.insert(prompt_id, reply);
                     }
                     Some(SignerRequest::Waiting(waiting)) => signer_waiting = waiting,
@@ -302,23 +848,166 @@ pub async fn establish(
                 command = channels.commands.recv() => channels.defer(command)?,
             }
         }
-    };
+    }.await;
     if let Err(error) = result {
-        debug_print!("[connect] {error:?}");
-        // 外部签名失败时认证失败只是表象，原因在签名器里。
-        if let Some(abort) = signer.as_ref().and_then(Signer::abort) {
-            return Err(abort);
+        if let Err(detail) = crate::transport_lifecycle::shutdown(transport).await {
+            return Err(Abort::failed(detail.kind(), detail.detail().into()));
         }
-        return Err(Abort::failed(
-            failure_kind(error.failure()),
-            format!("connect: {error:?}"),
-        ));
+        return Err(error);
     }
+    Ok(())
+}
 
-    if let Some(password) = remember {
-        store_password(context, profile.id, password).await;
+/// 启动本地 shell 并完成连接；未指定启动描述时取平台默认 shell。
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+async fn connect_local(
+    launch: Option<LocalLaunch>,
+    session_id: u32,
+    profile: &ConnectionProfile,
+    transport_request: &TransportRequest,
+    channels: Channels<'_>,
+    prompts: &mut PromptIds,
+) -> Result<Box<dyn SessionTransport>, Abort> {
+    let launch = match launch {
+        Some(launch) => launch,
+        None => spawn_blocking(default_local_launch)
+            .await
+            .map_err(|error| Abort::failed(FailureKind::Other, format!("shell task: {error}")))??,
+    };
+    let mut transport: Box<dyn SessionTransport> =
+        Box::new(rshell_m0::rshell_session::LocalPtyTransport::launch(launch));
+    handshake(
+        transport.as_mut(),
+        session_id,
+        profile,
+        transport_request,
+        channels,
+        prompts,
+        None,
+    )
+    .await?;
+    Ok(transport)
+}
+
+/// 移动目标不编译本地 PTY 传输（让 iOS 链接时剥离 PTY/进程符号）；桌面协议在校验时
+/// 已以 PlatformUnavailable 拒绝，这里只作兜底拒绝。
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+async fn connect_local(
+    launch: Option<LocalLaunch>,
+    _session_id: u32,
+    _profile: &ConnectionProfile,
+    _transport_request: &TransportRequest,
+    _channels: Channels<'_>,
+    _prompts: &mut PromptIds,
+) -> Result<Box<dyn SessionTransport>, Abort> {
+    match launch {
+        Some(never) => match never {},
+        None => Err(Abort::failed(
+            FailureKind::InvalidTarget,
+            "local shell unavailable".to_owned(),
+        )),
     }
-    Ok(Connected { transport, profile })
+}
+
+/// 系统 ssh 的启动描述：在 PATH 中查找 ssh，参数由上游按连接配置组装（含参数校验与
+/// `StrictHostKeyChecking=ask`）；环境沿用应用进程，用户自己的 ssh 配置照常生效。
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn system_ssh_launch(
+    profile: &ConnectionProfile,
+    config: Option<PathBuf>,
+) -> Result<LocalLaunch, Abort> {
+    let program = rshell_platform::ssh_executable()
+        .map_err(|_| Abort::failed(FailureKind::Other, "ssh not found".to_owned()))?;
+    Ok(LocalLaunch::Command {
+        program,
+        args: system_ssh_args(profile, config)?,
+        cwd: None,
+        env: std::collections::BTreeMap::new(),
+    })
+}
+
+/// 是否找到系统 ssh：只看 PATH 中的文件是否存在，不执行它。移动目标恒为 false。
+pub(crate) fn system_ssh_found() -> bool {
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    {
+        rshell_platform::ssh_executable().is_ok()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        false
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn system_ssh_launch(
+    _profile: &ConnectionProfile,
+    _config: Option<PathBuf>,
+) -> Result<LocalLaunch, Abort> {
+    Err(Abort::failed(
+        FailureKind::InvalidTarget,
+        "system ssh unavailable".to_owned(),
+    ))
+}
+
+/// 系统 ssh 的参数：可选的测试配置 `-F <path>` 在最前，其余全部来自上游组装。
+pub(crate) fn system_ssh_args(
+    profile: &ConnectionProfile,
+    config: Option<PathBuf>,
+) -> Result<Vec<std::ffi::OsString>, Abort> {
+    let mut args = Vec::new();
+    if let Some(config) = config {
+        args.push("-F".into());
+        args.push(config.into_os_string());
+    }
+    args.extend(build_system_ssh_argv(profile).map_err(|_| {
+        Abort::failed(
+            FailureKind::InvalidTarget,
+            "system ssh arguments".to_owned(),
+        )
+    })?);
+    Ok(args)
+}
+
+/// 仅 debug 构建读取 `GUOSH_SYSTEM_SSH_CONFIG`：端到端测试借它让系统 ssh 使用隔离的
+/// `-F` 配置、不碰用户自己的 ~/.ssh。release 构建不读取，产品路径恒为 `None`。
+fn system_ssh_test_config() -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    {
+        std::env::var_os("GUOSH_SYSTEM_SSH_CONFIG")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        None
+    }
+}
+
+/// 平台默认 shell，工作目录为用户主目录（取不到时沿用当前目录）。
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn default_local_launch() -> Result<LocalLaunch, Abort> {
+    let shell = rshell_platform::default_local_shell()
+        .map_err(|_| Abort::failed(FailureKind::Other, "local shell not found".to_owned()))?;
+    Ok(LocalLaunch::Command {
+        program: shell.program,
+        args: shell.args,
+        cwd: std::env::home_dir(),
+        env: shell.env,
+    })
+}
+
+/// 旧会话维持上游默认 TERM；桌面会话由不可变的有效配置指定远端 PTY 的 TERM。
+fn native_transport_request(
+    size: TerminalSize,
+    terminal_type: Option<&str>,
+) -> Result<TransportRequest, Abort> {
+    let request = TransportRequest::new(size);
+    match terminal_type {
+        Some(terminal_type) => request
+            .with_terminal_type(terminal_type)
+            .map_err(|_| Abort::failed(FailureKind::InvalidTarget, "terminal_type".to_owned())),
+        None => Ok(request),
+    }
 }
 
 /// 连接的时限，只在等网络时走：有问题等用户回答时暂停。
@@ -406,25 +1095,26 @@ async fn ask_secret(
     question: Question,
     channels: &mut Channels<'_>,
 ) -> Result<(SecretString, bool), Abort> {
-    InteractionPrompt {
+    send_prompt(InteractionPrompt {
         name: question.name,
         can_remember: question.can_remember,
         retry: question.retry,
         ..empty_prompt(session_id, prompt_id, question.kind, profile)
-    }
-    .send_signal_to_dart();
+    });
     loop {
         tokio::select! {
+            biased;
+            () = crate::transport_lifecycle::closing() => return Err(Abort::Closed),
             reply = channels.replies.recv() => {
-                let Some(reply) = reply else { return Err(Abort::Closed) };
+                let Some(mut reply) = reply else { return Err(Abort::Closed) };
                 if reply.prompt_id != prompt_id {
                     continue;
                 }
                 if !reply.accept {
                     return Err(Abort::Cancelled);
                 }
-                let password = reply.answers.into_iter().next().unwrap_or_default();
-                return Ok((SecretString::from(password), reply.remember));
+                let password = reply.first_secret().unwrap_or_else(|| SecretString::from(String::new()));
+                return Ok((password, reply.remember));
             }
             command = channels.commands.recv() => channels.defer(command)?,
         }
@@ -591,12 +1281,12 @@ fn card_pin_prompt(
 }
 
 /// PIN 框的回答：PIN 与「记住到退出 App」；取消为 `None`。
-fn pin_answer(reply: InteractionReply) -> Option<(SecretString, bool)> {
+fn pin_answer(mut reply: ProtectedReply) -> Option<(SecretString, bool)> {
     if !reply.accept {
         return None;
     }
-    let pin = reply.answers.into_iter().next()?;
-    Some((SecretString::from(pin), reply.remember))
+    let pin = reply.first_secret()?;
+    Some((pin, reply.remember))
 }
 
 /// 卡签名失败的原因 → 连接失败的分类。
@@ -658,7 +1348,7 @@ fn forward_prompt(
         }
     };
     pending.insert(prompt_id, (id, prompt.kind));
-    prompt.send_signal_to_dart();
+    send_prompt(prompt);
     Ok(())
 }
 
@@ -673,7 +1363,7 @@ fn forward_reply(
     broker: &InteractionBroker,
     pending: &mut HashMap<u32, (InteractionId, PromptKind)>,
     pending_pins: &mut PendingPins,
-    reply: InteractionReply,
+    reply: ProtectedReply,
 ) {
     if let Some((id, kind)) = pending.remove(&reply.prompt_id) {
         let _ = broker.respond(id, broker_response(kind, reply));
@@ -705,6 +1395,18 @@ fn empty_prompt(
         can_remember: false,
         retry: false,
         tries_left: -1,
+    }
+}
+
+fn send_prompt(prompt: InteractionPrompt) {
+    match crate::desktop_runtime::SOURCE.try_with(Clone::clone) {
+        Ok(source) => crate::signals::desktop_session::DesktopPrompt {
+            source: source.source,
+            identity: source.identity,
+            prompt,
+        }
+        .send_signal_to_dart(),
+        Err(_) => prompt.send_signal_to_dart(),
     }
 }
 
@@ -751,15 +1453,15 @@ fn keyboard_interactive_prompt(
 
 /// Dart 的回答 → 上游 broker 的回答。拒绝主机密钥是 Reject（连接以
 /// HostKeyRejected / HostKeyChanged 失败），其余的「不答」是 Cancel。
-fn broker_response(kind: PromptKind, reply: InteractionReply) -> InteractionResponse {
+fn broker_response(kind: PromptKind, mut reply: ProtectedReply) -> InteractionResponse {
     match (kind, reply.accept) {
         (PromptKind::HostKey, true) => {
             InteractionResponse::HostKey(HostKeyDecision::AcceptAndStore)
         }
         (PromptKind::HostKey, false) => InteractionResponse::HostKey(HostKeyDecision::Reject),
-        (PromptKind::KeyboardInteractive, true) => InteractionResponse::Answers(
-            reply.answers.into_iter().map(SecretString::from).collect(),
-        ),
+        (PromptKind::KeyboardInteractive, true) => {
+            InteractionResponse::Answers(reply.all_secrets())
+        }
         (
             PromptKind::KeyboardInteractive
             | PromptKind::Password
@@ -770,35 +1472,68 @@ fn broker_response(kind: PromptKind, reply: InteractionReply) -> InteractionResp
     }
 }
 
+/// 刚通过认证的密码只能记到同一认证目标与凭据上：连接期间改了这些字段，
+/// 密码就不再对应目录中的记录。名称、备注、分组、终端覆盖等与认证无关的
+/// 编辑不影响记住密码；主机密钥策略、远端命令也不决定密码属于谁。
+fn same_authentication_target(
+    current: &ConnectionProfile,
+    authenticated: &ConnectionProfile,
+) -> bool {
+    current.id == authenticated.id
+        && current.host == authenticated.host
+        && current.port == authenticated.port
+        && current.username == authenticated.username
+        && current.transport == authenticated.transport
+        && current.authentication == authenticated.authentication
+        && current.credential_ref == authenticated.credential_ref
+        && current.identity_file == authenticated.identity_file
+}
+
 /// 连接成功后把用户输入的密码存进钥匙串（目录与钥匙串的一致性由上游
 /// `CredentialCoordinator` 保证）。存不进去不影响本次会话。
-async fn store_password(context: &Arc<AppContext>, id: ConnectionId, password: SecretString) {
+pub(crate) async fn store_password(
+    context: &Arc<AppContext>,
+    authenticated: ConnectionProfile,
+    password: SecretString,
+) -> Option<ConnectionProfile> {
     let task_context = context.clone();
     let stored = spawn_blocking(move || {
+        // 与目录编辑、删除使用同一锁：比较和提交之间不得切换目标或凭据。
+        let _operations = task_context
+            .key_operations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let catalog = task_context
             .repository
             .load_catalog()
             .map_err(|error| format!("{error:?}"))?;
-        // 取目录里的当前版本：连接期间用户可能刚改过这条连接。
-        let Some(profile) = catalog.connections.get(&id).cloned() else {
-            return Ok(false);
+        let Some(profile) = catalog.connections.get(&authenticated.id).cloned() else {
+            return Ok(None);
         };
+        if !same_authentication_target(&profile, &authenticated) {
+            debug_print!("[connect] saving password: 认证目标或凭据已在连接期间被修改，不保存");
+            return Ok(None);
+        }
         task_context
             .credentials
             .apply_catalog(
                 CatalogMutation::Update(profile),
                 SecretUpdate::Set(password),
             )
-            .map(|_| true)
+            .map(|catalog| catalog.connections.get(&authenticated.id).cloned())
             .map_err(|error| format!("{error:?}"))
     })
     .await;
     match stored {
-        Ok(Ok(true)) => context.catalog_changed.notify_one(),
-        Ok(Ok(false)) => {}
+        Ok(Ok(Some(profile))) => {
+            context.catalog_changed.notify_one();
+            return Some(profile);
+        }
+        Ok(Ok(None)) => {}
         Ok(Err(error)) => debug_print!("[connect] saving password: {error}"),
         Err(error) => debug_print!("[connect] saving password task: {error}"),
     }
+    None
 }
 
 /// 上游的失败分类 → 边界上的分类。
@@ -819,17 +1554,134 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::{
         Abort, Budget, PendingPins, PromptIds, PromptKind, broker_response, forward_prompt,
-        forward_reply, is_empty_round,
+        forward_reply, is_empty_round, native_transport_request, validate_desktop,
+        validate_desktop_for,
     };
     use crate::signals::interaction::InteractionReply;
+    use crate::signals::{
+        DESKTOP_CONNECT_VERSION, DesktopConnectError, DesktopConnectRequest, DesktopTargetKind,
+    };
     use rshell_m0::rshell_core::{
         AuthPrompt, ConnectionProfile, HostKeyDecision, HostKeyPrompt, InteractionId,
-        InteractionRequest, InteractionResponse, KeyboardInteractivePrompt,
+        InteractionRequest, InteractionResponse, KeyboardInteractivePrompt, TerminalSize,
     };
     use rshell_m0::rshell_session::interaction_channel;
     use secrecy::ExposeSecret;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    #[test]
+    fn transport_request_uses_desktop_term_and_preserves_legacy_default() {
+        let size = TerminalSize {
+            cols: 80,
+            rows: 24,
+            pixel_width: 640,
+            pixel_height: 480,
+            dpi: 96,
+        };
+        let desktop = native_transport_request(size, Some("vt220"))
+            .ok()
+            .expect("桌面 TERM");
+        assert_eq!(desktop.initial_size(), size);
+        assert_eq!(desktop.terminal_type(), "vt220");
+        let legacy = native_transport_request(size, None)
+            .ok()
+            .expect("旧连接默认 TERM");
+        assert_eq!(legacy.terminal_type(), "xterm-256color");
+        assert!(matches!(
+            native_transport_request(size, Some("invalid\0term")),
+            Err(Abort::Failed { .. })
+        ));
+    }
+
+    #[test]
+    fn system_ssh_arguments_come_from_upstream_with_only_an_optional_config_prefix() {
+        use rshell_m0::rshell_core::{AuthenticationKind, TransportKind};
+        use std::path::PathBuf;
+        let mut profile = ConnectionProfile::new("系统 ssh", "example.test");
+        profile.port = 2200;
+        profile.username = "user".into();
+        profile.transport = TransportKind::SystemOpenSsh;
+        profile.authentication = AuthenticationKind::Agent;
+        let args = |profile: &ConnectionProfile, config: Option<PathBuf>| {
+            super::system_ssh_args(profile, config)
+                .ok()
+                .expect("合法参数")
+                .into_iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            args(&profile, None),
+            [
+                "-p",
+                "2200",
+                "-o",
+                "StrictHostKeyChecking=ask",
+                "--",
+                "user@example.test"
+            ]
+        );
+
+        profile.port = 22;
+        profile.authentication = AuthenticationKind::PublicKey;
+        profile.identity_file = Some(PathBuf::from("id_test"));
+        profile.remote_command = Some("uptime".into());
+        assert_eq!(
+            args(&profile, Some(PathBuf::from("fixture_config"))),
+            [
+                "-F",
+                "fixture_config",
+                "-i",
+                "id_test",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=ask",
+                "--",
+                "user@example.test",
+                "uptime"
+            ]
+        );
+
+        // 上游校验仍生效：像选项的主机、改写目的地的用户名都拒绝。
+        for (host, username) in [("-oProxyCommand=x", "user"), ("example.test", "a@b")] {
+            let mut bad = profile.clone();
+            bad.host = host.into();
+            bad.username = username.into();
+            assert!(super::system_ssh_args(&bad, None).is_err());
+        }
+    }
+
+    #[test]
+    fn forged_mobile_desktop_transport_is_rejected_even_for_a_valid_shape() {
+        let request = DesktopConnectRequest {
+            version: DESKTOP_CONNECT_VERSION,
+            request_id: 1,
+            session_id: 1,
+            target: DesktopTargetKind::LocalShell,
+            profile_id: String::new(),
+            connection_id: String::new(),
+            host: String::new(),
+            port: 0,
+            username: String::new(),
+            password: String::new(),
+            command: String::new(),
+            cols: 80,
+            rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+            dpi: 96,
+        };
+        assert!(matches!(
+            validate_desktop_for::<false>(&request),
+            Err((DesktopConnectError::PlatformUnavailable, _))
+        ));
+        assert_eq!(
+            validate_desktop(&request).is_ok(),
+            super::desktop_supported()
+        );
+    }
 
     #[test]
     fn keyboard_interactive_rounds_without_questions_or_text_are_answered_silently() {
@@ -850,7 +1702,7 @@ mod tests {
         assert!(!is_empty_round(&round("", "Your password expires soon", 0)));
     }
 
-    fn reply(accept: bool, answers: &[&str]) -> InteractionReply {
+    fn reply(accept: bool, answers: &[&str]) -> crate::protected_reply::ProtectedReply {
         InteractionReply {
             session_id: 1,
             prompt_id: 1,
@@ -858,6 +1710,7 @@ mod tests {
             answers: answers.iter().map(|answer| (*answer).to_owned()).collect(),
             remember: false,
         }
+        .into()
     }
 
     #[test]
@@ -975,5 +1828,91 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn protected_answers_survive_queue_ownership_and_are_cleared_on_every_rejection() {
+        use crate::protected_reply::ProtectedReply;
+        use std::sync::{Arc, Mutex};
+        use tokio::sync::mpsc::unbounded_channel;
+        let audit = Arc::new(Mutex::new(Vec::new()));
+        let answer = |prompt_id, accept| {
+            ProtectedReply::audited(
+                InteractionReply {
+                    session_id: 1,
+                    prompt_id,
+                    accept,
+                    answers: vec!["秘密一".into(), "多余二".into(), "多余三".into()],
+                    remember: false,
+                },
+                audit.clone(),
+            )
+        };
+
+        let (sender, receiver) = unbounded_channel();
+        drop(receiver);
+        let rejected = sender.send(answer(1, true));
+        assert!(
+            audit.lock().expect("审计").is_empty(),
+            "发送错误仍拥有 guard"
+        );
+        drop(rejected);
+        assert_eq!(*audit.lock().expect("审计"), vec![3]);
+
+        let (sender, receiver) = unbounded_channel();
+        assert!(sender.send(answer(1, true)).is_ok());
+        drop(receiver);
+        assert_eq!(*audit.lock().expect("审计"), vec![3, 3], "排队后关闭清零");
+
+        let (broker, _requests) = interaction_channel();
+        let mut pending = HashMap::new();
+        let mut pins = PendingPins::new();
+        forward_reply(&broker, &mut pending, &mut pins, answer(99, true));
+        assert_eq!(
+            *audit.lock().expect("审计"),
+            vec![3, 3, 3],
+            "陈旧 prompt 清零"
+        );
+        assert!(matches!(
+            broker_response(PromptKind::KeyboardInteractive, answer(1, false)),
+            InteractionResponse::Cancel
+        ));
+        assert!(super::pin_answer(answer(1, false)).is_none());
+
+        let (commands_tx, mut commands) = unbounded_channel();
+        let (replies_tx, mut replies) = unbounded_channel();
+        assert!(replies_tx.send(answer(1, true)).is_ok());
+        assert!(replies_tx.send(answer(2, true)).is_ok());
+        let mut backlog = std::collections::VecDeque::new();
+        let profile = ConnectionProfile::new("认证回答消费测试", "example.test");
+        let result = super::ask_secret(
+            1,
+            2,
+            &profile,
+            super::Question {
+                kind: PromptKind::Password,
+                name: String::new(),
+                can_remember: false,
+                retry: false,
+            },
+            &mut super::Channels {
+                commands: &mut commands,
+                replies: &mut replies,
+                backlog: &mut backlog,
+            },
+        )
+        .await;
+        let (secret, _) = result.ok().expect("真实密码消费入口");
+        assert_eq!(secret.expose_secret(), "秘密一");
+        drop(secret);
+        assert_eq!(
+            *audit.lock().expect("审计"),
+            vec![3, 3, 3, 3, 3, 3, 2],
+            "旧回答和多余答案都经清零析构"
+        );
+        let (pin, _) = super::pin_answer(answer(3, true)).expect("真实 PIN 消费");
+        assert_eq!(pin.expose_secret(), "秘密一");
+        assert_eq!(audit.lock().expect("审计").last(), Some(&2));
+        drop(commands_tx);
     }
 }

@@ -4,11 +4,11 @@ import 'package:flutter/material.dart';
 
 import '../bindings/bindings.dart';
 import '../keys/keys_page.dart';
-import 'terminal_font.dart';
 import 'key_bar_editor.dart';
 import '../terminal/key_bar_layout.dart';
+import 'interface_font_setting.dart';
 
-/// 设置：终端字体、字号、键位条与滚回行数（存在 Rust 侧，新会话生效）。
+/// 字体与键位条即时生效；默认字号和滚回行数用于新会话。
 class SettingsPage extends StatefulWidget {
   final ValueChanged<SaveSettings>? saveSettings;
   final VoidCallback? querySettings;
@@ -45,16 +45,10 @@ class _SettingsPageState extends State<SettingsPage> {
     super.dispose();
   }
 
-  void _save({
-    String? fontFamily,
-    double? fontSize,
-    int? scrollbackLines,
-    bool? showKeyBar,
-  }) {
+  void _save({double? fontSize, int? scrollbackLines, bool? showKeyBar}) {
     if (_settings == null) return;
     // 回包只用于显示，不用旧快照补齐未修改字段。
     final request = SaveSettings(
-      fontFamily: fontFamily,
       fontSize: fontSize,
       scrollbackLines: scrollbackLines,
       showKeyBar: showKeyBar,
@@ -91,6 +85,7 @@ class _SettingsPageState extends State<SettingsPage> {
       child: ListView(
         padding: const EdgeInsets.symmetric(vertical: 8),
         children: [
+          const InterfaceFontSetting(),
           ListTile(
             leading: const Icon(Icons.key),
             title: const Text('私钥'),
@@ -100,25 +95,7 @@ class _SettingsPageState extends State<SettingsPage> {
               context,
             ).push(MaterialPageRoute<void>(builder: (_) => const KeysPage())),
           ),
-          const _SectionTitle('终端字体'),
-          RadioGroup<String>(
-            groupValue: settings.fontFamily,
-            onChanged: (family) {
-              if (family != null) _save(fontFamily: family);
-            },
-            child: Column(
-              children: [
-                for (final family in settings.fontFamilies)
-                  RadioListTile<String>(
-                    value: family,
-                    title: Text(family, style: TextStyle(fontFamily: family)),
-                    subtitle: family == bundledFontFamily
-                        ? const Text('内置，含 powerline 与图标字形')
-                        : const Text('系统字体'),
-                  ),
-              ],
-            ),
-          ),
+          InterfaceFontSetting(terminal: true, previewFontSize: size),
           const _SectionTitle('字号'),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -144,17 +121,6 @@ class _SettingsPageState extends State<SettingsPage> {
                 ),
                 SizedBox(width: 32, child: Text('${size.round()}')),
               ],
-            ),
-          ),
-          Container(
-            margin: const EdgeInsets.all(16),
-            padding: const EdgeInsets.all(12),
-            color: Colors.black,
-            child: Text(
-              'probe@nas:~\$ ls -la\n main  ✔  中文 ⌘',
-              style: terminalStyle(settings)
-                  .toTextStyle()
-                  .copyWith(fontSize: size, color: Colors.white),
             ),
           ),
           const _SectionTitle('键盘'),
@@ -204,7 +170,7 @@ class _SettingsPageState extends State<SettingsPage> {
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Text(
-              '字体和滚回设置用于新会话；按钮排布立即生效。',
+              '字体与按钮排布立即生效；默认字号和滚回设置用于新会话。',
               style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
             ),
           ),

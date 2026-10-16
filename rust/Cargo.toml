@@ -6,9 +6,9 @@ license = "MIT"
 publish = false
 
 # M0 的编译-链接探针 crate，现为**根 workspace 的成员**（../Cargo.toml）。
-# 上游内核不在本仓库里 —— 它是官方仓库、pin 住 rev 的 git 依赖；
-# `native/hub`（rinf 信号层）通过本 crate 的 `pub use` 再导出拿类型，
-# 所以**上游 rev 只在这里 pin 这一处**。来源、接口与许可见 UPSTREAM.md。
+# 上游内核不在本仓库里 —— 它是团队 fork、pin 住 rev 的 git 依赖；
+# `native/hub`（rinf 信号层）通过本 crate 的 `pub use` 再导出拿核心类型，
+# 桌面 PTY／平台接缝在 native/hub/Cargo.toml 固定同一提交。来源、接口与许可见根目录 UPSTREAM.md。
 
 [lib]
 name = "rshell_m0"
@@ -37,14 +37,14 @@ keyring-core = "1.0.0"
 
 [dependencies]
 # 上游内核走 **git 依赖**，精确 pin 到一个 commit，而不是把源码 vendor 进本仓库。
-# 源为官方 hugefiver/rsHell，所需认证、连接控制与终端接口均已包含在上游。
+# 源为团队 fork MoyuTeams/rsHell（基于官方 hugefiver/rsHell，补丁见 UPSTREAM.md）。
 # 升级时同时更新这里的 rev 与根 Cargo.lock，再跑上游及 GuoSSHell 的回归。
 # 代价：全新环境首次构建需要网络。
-rshell-core = { git = "https://github.com/hugefiver/rsHell", rev = "718d9b62a8f062af8f5787b5fc27f6c5bbb4f268" }
-rshell-session = { git = "https://github.com/hugefiver/rsHell", rev = "718d9b62a8f062af8f5787b5fc27f6c5bbb4f268" }
-rshell-storage = { git = "https://github.com/hugefiver/rsHell", rev = "718d9b62a8f062af8f5787b5fc27f6c5bbb4f268" }
+rshell-core = { git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
+rshell-session = { git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
+rshell-storage = { git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
 # 与 rshell-session 保持完全相同的版本与 feature，避免同一个 crate 出现两份不同类型。
-russh = { version = "=0.62.5", default-features = false, features = ["flate2", "ring", "rsa"] }
+russh = { version = "=0.62.5", git = "https://github.com/MoyuTeams/russh", rev = "392265d2b622fdce3fd57f836db134773c475950", default-features = false, features = ["flate2", "ring", "rsa"] }
 secrecy = "0.10.3"
 # RenderFrame 的 rows/cells 是 Arc<[..]>，serde 必须显式打开 rc 才能序列化。
 serde = { version = "1", features = ["derive", "rc"] }
@@ -56,3 +56,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"
 # 只给 examples（m0_loopback / demo_server）用，不进 App 依赖图。
 [dev-dependencies]
 bytes = "1"
+
+# demo_server 内有回归测试（内存管道，不起子进程，各平台通用）；
+# example 默认不进 `cargo test`，需显式打开。
+[[example]]
+name = "demo_server"
+test = true

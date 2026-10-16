@@ -174,6 +174,21 @@ class Workspace extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 拖动标签只调整显示顺序，活动窗格与会话控制器保持不变。
+  void reorderTab(int oldIndex, int newIndex) {
+    if (oldIndex < 0 ||
+        oldIndex >= tabs.length ||
+        newIndex < 0 ||
+        newIndex > tabs.length) {
+      return;
+    }
+    final selected = activeTab;
+    if (newIndex > oldIndex) newIndex--;
+    tabs.insert(newIndex, tabs.removeAt(oldIndex));
+    _activeIndex = tabs.indexOf(selected!);
+    notifyListeners();
+  }
+
   /// 同一标签里切到前 / 后一个窗格（循环）。
   void cyclePane(int step) {
     final tab = activeTab;

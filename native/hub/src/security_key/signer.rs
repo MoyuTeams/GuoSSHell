@@ -12,14 +12,12 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::spawn_blocking;
 
 use super::{Authenticator, SkFailure, webauthn_signature};
-use crate::external_signer::{SignerRequest, send_hint};
+use crate::external_signer::{HintSink, SignerRequest};
 use crate::signals::ConnectHint;
 
 pub struct SecurityKeySigner {
     authenticator: Arc<dyn Authenticator>,
-    session_id: u32,
-    /// 连接中状态里显示的目标。
-    target: String,
+    hints: HintSink,
     rp_id: String,
     credential_id: Vec<u8>,
     requests: UnboundedSender<SignerRequest>,
@@ -37,8 +35,7 @@ impl SecurityKeySigner {
     ) -> Self {
         Self {
             authenticator,
-            session_id,
-            target,
+            hints: HintSink::capture(session_id, target),
             rp_id,
             credential_id,
             requests,
@@ -60,10 +57,10 @@ impl SecurityKeySigner {
         let credential_id = self.credential_id.clone();
         let challenge = data.to_vec();
         let _ = self.requests.send(SignerRequest::Waiting(true));
-        send_hint(self.session_id, &self.target, ConnectHint::SecurityKey);
+        self.hints.send(ConnectHint::SecurityKey);
         let assertion =
             spawn_blocking(move || authenticator.assert(&rp_id, &credential_id, &challenge)).await;
-        send_hint(self.session_id, &self.target, ConnectHint::None);
+        self.hints.send(ConnectHint::None);
         let _ = self.requests.send(SignerRequest::Waiting(false));
         let assertion = assertion.map_err(|error| SkFailure::Failed(error.to_string()))??;
         webauthn_signature(&assertion, &self.rp_id, data)

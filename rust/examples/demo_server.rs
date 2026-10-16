@@ -7,6 +7,7 @@
 //! 登录 `probe` / `probe`。连上后先发一段彩色 + CJK + emoji 横幅，
 //! 然后每 700 ms 追加一行日志（模拟 `tail -f`，用来压帧率）。
 //! 输入回显为青色；window-change 回发 RESIZE-ACK（M1 验收要看的远端响应）。
+//! 设置 `GUOSH_DEMO_ENQ=1` 时，横幅后额外发一个 ENQ（0x05），用来验证终端 answerback。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -113,6 +114,19 @@ impl Handler for DemoHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         // 输入回显成青色（M1 终端只读，但服务器照常回显）。
+        if let Ok(path) = std::env::var("GUOSH_DEMO_INPUT_LOG") {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                for byte in data {
+                    let _ = write!(file, "{byte:02x}");
+                }
+                let _ = writeln!(file);
+            }
+        }
         let mut echo = b"\x1b[36m".to_vec();
         echo.extend_from_slice(data);
         echo.extend_from_slice(b"\x1b[0m");
@@ -155,8 +169,6 @@ impl DemoHandler {
 /// 测试服务器专用：真实执行命令，stdout/stderr 直通频道。
 /// 进度条脚本的 `\r` 重画会原样进引擎——正好当 60Hz 帧源。
 async fn run_real_command(channel: Channel<Msg>, command: String) {
-    use tokio::io::AsyncReadExt;
-
     let mut child = match tokio::process::Command::new("bash")
         .arg("-c")
         .arg(&command)
@@ -173,43 +185,56 @@ async fn run_real_command(channel: Channel<Msg>, command: String) {
         }
     };
 
-    async fn pipe<R: tokio::io::AsyncRead + Unpin>(
-        mut stream: R,
-        channel: &Channel<Msg>,
-    ) -> Option<()> {
-        let mut buffer = vec![0u8; 8192];
-        loop {
-            match stream.read(&mut buffer).await {
-                Ok(0) | Err(_) => return None,
-                Ok(n) => channel.data_bytes(buffer[..n].to_vec()).await.ok()?,
-            }
+    // 两路都读到 EOF 才等退出；错误或超时才终止子进程，单路 EOF 不能截断另一端。
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(3600), async {
+        let out = child.stdout.take().ok_or(())?;
+        let err = child.stderr.take().ok_or(())?;
+        drain_command_output(out, err, |bytes| async {
+            channel.data_bytes(bytes).await.map_err(|_| ())
+        })
+        .await?;
+        child.wait().await.map_err(|_| ())
+    })
+    .await;
+    let code = match completed {
+        Ok(Ok(status)) => status.code().unwrap_or(1) as u32,
+        failure => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            if failure.is_err() { 124 } else { 1 }
         }
-    }
-
-    // stdout / stderr 并行泵入频道；任一端结束（或频道关闭）就收尾。
-    // 1 小时兜底超时防止测试服务器挂死。
-    let mut code = 0u32;
-    if let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) {
-        tokio::select! {
-            _ = pipe(out, &channel) => {}
-            _ = pipe(err, &channel) => {}
-            _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
-                code = 124;
-            }
-        }
-    }
-
+    };
     // 真 sshd 的收尾序列：exit-status → EOF → close（App 据此弹「已断开」）。
-    let _ = child.start_kill();
-    let status = child.wait().await;
-    if let Ok(status) = status
-        && let Some(c) = status.code()
-    {
-        code = c as u32;
-    }
     let _ = channel.exit_status(code).await;
     let _ = channel.eof().await;
     let _ = channel.close().await;
+}
+
+async fn drain_command_output<R, S, F, Fut>(out: R, err: S, send: F) -> Result<(), ()>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    S: tokio::io::AsyncRead + Unpin,
+    F: Fn(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = Result<(), ()>>,
+{
+    async fn pipe<R, F, Fut>(mut stream: R, send: &F) -> Result<(), ()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+        F: Fn(Vec<u8>) -> Fut,
+        Fut: std::future::Future<Output = Result<(), ()>>,
+    {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = [0u8; 8192];
+        loop {
+            let count = stream.read(&mut buffer).await.map_err(|_| ())?;
+            if count == 0 {
+                return Ok(());
+            }
+            send(buffer[..count].to_vec()).await?;
+        }
+    }
+    tokio::try_join!(pipe(out, &send), pipe(err, &send))?;
+    Ok(())
 }
 
 /// 横幅 + 持续日志流。颜色形态故意覆盖 M1 验收的每一项：
@@ -230,6 +255,17 @@ async fn demo_stream(channel: Channel<Msg>) {
         {
             return;
         }
+    }
+
+    // ENQ 探针（GUOSH_DEMO_ENQ=1）：横幅之后发 0x05，终端引擎的 answerback 回复
+    // 会当普通输入回到 `data`，落进 GUOSH_DEMO_INPUT_LOG。
+    if std::env::var("GUOSH_DEMO_ENQ").as_deref() == Ok("1")
+        && channel
+            .data_bytes(Bytes::from_static(b"\x05"))
+            .await
+            .is_err()
+    {
+        return;
     }
 
     let start = std::time::Instant::now();
@@ -307,8 +343,45 @@ fn demo_host_key() -> russh::keys::PrivateKey {
 
 /// 密钥的持久位置：`~/.guosh-demo/hostkey`（/tmp 会被系统清理）。
 fn dirs_demo_host_key() -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("GUOSH_DEMO_DATA") {
+        let dir = std::path::PathBuf::from(path);
+        std::fs::create_dir_all(&dir).expect("测试数据目录");
+        return dir.join("hostkey");
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
     let dir = std::path::Path::new(&home).join(".guosh-demo");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("hostkey")
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn one_pipe_eof_does_not_truncate_the_other_tail() {
+        use tokio::io::AsyncWriteExt;
+        for close_stdout in [false, true] {
+            let (out, mut out_writer) = tokio::io::duplex(64);
+            let (err, mut err_writer) = tokio::io::duplex(64);
+            let bytes = std::sync::Mutex::new(Vec::new());
+            let writer = async {
+                let remaining = if close_stdout {
+                    out_writer.shutdown().await.unwrap();
+                    &mut err_writer
+                } else {
+                    err_writer.shutdown().await.unwrap();
+                    &mut out_writer
+                };
+                tokio::task::yield_now().await;
+                remaining.write_all(b"TAIL\n").await.unwrap();
+                remaining.shutdown().await.unwrap();
+            };
+            let drain = super::drain_command_output(out, err, |chunk| {
+                bytes.lock().unwrap().extend(chunk);
+                std::future::ready(Ok(()))
+            });
+            let (_, result) = tokio::join!(writer, drain);
+            assert_eq!(result, Ok(()));
+            assert_eq!(*bytes.lock().unwrap(), b"TAIL\n");
+        }
+    }
 }

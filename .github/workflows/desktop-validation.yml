@@ -1,0 +1,111 @@
+name: 桌面开发验证（无签名）
+
+on:
+  push:
+    branches: [feat-desktop]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-validation-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+  PYTHONUTF8: '1'
+  PYTHONIOENCODING: utf-8
+  PUB_HOSTED_URL: https://pub.dev
+  COCOAPODS_DISABLE_STATS: 'true'
+
+jobs:
+  workflow-checks:
+    name: 工作流与辅助脚本检查
+    # PR 分支过滤器只匹配目标分支；同时覆盖从 feat-desktop 向受信分支提 PR。
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.base_ref == 'feat-desktop' ||
+      github.head_ref == 'feat-desktop'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 检查 Python 语法与回归
+        run: |
+          python -m compileall -q scripts/ci
+          python -m unittest discover -s scripts/ci/tests -v
+      - name: 检查工作流语法
+        run: python scripts/ci/actionlint.py
+
+  desktop:
+    name: 桌面检查及构建 / ${{ matrix.os }}
+    needs: workflow-checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            desktop: windows
+          - os: macos-26
+            desktop: macos
+          - os: ubuntu-24.04
+            desktop: linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: desktop-${{ matrix.desktop }}
+      - name: Cargo 格式检查
+        run: cargo fmt --all -- --check
+      - name: Cargo 全目标检查
+        run: cargo check --workspace --all-targets --locked
+      - name: Cargo Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Cargo 单元测试
+        run: cargo test --workspace --locked
+      # 实验候选测试不计入桌面功能门禁：失败不阻断作业，结果写入作业摘要。
+      - name: Cargo 实验候选测试（不计入门禁）
+        id: experimental-candidates
+        continue-on-error: true
+        timeout-minutes: 20
+        run: cargo test -p hub --features experimental-candidates --locked --no-fail-fast
+      - name: 标注实验候选测试结果
+        if: always()
+        env:
+          OUTCOME: ${{ steps.experimental-candidates.outcome }}
+        run: |
+          printf '%s\n' \
+            '### 实验候选测试 / ${{ matrix.os }}' \
+            "结果：${OUTCOME:-未运行}。实验候选，不计入桌面功能门禁。" >> "$GITHUB_STEP_SUMMARY"
+      - name: Flutter 静态检查
+        run: flutter analyze --no-pub
+      - name: Flutter 单元测试
+        run: flutter test --no-pub --reporter expanded
+      # 沿用现有未签名 macOS 构建配置；不修改应用沙箱 entitlements。
+      - name: 准备 macOS 非签名构建配置
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p build/ci
+          printf 'CODE_SIGNING_ALLOWED = NO\nCODE_SIGNING_REQUIRED = NO\nDEVELOPMENT_TEAM =\n' > build/ci/unsigned.xcconfig
+          echo "XCODE_XCCONFIG_FILE=$PWD/build/ci/unsigned.xcconfig" >> "$GITHUB_ENV"
+      - name: 构建原生桌面应用（debug，未签名）
+        run: flutter build ${{ matrix.desktop }} --debug --no-pub
+      - name: 标注未运行的原生验收
+        if: always()
+        run: |
+          printf '%s\n' \
+            '### 桌面验证范围 / ${{ matrix.os }}' \
+            '本任务执行的检查、测试与构建是否通过，以以上步骤和作业状态为准；失败不得视为环境跳过。' \
+            '未执行原生窗口 smoke、进程级 PTY / System SSH 实链路；也未验证 macOS 沙箱内运行。缺少这些结果不代表运行通过，后续阶段接入真实验收。' >> "$GITHUB_STEP_SUMMARY"

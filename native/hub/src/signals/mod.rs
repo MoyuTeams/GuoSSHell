@@ -10,6 +10,8 @@
 //! 全局广播，多个会话并存时靠它分流。
 
 pub mod catalog;
+pub mod desktop_native_input;
+pub mod desktop_session;
 pub mod interaction;
 pub mod keys;
 pub mod settings;
@@ -74,6 +76,112 @@ pub struct ConnectRequest {
     pub pixel_width: u32,
     pub pixel_height: u32,
     pub dpi: u32,
+}
+
+/// 桌面会话协议版本。旧 `ConnectRequest` 不参与此协议，也始终只连接 Native SSH。
+pub const DESKTOP_CONNECT_VERSION: u16 = 1;
+
+/// 桌面目标的判别字段；不能用空主机名推断本地会话。
+#[derive(Deserialize, Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopTargetKind {
+    NativeSsh,
+    SystemOpenSsh,
+    LocalShell,
+}
+
+/// 桌面连接。`connection_id` 非空时从目录取目标，目标字段必须为空；否则为临时目标。
+/// `profile_id` 为空时选应用默认终端配置。密码仅供 Native 临时目标使用，不会回显。
+#[derive(Deserialize, DartSignal)]
+pub struct DesktopConnectRequest {
+    pub version: u16,
+    pub request_id: u32,
+    pub session_id: u32,
+    pub target: DesktopTargetKind,
+    pub profile_id: String,
+    pub connection_id: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub command: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub dpi: u32,
+}
+
+/// 桌面请求预校验结果；`Accepted` 仅表示已交给 Native 安全连接流程，非 SSH 已认证。
+#[derive(Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopConnectError {
+    Accepted,
+    UnsupportedVersion,
+    PlatformUnavailable,
+    TransportUnavailable,
+    InvalidField,
+    InvalidProfileId,
+    ProfileNotFound,
+    InvalidConnectionId,
+    ConnectionNotFound,
+    Storage,
+}
+
+#[derive(Serialize, RustSignal)]
+pub struct DesktopConnectResult {
+    pub request_id: u32,
+    pub session_id: u32,
+    pub error: DesktopConnectError,
+    /// 出错字段名或固定的不可用原因；不包含目标、密码或其他凭据。
+    pub detail: String,
+}
+
+/// AppReady 成功后查询桌面后端能力；版本与桌面连接协议共用。
+#[derive(Deserialize, Serialize, DartSignal)]
+pub struct DesktopCapabilitiesQuery {
+    pub protocol_version: u16,
+    pub request_id: u32,
+}
+
+#[cfg(test)]
+pub(crate) fn inject_desktop_capabilities_query(bytes: &[u8]) {
+    DesktopCapabilitiesQuery::send_dart_signal(bytes, &[]);
+}
+
+#[derive(Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopCapabilitiesStatus {
+    Ready,
+    UnsupportedVersion,
+    UnsupportedPlatform,
+    StorageUnavailable,
+}
+
+/// Native 当前确实支持的认证入口；不表示宿主设备的硬件或远端服务器已通过探测。
+#[derive(Serialize, SignalPiece, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopCredentialKind {
+    Password,
+    ManagedPublicKey,
+    KeyboardInteractive,
+}
+
+#[derive(Serialize, SignalPiece)]
+pub struct DesktopTransportCapability {
+    pub target: DesktopTargetKind,
+    /// 仅表示当前 Rust 后端能否接收该目标，不代表网络、宿主程序或硬件已验证。
+    pub backend_available: bool,
+    pub unavailable_reason: String,
+    /// 只列出该目标当前可用的认证方式；不可用目标为空。
+    pub credentials: Vec<DesktopCredentialKind>,
+}
+
+/// 无秘密的桌面能力结果。revision 与 transport 能力来自查询时的后端状态；
+/// 存储/版本/平台不可用时 revision 为 None，不假装读取成功。
+#[derive(Serialize, RustSignal)]
+pub struct DesktopCapabilitiesResult {
+    pub protocol_version: u16,
+    pub request_id: u32,
+    pub status: DesktopCapabilitiesStatus,
+    pub configuration_revision: Option<u64>,
+    pub transports: Vec<DesktopTransportCapability>,
 }
 
 /// 视口变化（旋转 / 改窗口）。→ `engine.resize` + `transport.resize`（远端 window-change）。
@@ -240,7 +348,7 @@ pub enum ConnectHint {
     SecurityKey,
 }
 
-#[derive(Serialize, RustSignal)]
+#[derive(Serialize, RustSignal, SignalPiece)]
 pub struct SessionStatus {
     pub session_id: u32,
     pub state: SessionState,
@@ -256,7 +364,7 @@ pub struct SessionStatus {
 
 /// 一帧终端画面。二进制部分是 [`crate::frame_codec::pack_runs`] 的产物，
 /// 走 `RustSignalBinary` 的原始字节通道（PLAN.md §4.3 的落地方案）。
-#[derive(Serialize, RustSignalBinary)]
+#[derive(Serialize, RustSignalBinary, SignalPiece)]
 pub struct FrameUpdate {
     pub session_id: u32,
     /// 终端尺寸（屏幕的列数与行数）；帧里的行数可以不同（滚回窗口）。
@@ -286,7 +394,7 @@ pub struct FrameUpdate {
 ///
 /// Dart 用它给耳朵/气泡定位。`anchor`/`focus` **保留 Dart 传入时的角色、不排序**
 /// ——拖耳朵越过对端时角色才不会乱（引擎自己渲染/取文时才排序）。
-#[derive(Serialize, RustSignal)]
+#[derive(Serialize, RustSignal, SignalPiece)]
 pub struct SelectionState {
     pub session_id: u32,
     pub has_selection: bool,
@@ -354,6 +462,87 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::InputRequest;
     use rinf::DartSignal;
+
+    #[tokio::test]
+    async fn legacy_connect_and_desktop_v1_keep_their_original_wire_order_and_result_indices() {
+        use super::{
+            ConnectRequest, DESKTOP_CONNECT_VERSION, DesktopConnectError, DesktopConnectRequest,
+            DesktopConnectResult,
+        };
+        assert_eq!(DESKTOP_CONNECT_VERSION, 1);
+        let mobile = ConnectRequest::get_dart_signal_receiver();
+        let golden = rinf::serialize(&(
+            7u32,
+            "",
+            "example.test",
+            22u16,
+            "fixture",
+            "",
+            "",
+            80u16,
+            24u16,
+            640u32,
+            480u32,
+            96u32,
+        ))
+        .expect("移动旧布局");
+        ConnectRequest::send_dart_signal(&golden, &[]);
+        let r = mobile.recv().await.expect("旧解码").message;
+        assert_eq!(
+            (
+                r.session_id,
+                r.host.as_str(),
+                r.cols,
+                r.rows,
+                r.pixel_width,
+                r.pixel_height,
+                r.dpi
+            ),
+            (7, "example.test", 80, 24, 640, 480, 96)
+        );
+        let desktop = DesktopConnectRequest::get_dart_signal_receiver();
+        let golden = rinf::serialize(&(
+            1u16,
+            9u32,
+            8u32,
+            0u32,
+            "",
+            "",
+            "example.test",
+            22u16,
+            "fixture",
+            "",
+            "",
+            81u16,
+            25u16,
+            648u32,
+            500u32,
+            144u32,
+        ))
+        .expect("V1旧布局及Native枚举索引");
+        DesktopConnectRequest::send_dart_signal(&golden, &[]);
+        let r = desktop.recv().await.expect("V1解码").message;
+        assert_eq!(
+            (r.version, r.request_id, r.session_id, r.cols, r.rows, r.dpi),
+            (1, 9, 8, 81, 25, 144)
+        );
+        assert_eq!(r.target, super::DesktopTargetKind::NativeSsh);
+        for (error, index) in [
+            (DesktopConnectError::Accepted, 0u32),
+            (DesktopConnectError::Storage, 9u32),
+        ] {
+            assert_eq!(
+                rinf::serialize(&DesktopConnectResult {
+                    request_id: 9,
+                    session_id: 8,
+                    error,
+                    detail: "field".into()
+                })
+                .expect("V1结果"),
+                rinf::serialize(&(9u32, 8u32, index, "field")).expect("旧结果索引")
+            );
+        }
+    }
 
     #[tokio::test]
     async fn keys_text_and_paste_use_one_fifo_signal_queue() {
