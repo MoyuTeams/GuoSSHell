@@ -25,7 +25,7 @@ for candidate in "$(command -v rustup 2>/dev/null || true)" "${HOME}/.cargo/bin/
 done
 
 echo "== 1/3 检查 git 依赖 =="
-grep -qE 'git = "https://github.com/[^"]+/rsHell", rev = "[0-9a-f]{40}"' "${RUST}/Cargo.toml" \
+grep -qE 'git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "[0-9a-f]{40}"' "${RUST}/Cargo.toml" \
   || { echo "error: rust/Cargo.toml 里找不到 pin 住的上游 git 依赖" >&2; exit 1; }
 if [ -n "${CARGO}" ] && [ -f "${PROJECT}/Cargo.lock" ]; then
   # 锁文件只有 workspace 根这一个。离线也要能过；拉不到只是提示，不算失败。
