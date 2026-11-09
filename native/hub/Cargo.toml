@@ -128,8 +128,8 @@ rshell-m0 = { path = "../../rust" }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 allo-isolate = "=0.1.27"
-portable-pty = { package = "portable-pty-psmux", version = "=0.9.6", git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "2df00c953607ef0c5b9d47fc40a61003718e74ed" }
-rshell-platform = { version = "=0.1.0", git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "2df00c953607ef0c5b9d47fc40a61003718e74ed" }
+portable-pty = { package = "portable-pty-psmux", version = "=0.9.6", git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "48725cab054c808a2fd7ff7db0d1392ec0b1d4a0" }
+rshell-platform = { version = "=0.1.0", git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "48725cab054c808a2fd7ff7db0d1392ec0b1d4a0" }
 
 # 私钥存在 Apple 的 protected data 钥匙串（本机与 iCloud 两个存储，keys.rs）；
 # 版本与 keyring 4.1.5 用的一致（rust/Cargo.toml）。

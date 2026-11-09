@@ -15,18 +15,18 @@ GuoSSHell 使用团队维护的 rsHell-corelibs，通过 git 依赖固定到精�
 | 项 | 值 |
 |---|---|
 | 依赖仓库 | https://github.com/MoyuTeams/rsHell-corelibs ，分支 `master` |
-| 固定提交 | `2df00c953607ef0c5b9d47fc40a61003718e74ed` |
+| 固定提交 | `48725cab054c808a2fd7ff7db0d1392ec0b1d4a0` |
 | 许可证 | MIT，Copyright (c) 2026 hugefiver（副本见 `rust/LICENSES/rsHell-MIT.txt`） |
 
 ```toml
-rshell-core = { git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "2df00c953607ef0c5b9d47fc40a61003718e74ed" }
-rshell-session = { git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "2df00c953607ef0c5b9d47fc40a61003718e74ed" }
-rshell-storage = { git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "2df00c953607ef0c5b9d47fc40a61003718e74ed" }
+rshell-core = { git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "48725cab054c808a2fd7ff7db0d1392ec0b1d4a0" }
+rshell-session = { git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "48725cab054c808a2fd7ff7db0d1392ec0b1d4a0" }
+rshell-storage = { git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "48725cab054c808a2fd7ff7db0d1392ec0b1d4a0" }
 ```
 
 桌面宿主直接使用 `portable-pty-psmux =0.9.6`（依赖别名 `portable-pty`）和
 `rshell-platform =0.1.0` 的原生 PTY、进程句柄及进程树接口，两者也精确固定到
-`2df00c953607ef0c5b9d47fc40a61003718e74ed`。这些接缝用于应用侧分离阻塞
+`48725cab054c808a2fd7ff7db0d1392ec0b1d4a0`。这些接缝用于应用侧分离阻塞
 I/O 和取消所有权，不包含第三方源码副本或仓内 path 覆盖。
 
 固定提交提供以下两项 GuoSSHell 依赖的补丁。其一是 `rshell-session` 的本地 PTY 输入：`LocalPtyTransport`
