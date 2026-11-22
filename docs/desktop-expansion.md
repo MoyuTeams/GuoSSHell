@@ -76,7 +76,7 @@ Profile 参数（终端参数/协议/绑定/滚回）在新会话或显式重启
 
 侧栏、欢迎页与 Ctrl+Shift+L（终端持焦也可用）打开本地终端标签，使用默认 profile 与平台默认 shell，工作目录为用户主目录。Windows 的选择顺序为 `RSHELL_SHELL`、`pwsh`、`powershell`、`COMSPEC`。退出码 0 关闭窗格；非 0 显示退出码并可重新启动。
 
-实现复用上游 rsHell 的 `LocalPtyTransport`。团队 fork `MoyuTeams/rsHell` 为本地 PTY 写入提供专用写线程与有界队列；Unix 上以非阻塞描述符与唤醒管道保证关闭时回收写线程，已在 Linux 环境实测。
+实现复用上游 rsHell 的 `LocalPtyTransport`。团队核心库 `MoyuTeams/rsHell-corelibs` 为本地 PTY 写入提供专用写线程与有界队列；Unix 上以非阻塞描述符与唤醒管道保证关闭时回收写线程。
 
 ### 阶段七：System OpenSSH
 

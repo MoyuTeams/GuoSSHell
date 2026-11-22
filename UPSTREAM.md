@@ -4,9 +4,9 @@
 每个 fork 或 git 固定的上游依赖在此记一节；直接使用 crates.io／pub.dev
 发布版且未修改的依赖不单独记录。
 
-## rsHell（Rust 内核，团队 fork）
+## rsHell-corelibs（Rust 核心库，团队仓库）
 
-GuoSSHell 使用 rsHell 的团队 fork，通过 git 依赖固定到精确提交。
+GuoSSHell 使用团队维护的 rsHell-corelibs，通过 git 依赖固定到精确提交。
 `native/hub` 经 `rshell-m0` 的再导出使用核心配置与会话类型，声明位于
 `rust/Cargo.toml`；桌面 PTY／进程平台的应用侧接缝在 `native/hub/Cargo.toml`
 直接声明同一提交的依赖。解析结果统一记录在根 `Cargo.lock`，全部 rsHell 包只有
@@ -14,25 +14,22 @@ GuoSSHell 使用 rsHell 的团队 fork，通过 git 依赖固定到精确提交�
 
 | 项 | 值 |
 |---|---|
-| 上游仓库 | https://github.com/hugefiver/rsHell |
-| fork | https://github.com/MoyuTeams/rsHell ，分支 `feat/local-pty-writer` |
-| 固定提交 | `991ca32f7219c7506a1d8183c5e6dc69a1589b87` |
-| 上游基线 | `08d8df5ab975c75b5a9772a4e52fd79695ca9d11`（上游分支 `feat/desktop-config-transactions`） |
-| 认证与终端接口合并提交 | `d71e81c5b7e786d3981e12d6a24a296ff74d3dae`（上游 PR #1） |
+| 依赖仓库 | https://github.com/MoyuTeams/rsHell-corelibs ，分支 `master` |
+| 固定提交 | `48725cab054c808a2fd7ff7db0d1392ec0b1d4a0` |
 | 许可证 | MIT，Copyright (c) 2026 hugefiver（副本见 `rust/LICENSES/rsHell-MIT.txt`） |
 
 ```toml
-rshell-core = { git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
-rshell-session = { git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
-rshell-storage = { git = "https://github.com/MoyuTeams/rsHell", rev = "991ca32f7219c7506a1d8183c5e6dc69a1589b87" }
+rshell-core = { git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "48725cab054c808a2fd7ff7db0d1392ec0b1d4a0" }
+rshell-session = { git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "48725cab054c808a2fd7ff7db0d1392ec0b1d4a0" }
+rshell-storage = { git = "https://github.com/MoyuTeams/rsHell-corelibs", rev = "48725cab054c808a2fd7ff7db0d1392ec0b1d4a0" }
 ```
 
 桌面宿主直接使用 `portable-pty-psmux =0.9.6`（依赖别名 `portable-pty`）和
 `rshell-platform =0.1.0` 的原生 PTY、进程句柄及进程树接口，两者也精确固定到
-`991ca32f7219c7506a1d8183c5e6dc69a1589b87`。这些接缝用于应用侧分离阻塞
+`48725cab054c808a2fd7ff7db0d1392ec0b1d4a0`。这些接缝用于应用侧分离阻塞
 I/O 和取消所有权，不包含第三方源码副本或仓内 path 覆盖。
 
-fork 相对上游基线有两处改动。其一是 `rshell-session` 的本地 PTY 输入：`LocalPtyTransport`
+固定提交提供以下两项 GuoSSHell 依赖的补丁。其一是 `rshell-session` 的本地 PTY 输入：`LocalPtyTransport`
 的写入交给专用写线程，经 4 MiB 有界队列按块入队；队列满时 `write` 异步等待且
 可取消，已入队的块按序写出，关闭时丢弃未写出的部分并保持原有关闭时限。Unix
 上 PTY master 为非阻塞描述符，读写线程等待可读/可写（Linux 用 poll，macOS 用
@@ -69,8 +66,8 @@ fish/zsh 自动建议）在应用侧无从区分，无法在外部补出。
 | 应用元数据 | `TerminalSettingsV1.extensions` 与解析结果按命名空间透传 JSON 数据，旧配置缺省为空且序列化省略；存储沿用完整配置 CAS | 解释字体绑定版本、保护未知载荷，并将绑定与配置档一起原子保存 |
 | 阶段化按键 | 独立 `TerminalKeyEvent` 与 `TerminalEngine::encode_key_event` 按真实 Kitty flags 编码逻辑键、Repeat、Release 和 Super；旧输入与默认实现保持兼容 | 提供可靠的布局未移位键、旧适配码与事件阶段；文本和 IME 使用独立提交路径 |
 
-认证与终端接口已在上游合并提交中提供；配置事务与可选元数据接口固定到上游功能分支。
-该分支扩展 `rshell-storage`：生产配置快照、SQLite 持久版本、原子条件提交、
+认证、终端、配置事务与可选元数据接口均由固定的核心库提交提供。
+`rshell-storage` 支持生产配置快照、SQLite 持久版本、原子条件提交、
 配置档删除及引用保护，并让旧保存入口更新版本。此扩展属于理由③：应用无法
 通过原有独立保存 API，把设置、配置档和版本检查放进存储 worker 的同一事务，
 也无法通过仅供测试的删除入口提供生产删除；应用侧补偿不能保证崩溃安全。
@@ -86,9 +83,9 @@ fish/zsh 自动建议）在应用侧无从区分，无法在外部补出。
 该提交还包含桌面只读 selected helper、受限私有流协议和资源审计检查点。
 正常 Native 依赖固定到连续压缩包完整解压的 russh 修正；既有异步签名和传输接口
 提供语义化结果使用提示，公开签名与执行行为不变。
-helper 不改变存储公开 API、schema、认证或 trust；正常 V2 Prepare/Start 的生产
-接线及应用生命周期验收尚未完成，仍保持默认关闭。全量 P1 证书延后，
-不作为本分支正常功能交付前件。
+helper 不改变存储公开 API、schema、认证或 trust；GuoSSHell 的正常 V2 Prepare/Start
+生产接线及应用生命周期验收尚未完成，应用仍保持默认关闭。全量 P1 证书
+不作为 GuoSSHell 当前正常功能交付前件。
 主机密钥文件中命中的哈希或通配条目若无法安全隔离端点，上游会拒绝替换并保留原文件；
 GuoSSHell 自动保存的记录使用精确端点。
 

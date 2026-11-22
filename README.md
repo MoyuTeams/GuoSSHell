@@ -142,7 +142,7 @@ GuoSSHell 以 [MIT 许可](LICENSE) 发布。
 桌面 UI 使用 [`fluent_ui` 4.16.1](https://pub.dev/packages/fluent_ui/versions/4.16.1)
 （BSD-3-Clause）；Dart 依赖许可由 Flutter 许可注册表收集，发行界面需提供查看入口。
 
-Rust 内核使用团队 fork `MoyuTeams/rsHell`（基于 `hugefiver/rsHell`，MIT），
+Rust 内核使用团队内核库 `MoyuTeams/rsHell-corelibs`（源自 `hugefiver/rsHell`，MIT），
 以 git 依赖固定到精确提交。固定提交、fork 改动、所需接口扩展与平台依赖边界统一见
 [`UPSTREAM.md`](UPSTREAM.md)。
 
